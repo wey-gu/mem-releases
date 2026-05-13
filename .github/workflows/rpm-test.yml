@@ -1,0 +1,104 @@
+# Disposable RPM-only test workflow.
+#
+# Iterates on the Linux RPM build in isolation (no macOS/Windows minutes)
+# while we validate the path. Triggers on tag push matching `v*-rpmtest*`
+# (e.g. `v0.8.4-rpmtest1`) — never on real releases or `-ci*` tags.
+#
+# Source code is fetched from the private nowledge-co/mem repo via PAT.
+#
+# DELETE THIS FILE once the RPM build path is validated end-to-end. It
+# exists only to iterate on the RPM job; the canonical job lives in
+# release-desktop.yml.
+
+name: rpm-test
+
+on:
+  push:
+    tags:
+      - "v*-rpmtest*"
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Source tag/branch in nowledge-co/mem to build (e.g. dev_0804_post or v0.8.4-rpmtest1)"
+        required: true
+        type: string
+
+concurrency:
+  group: rpm-test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-rpm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    container:
+      image: fedora:40
+    env:
+      SOURCE_REF: ${{ inputs.source_ref || github.ref_name }}
+    steps:
+      - name: Install system deps (Fedora)
+        run: |
+          dnf install -y \
+            webkit2gtk4.1-devel gtk3-devel librsvg2-devel \
+            libappindicator-gtk3-devel openssl-devel rpm-build \
+            zstd nodejs npm git file findutils which \
+            gcc gcc-c++ make patchelf curl wget tar
+
+      - name: Checkout private source (nowledge-co/mem)
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ env.SOURCE_REF }}
+          submodules: false
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: nowledge-graph/src-tauri
+          key: linux-rpm-fedora40
+
+      - name: Install npm deps
+        working-directory: nowledge-graph
+        run: npm ci --no-audit --no-fund
+
+      - name: Download Python standalone (Linux x86_64)
+        working-directory: nowledge-graph
+        run: |
+          rm -rf python-standalone
+          ./scripts/download-python-standalone.sh
+
+      - name: Build Python bundle (PyArmor)
+        working-directory: nowledge-graph
+        run: ./scripts/build-python-bundle.sh --pyarmor
+
+      - name: Build native .rpm (Tauri rpmbuild)
+        working-directory: nowledge-graph
+        run: npm run tauri build -- --bundles rpm
+
+      - name: Locate + inspect .rpm
+        id: locate
+        working-directory: nowledge-graph
+        run: |
+          set -euo pipefail
+          RPM="$(find src-tauri/target/release/bundle/rpm -name '*.rpm' -print -quit)"
+          [[ -f "$RPM" ]] || { echo "::error::No .rpm produced"; exit 1; }
+          ls -lh "$RPM"
+          rpm -qip "$RPM" || true
+          # Absolute path so upload-artifact (root cwd) can find it.
+          ABS="$(pwd)/$RPM"
+          echo "rpm=$ABS" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-rpm-test
+          path: ${{ steps.locate.outputs.rpm }}
+          if-no-files-found: error
+          retention-days: 3

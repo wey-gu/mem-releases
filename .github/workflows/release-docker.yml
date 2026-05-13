@@ -1,0 +1,276 @@
+# Build, sign, and publish the official headless Docker image.
+#
+# Source code is fetched at build time from the private source repo via
+# MEM_REPO_TOKEN (fine-grained PAT, Contents: Read only).
+#
+# Trigger: manual (workflow_dispatch) or pushing a tag matching `v*` on
+# THIS repo. Tags suffixed with `-ci*` / `-rpmtest*` are excluded so the
+# desktop iteration workflows don't double-spend on docker builds.
+#
+# Per-arch builds run on native runners (no QEMU emulation):
+#   linux/amd64 → ubuntu-latest
+#   linux/arm64 → ubuntu-24.04-arm
+# Each emits a digest; a third job merges them into one multi-arch manifest,
+# cosign-signs the manifest by digest, and verifies via a smoke-test pull.
+
+name: release-docker
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Source tag to build (e.g. 0.8.4 or 0.8.4-rc2). Must match pyproject.toml base version on the source ref."
+        required: true
+        type: string
+      latest:
+        description: "Also push :latest"
+        required: false
+        type: boolean
+        default: true
+  push:
+    tags:
+      - "v*"
+      - "!v*-ci*"
+      - "!v*-rpmtest*"
+
+concurrency:
+  group: release-docker-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write   # required by cosign keyless OIDC signing
+  packages: read
+
+env:
+  IMAGE: docker.io/nowledgelabs/mem
+  REGISTRY_CACHE_REPO: docker.io/nowledgelabs/mem-buildcache
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      source_ref: ${{ steps.v.outputs.source_ref }}
+      push_latest: ${{ steps.v.outputs.push_latest }}
+    steps:
+      - id: v
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.tag }}"
+            SOURCE_REF="v${VERSION}"
+            PUSH_LATEST="${{ inputs.latest }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+            SOURCE_REF="$GITHUB_REF_NAME"
+            PUSH_LATEST="true"
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]]; then
+            echo "Refusing to publish: version '$VERSION' is not semver-ish." >&2
+            exit 1
+          fi
+          # Pre-release tags must NOT mark :latest.
+          if [[ "$VERSION" == *-* || "$VERSION" == *.dev* ]]; then
+            PUSH_LATEST="false"
+          fi
+          echo "version=$VERSION"        >> "$GITHUB_OUTPUT"
+          echo "source_ref=$SOURCE_REF"  >> "$GITHUB_OUTPUT"
+          echo "push_latest=$PUSH_LATEST" >> "$GITHUB_OUTPUT"
+
+  build-amd64:
+    needs: meta
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ needs.meta.outputs.source_ref }}
+          submodules: false
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: nowledge-graph/docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:amd64
+          cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:amd64,mode=max
+
+  build-arm64:
+    needs: meta
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ needs.meta.outputs.source_ref }}
+          submodules: false
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: nowledge-graph/docker/Dockerfile
+          platforms: linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:arm64
+          cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:arm64,mode=max
+
+  publish:
+    needs: [meta, build-amd64, build-arm64]
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.manifest.outputs.digest }}
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: tags
+        run: |
+          set -euo pipefail
+          V="${{ needs.meta.outputs.version }}"
+          MINOR="${V%.*}"
+          {
+            echo "primary=${IMAGE}:${V}"
+            echo "minor=${IMAGE}:${MINOR}"
+            if [[ "${{ needs.meta.outputs.push_latest }}" == "true" ]]; then
+              echo "latest=${IMAGE}:latest"
+            else
+              echo "latest="
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+      - id: manifest
+        run: |
+          set -euo pipefail
+          AMD="${IMAGE}@${{ needs.build-amd64.outputs.digest }}"
+          ARM="${IMAGE}@${{ needs.build-arm64.outputs.digest }}"
+          declare -a TAGS=(
+            "${{ steps.tags.outputs.primary }}"
+            "${{ steps.tags.outputs.minor }}"
+          )
+          if [[ -n "${{ steps.tags.outputs.latest }}" ]]; then
+            TAGS+=( "${{ steps.tags.outputs.latest }}" )
+          fi
+          docker buildx imagetools create \
+            $(for t in "${TAGS[@]}"; do echo -n " -t $t"; done) \
+            "$AMD" "$ARM"
+          DIGEST=$(docker buildx imagetools inspect "${{ steps.tags.outputs.primary }}" --format '{{json .Manifest}}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["digest"])')
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Published manifest digest: $DIGEST"
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign manifest (keyless via OIDC)
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+  verify:
+    needs: [meta, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Pull and smoke-test
+        env:
+          TAG: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE}:${TAG}"
+          CID=$(docker run -d -p 14242:14242 "${IMAGE}:${TAG}")
+          trap "docker logs $CID || true; docker rm -f $CID || true" EXIT
+
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:14242/livez >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:14242/livez
+
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:14242/health >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          HEALTH=$(curl -fsS http://127.0.0.1:14242/health)
+          echo "$HEALTH"
+          echo "$HEALTH" | TAG="$TAG" python3 -c '
+          import json, os, re, sys
+          d = json.load(sys.stdin)
+          v = d.get("version") or ""
+          t = os.environ["TAG"]
+          if t == v or re.match(rf"^{re.escape(v)}[.\-]", t):
+              print(f"version OK: binary={v} tag={t}")
+          else:
+              raise AssertionError(f"version mismatch: binary={v} tag={t}")
+          '
+
+      - uses: sigstore/cosign-installer@v3
+      - name: Verify cosign signature
+        env:
+          TAG: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          cosign verify "${IMAGE}:${TAG}" \
+            --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/release-docker.yml@.*" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            | head -50
+
+  scan:
+    needs: [meta, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ needs.meta.outputs.version }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"
