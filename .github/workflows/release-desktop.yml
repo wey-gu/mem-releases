@@ -759,6 +759,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Resolve to ABSOLUTE paths. Subsequent steps that consume these
+          # outputs run with `working-directory: mem-backbone`, so relative
+          # `artifacts/...` paths would resolve to `mem-backbone/artifacts/`
+          # which doesn't exist. Seen on the 0.8.4 publish run as
+          # "Package file not found: artifacts/macos-arm64/Nowledge Mem_...".
+          ROOT="$PWD"
           DMG_ARM="$(find artifacts/macos-arm64 -name '*.dmg' -print -quit)"
           DMG_X64="$(find artifacts/macos-x86_64 -name '*.dmg' -print -quit)"
           EXE_WIN="$(find artifacts/windows-x86_64 -name '*.exe' -print -quit)"
@@ -769,12 +775,12 @@ jobs:
             [[ -f "$v" ]] || { echo "::error::Missing artifact: $v"; exit 1; }
           done
           {
-            echo "dmg_arm=$DMG_ARM"
-            echo "dmg_x64=$DMG_X64"
-            echo "exe_win=$EXE_WIN"
-            echo "deb=$DEB"
-            echo "appimg=$APPIMG"
-            echo "rpm=$RPM"
+            echo "dmg_arm=${ROOT}/${DMG_ARM}"
+            echo "dmg_x64=${ROOT}/${DMG_X64}"
+            echo "exe_win=${ROOT}/${EXE_WIN}"
+            echo "deb=${ROOT}/${DEB}"
+            echo "appimg=${ROOT}/${APPIMG}"
+            echo "rpm=${ROOT}/${RPM}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Upload to Cloudflare R2
