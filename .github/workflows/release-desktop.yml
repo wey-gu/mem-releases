@@ -537,6 +537,99 @@ jobs:
           retention-days: 7
 
   # -----------------------------------------------------------------------
+  # Pre-release upload: for rc/ci/beta tags, create a draft pre-release GH
+  # Release on this repo with all build artifacts attached. The R2 CDN,
+  # APT repo, and auto-updater feed are NOT touched — pre-release bundles
+  # are only meant for internal testing + as the source for
+  # promote-rc-to-ga.yml.
+  #
+  # Without this job, rc bundles only exist as ephemeral workflow artifacts
+  # (90-day retention), which the promote workflow cannot reliably consume
+  # and external testers cannot easily download.
+  # -----------------------------------------------------------------------
+  prerelease-upload:
+    needs:
+      - meta
+      - build-macos-arm64
+      - build-macos-x86_64
+      - build-windows
+      - build-linux-deb-appimage
+      - build-linux-rpm
+    if: needs.meta.outputs.is_dry_run == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Resolve artifact paths
+        id: paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          DMG_ARM="$(find artifacts/macos-arm64 -name '*.dmg' -print -quit)"
+          DMG_X64="$(find artifacts/macos-x86_64 -name '*.dmg' -print -quit)"
+          EXE_WIN="$(find artifacts/windows-x86_64 -name '*.exe' -print -quit)"
+          DEB="$(find artifacts/linux-deb-appimage -name '*.deb' -print -quit)"
+          APPIMG="$(find artifacts/linux-deb-appimage -name '*.AppImage' -print -quit)"
+          RPM="$(find artifacts/linux-rpm -name '*.rpm' -print -quit)"
+          for v in "$DMG_ARM" "$DMG_X64" "$EXE_WIN" "$DEB" "$APPIMG" "$RPM"; do
+            [[ -f "$v" ]] || { echo "::error::Missing artifact: $v"; exit 1; }
+          done
+          {
+            echo "dmg_arm=$DMG_ARM"
+            echo "dmg_x64=$DMG_X64"
+            echo "exe_win=$EXE_WIN"
+            echo "deb=$DEB"
+            echo "appimg=$APPIMG"
+            echo "rpm=$RPM"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create draft pre-release GH Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          # `--prerelease` keeps the auto-updater feed from surfacing this
+          # tag. `--draft` lets a maintainer review notes before publishing.
+          # `gh release create` is idempotent under the `view||create`
+          # pattern so a rerun reuses the existing release.
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
+            --title "Nowledge Mem ${VERSION} (pre-release)" \
+            --prerelease \
+            --draft \
+            --notes "Pre-release desktop bundles for ${VERSION}. Source: nowledge-co/mem @ ${SOURCE_REF}. Not promoted to :latest or APT. Consumed by promote-rc-to-ga.yml when this rc is ready for GA."
+          gh release upload "$TAG" --clobber \
+            "${{ steps.paths.outputs.dmg_arm }}" \
+            "${{ steps.paths.outputs.dmg_x64 }}" \
+            "${{ steps.paths.outputs.exe_win }}" \
+            "${{ steps.paths.outputs.deb }}" \
+            "${{ steps.paths.outputs.appimg }}" \
+            "${{ steps.paths.outputs.rpm }}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Pre-release ${VERSION} bundles uploaded"
+            echo "- GH release: v${VERSION} (draft, pre-release flagged)"
+            echo "- Source ref: ${SOURCE_REF}"
+            echo "- Distribution: GH Release only (R2/APT/auto-updater feed not touched)"
+            echo ""
+            echo "Promote to GA via:"
+            echo '```'
+            echo "gh workflow run promote-rc-to-ga.yml -R ${{ github.repository }} \\"
+            echo "  -f rc_tag=${VERSION} \\"
+            echo "  -f ga_tag=<x.y.z>"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # -----------------------------------------------------------------------
   # Publish: R2 + APT + GH Release on this (public) repo.
   # Gated behind `release-publish` environment for manual approval.
   # Three independent guards prevent accidental pre-release publication.
