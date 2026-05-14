@@ -1,0 +1,272 @@
+# Build, sign, and publish the auto-update sidecar image
+# (`docker.io/nowledgelabs/mem-updater`).
+#
+# Paired with `release-docker.yml` — fires on the SAME tag push so the
+# mem image and its updater sidecar move in lockstep. Operators bump
+# both with `./nmemctl auto-update upgrade` after a `./nmemctl upgrade`.
+#
+# Source is the PUBLIC `nowledge-co/community` repo (no MEM_REPO_TOKEN
+# needed). The image content is small: alpine + docker-cli + socat +
+# ~300 lines of shell. Trivy-clean by default; we still scan for new
+# CVEs in the alpine base.
+#
+# Per-arch builds on native runners (no QEMU). Multi-arch manifest +
+# cosign keyless signing identical to release-docker.yml.
+
+name: release-docker-updater
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Source tag to build (e.g. 0.8.4 or 0.8.4-rc2). Must exist as a tag on nowledge-co/community."
+        required: true
+        type: string
+      latest:
+        description: "Also push :latest"
+        required: false
+        type: boolean
+        default: true
+  push:
+    tags:
+      - "v*"
+      - "!v*-ci*"
+      - "!v*-rpmtest*"
+
+concurrency:
+  group: release-docker-updater-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write   # cosign keyless OIDC
+  packages: read
+
+env:
+  IMAGE: docker.io/nowledgelabs/mem-updater
+  REGISTRY_CACHE_REPO: docker.io/nowledgelabs/mem-updater-buildcache
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      source_ref: ${{ steps.v.outputs.source_ref }}
+      push_latest: ${{ steps.v.outputs.push_latest }}
+    steps:
+      - id: v
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.tag }}"
+            SOURCE_REF="v${VERSION}"
+            PUSH_LATEST="${{ inputs.latest }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+            SOURCE_REF="$GITHUB_REF_NAME"
+            PUSH_LATEST="true"
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]]; then
+            echo "Refusing to publish: version '$VERSION' is not semver-ish." >&2
+            exit 1
+          fi
+          if [[ "$VERSION" == *-* || "$VERSION" == *.dev* ]]; then
+            PUSH_LATEST="false"
+          fi
+          echo "version=$VERSION"        >> "$GITHUB_OUTPUT"
+          echo "source_ref=$SOURCE_REF"  >> "$GITHUB_OUTPUT"
+          echo "push_latest=$PUSH_LATEST" >> "$GITHUB_OUTPUT"
+
+  build-amd64:
+    needs: meta
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout community (public; no token needed)
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/community
+          ref: ${{ needs.meta.outputs.source_ref }}
+          submodules: false
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/updater
+          file: docker/updater/Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.source=https://github.com/nowledge-co/community
+            org.opencontainers.image.title=Nowledge Mem Updater
+            org.opencontainers.image.description=Auto-update sidecar for the headless Nowledge Mem deployment
+          cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:amd64
+          cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:amd64,mode=max
+
+  build-arm64:
+    needs: meta
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout community
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/community
+          ref: ${{ needs.meta.outputs.source_ref }}
+          submodules: false
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/updater
+          file: docker/updater/Dockerfile
+          platforms: linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.source=https://github.com/nowledge-co/community
+            org.opencontainers.image.title=Nowledge Mem Updater
+            org.opencontainers.image.description=Auto-update sidecar for the headless Nowledge Mem deployment
+          cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:arm64
+          cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:arm64,mode=max
+
+  publish:
+    needs: [meta, build-amd64, build-arm64]
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.manifest.outputs.digest }}
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: tags
+        run: |
+          set -euo pipefail
+          V="${{ needs.meta.outputs.version }}"
+          MINOR="${V%.*}"
+          {
+            echo "primary=${IMAGE}:${V}"
+            echo "minor=${IMAGE}:${MINOR}"
+            if [[ "${{ needs.meta.outputs.push_latest }}" == "true" ]]; then
+              echo "latest=${IMAGE}:latest"
+            else
+              echo "latest="
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+      - id: manifest
+        run: |
+          set -euo pipefail
+          AMD="${IMAGE}@${{ needs.build-amd64.outputs.digest }}"
+          ARM="${IMAGE}@${{ needs.build-arm64.outputs.digest }}"
+          declare -a TAGS=(
+            "${{ steps.tags.outputs.primary }}"
+            "${{ steps.tags.outputs.minor }}"
+          )
+          if [[ -n "${{ steps.tags.outputs.latest }}" ]]; then
+            TAGS+=( "${{ steps.tags.outputs.latest }}" )
+          fi
+          docker buildx imagetools create \
+            $(for t in "${TAGS[@]}"; do echo -n " -t $t"; done) \
+            "$AMD" "$ARM"
+          DIGEST=$(docker buildx imagetools inspect "${{ steps.tags.outputs.primary }}" --format '{{json .Manifest}}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["digest"])')
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Published manifest digest: $DIGEST"
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign manifest (keyless via OIDC)
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+  verify:
+    needs: [meta, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Pull and smoke-test (/healthz only — apply path needs a real mem container)
+        env:
+          TAG: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE}:${TAG}"
+          # Smoke-test: bring the sidecar up with a fake token and confirm
+          # /healthz returns 200. Full /apply paths require a real mem
+          # container + docker.sock + bind mounts; the operator runs that
+          # locally during ./nmemctl auto-update enable.
+          CID=$(docker run -d -p 18080:8080 \
+            -e NOWLEDGE_UPDATER_TOKEN=ci-smoketest \
+            -e NOWLEDGE_MEM_CONTAINER=nowledge-mem \
+            -e NOWLEDGE_MEM_IMAGE=docker.io/nowledgelabs/mem \
+            -e NOWLEDGE_PULL_INTERVAL_SECONDS=0 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            "${IMAGE}:${TAG}")
+          trap "docker logs $CID || true; docker rm -f $CID || true" EXIT
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          HEALTHZ=$(curl -fsS http://127.0.0.1:18080/healthz)
+          echo "$HEALTHZ"
+          echo "$HEALTHZ" | grep -q '"ok":true'
+
+      - uses: sigstore/cosign-installer@v3
+      - name: Verify cosign signature
+        env:
+          TAG: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          cosign verify "${IMAGE}:${TAG}" \
+            --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/release-docker-updater.yml@.*" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            | head -50
+
+  scan:
+    needs: [meta, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ needs.meta.outputs.version }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"   # Don't fail the workflow; surface for operator awareness.
