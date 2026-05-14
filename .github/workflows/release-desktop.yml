@@ -170,7 +170,34 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: nowledge-graph/src-tauri
-          key: macos-aarch64
+          # Bumped from `macos-aarch64` to invalidate the previously-
+          # poisoned cache. The old cache contained a `cargo` binary in
+          # ~/.cargo/bin/ that routed to `rustup-init`, breaking every
+          # run on this key with `cargo metadata: error: unexpected
+          # argument 'metadata' found`. macos-x86_64 wasn't affected —
+          # its cache key (macos-x86_64) was never poisoned.
+          key: macos-aarch64-v2
+          # CRITICAL: do NOT cache ~/.cargo/bin/. The bin dir is small
+          # (~50MB) and dtolnay/rust-toolchain rebuilds it fresh every
+          # run, so caching has no real upside and one bad save poisons
+          # every subsequent run on the same key.
+          cache-bin: false
+
+      # Defensive: force rustup proxy symlinks into a known state AFTER
+      # the cache restore (in case the bin cache somehow gets re-enabled
+      # or a future cache provider regression resurfaces the same shape).
+      # `rustup show` prints the resolved toolchain so the log is
+      # diagnosable if cargo ever resolves to the wrong binary again.
+      - name: Pin default toolchain + sanity check cargo
+        run: |
+          set -euo pipefail
+          rustup default stable
+          rustup show
+          echo "::group::cargo resolution"
+          which cargo
+          cargo --version
+          ls -la "$HOME/.cargo/bin/" | head -20
+          echo "::endgroup::"
 
       - name: Import code-signing certificate
         shell: bash
