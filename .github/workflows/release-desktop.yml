@@ -167,6 +167,18 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
+      # Defensive: on the macos-14 arm64 runner the rustup proxy ends up
+      # routing `cargo` to `rustup-init` when the toolchain target matches
+      # the host arch (seen 2026-05-14 — `cargo metadata` printed
+      # rustup-init's help text). `rustup default stable` + `rustup show`
+      # forces the proxy symlinks into a known state and prints the
+      # resolved toolchain so failures are diagnosable from the log.
+      - name: Pin default toolchain (workaround for macos-14 arm64 proxy)
+        run: |
+          set -euo pipefail
+          rustup default stable
+          rustup show
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: nowledge-graph/src-tauri
