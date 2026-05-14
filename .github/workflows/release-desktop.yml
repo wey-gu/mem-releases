@@ -807,17 +807,32 @@ jobs:
         # `wrangler` isn't a global binary on `ubuntu-22.04`, so we prepend
         # the local `node_modules/.bin` produced by the earlier `npm ci` to
         # PATH. If mem-backbone's package.json ever drops wrangler from
-        # deps, the fallback `npx --yes wrangler` keeps this resilient.
+        # deps, the fallback `npm install --no-save wrangler` keeps the
+        # step resilient.
+        env:
+          # The mem-backbone script accepts the wrangler env as a 2nd
+          # positional arg (see `scripts/update-latest-version.js`).
+          # `run_latest` is only true for clean-semver GA releases, so
+          # production is always the right choice here. To support a
+          # future staging path, plumb this through a workflow_dispatch
+          # input instead of hardcoding — for example:
+          #   inputs:
+          #     wrangler_env:
+          #       default: production
+          # …and then set WRANGLER_ENV: ${{ inputs.wrangler_env }}.
+          # CLOUDFLARE_API_TOKEN is already exposed at the job-level env
+          # block above; wrangler reads it directly.
+          WRANGLER_ENV: production
         run: |
           set -euo pipefail
           export PATH="$PWD/node_modules/.bin:$PATH"
           if ! command -v wrangler >/dev/null 2>&1; then
-            echo "::warning::wrangler not found in node_modules/.bin; installing via npx fallback"
+            echo "::warning::wrangler not found in node_modules/.bin; installing inline"
             npm install --no-save --no-audit --no-fund wrangler
             export PATH="$PWD/node_modules/.bin:$PATH"
           fi
           wrangler --version
-          node scripts/update-latest-version.js "$VERSION"
+          node scripts/update-latest-version.js "$VERSION" "$WRANGLER_ENV"
 
       - name: Verify download delivery (R2 + APT + Worker)
         working-directory: mem-backbone
