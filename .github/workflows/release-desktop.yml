@@ -802,7 +802,22 @@ jobs:
       - name: Mark as latest (auto-updater feed)
         if: ${{ needs.meta.outputs.run_latest == 'true' }}
         working-directory: mem-backbone
-        run: node scripts/update-latest-version.js "$VERSION"
+        # `update-latest-version.js` shells out to bare `wrangler deploy`
+        # for the Cloudflare Worker that serves the auto-updater feed.
+        # `wrangler` isn't a global binary on `ubuntu-22.04`, so we prepend
+        # the local `node_modules/.bin` produced by the earlier `npm ci` to
+        # PATH. If mem-backbone's package.json ever drops wrangler from
+        # deps, the fallback `npx --yes wrangler` keeps this resilient.
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/node_modules/.bin:$PATH"
+          if ! command -v wrangler >/dev/null 2>&1; then
+            echo "::warning::wrangler not found in node_modules/.bin; installing via npx fallback"
+            npm install --no-save --no-audit --no-fund wrangler
+            export PATH="$PWD/node_modules/.bin:$PATH"
+          fi
+          wrangler --version
+          node scripts/update-latest-version.js "$VERSION"
 
       - name: Verify download delivery (R2 + APT + Worker)
         working-directory: mem-backbone
