@@ -1,0 +1,378 @@
+# Promote a release candidate to GA without rebuilding.
+#
+# What this does
+# --------------
+# Given a tested RC (e.g. v0.8.4-rc7) on Docker Hub + the rc GH Release,
+# this workflow publishes the same exact bits under the GA tag
+# (e.g. v0.8.4) across every distribution surface, in lockstep:
+#
+#   Docker:
+#     - re-tags nowledgelabs/mem:<rc> → nowledgelabs/mem:<ga> (and :latest)
+#     - re-tags nowledgelabs/mem-updater:<rc> → mem-updater:<ga> (and :latest)
+#     The cosign signatures are bound to the manifest digest, so verification
+#     by `cosign verify nowledgelabs/mem:<ga>` continues to succeed — the
+#     signature was produced during the rc release-docker workflow run.
+#
+#   Desktop:
+#     - downloads .dmg/.exe/.deb/.AppImage/.rpm from the rc GH Release
+#     - renames RC suffix out of every filename (Nowledge Mem_0.8.4-rc7_… → _0.8.4_…)
+#     - uploads to Cloudflare R2 under the GA path (app/<ga>/)
+#     - updates the APT repo with the GA-named .deb
+#     - bumps the auto-updater feed to <ga>
+#     - creates a draft GH Release v<ga> with the renamed assets
+#
+# Why this exists
+# ---------------
+# A real safety-first release cuts an RC, smoke-tests it on the click rig,
+# and only then publishes GA. Without this workflow that final step requires
+# either a fresh CI rebuild (different image digests, lottery on transient
+# CI flakes) or hand-running buildx imagetools + a half-dozen R2/APT/GH
+# commands locally. Both are error-prone. This is the boring path.
+#
+# How to use
+# ----------
+#   1. Run the rc release workflow on the source tag (push v<x.y.z>-rcN on
+#      this repo, or manual dispatch). Validate the rc.
+#   2. Manual dispatch this workflow with:
+#        rc_tag = "0.8.4-rc7"   (no leading v)
+#        ga_tag = "0.8.4"
+#        push_latest = true
+#      Both docker and desktop promotion run in parallel.
+#   3. After it succeeds, the draft GH Release v<ga> on THIS repo holds the
+#      desktop bundles. Edit notes + publish manually.
+#
+# Notes
+# -----
+#   * push_latest=false is the right choice when promoting an out-of-band
+#     patch (e.g. 0.8.3.1 after 0.8.4 already shipped). It keeps :latest
+#     pointing at the most recent stable instead of regressing it.
+#   * The release-publish environment gate fires on the desktop job, not
+#     docker — same policy as release-desktop.yml.
+#   * Docs: docs/implementation/RC_TO_GA_PROMOTE_FLOW.md in the parent
+#     repo (private) explains the operator-visible sequence.
+
+name: promote-rc-to-ga
+
+on:
+  workflow_dispatch:
+    inputs:
+      rc_tag:
+        description: "RC version to promote (e.g. 0.8.4-rc7; no leading 'v')"
+        required: true
+        type: string
+      ga_tag:
+        description: "GA version to publish (e.g. 0.8.4; must be clean semver)"
+        required: true
+        type: string
+      promote_docker:
+        description: "Promote docker images (mem + mem-updater)"
+        type: boolean
+        default: true
+      promote_desktop:
+        description: "Promote desktop bundles (DMG/EXE/deb/AppImage/RPM)"
+        type: boolean
+        default: true
+      push_latest:
+        description: "Also move :latest tags and the auto-updater feed to GA"
+        type: boolean
+        default: true
+
+concurrency:
+  group: promote-${{ github.event.inputs.ga_tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: read
+  id-token: write   # reserved for future signed attestations
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      rc_tag: ${{ steps.v.outputs.rc_tag }}
+      ga_tag: ${{ steps.v.outputs.ga_tag }}
+    steps:
+      - id: v
+        run: |
+          set -euo pipefail
+          RC="${{ inputs.rc_tag }}"
+          GA="${{ inputs.ga_tag }}"
+          # GA must be a clean release version. We refuse to publish
+          # pre-release tags through this workflow — that's what the
+          # release-docker / release-desktop workflows are for.
+          if ! [[ "$GA" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::GA tag '$GA' must be clean semver (no -rc/-ci/-rpmtest suffix)."
+            exit 1
+          fi
+          if [[ "$RC" == "$GA" ]]; then
+            echo "::error::RC and GA tags are identical: '$RC'."
+            exit 1
+          fi
+          # The RC base (everything before the first '-') must match GA.
+          # Catches typos like rc_tag=0.8.4-rc7, ga_tag=0.8.5.
+          RC_BASE="${RC%%-*}"
+          if [[ "$RC_BASE" != "$GA" ]]; then
+            echo "::error::RC base '$RC_BASE' does not match GA '$GA'."
+            exit 1
+          fi
+          echo "rc_tag=$RC" >> "$GITHUB_OUTPUT"
+          echo "ga_tag=$GA" >> "$GITHUB_OUTPUT"
+
+  promote-docker:
+    needs: validate
+    if: ${{ inputs.promote_docker }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RC: ${{ needs.validate.outputs.rc_tag }}
+      GA: ${{ needs.validate.outputs.ga_tag }}
+      PUSH_LATEST: ${{ inputs.push_latest }}
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Verify RC manifests exist
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "docker.io/nowledgelabs/mem:${RC}" \
+            >/dev/null
+          docker buildx imagetools inspect "docker.io/nowledgelabs/mem-updater:${RC}" \
+            >/dev/null
+          echo "Both RC manifests present on Hub."
+
+      - name: Promote nowledgelabs/mem
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            -t "docker.io/nowledgelabs/mem:${GA}" \
+            "docker.io/nowledgelabs/mem:${RC}"
+          if [[ "${PUSH_LATEST}" == "true" ]]; then
+            docker buildx imagetools create \
+              -t "docker.io/nowledgelabs/mem:latest" \
+              "docker.io/nowledgelabs/mem:${RC}"
+          fi
+
+      - name: Promote nowledgelabs/mem-updater
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            -t "docker.io/nowledgelabs/mem-updater:${GA}" \
+            "docker.io/nowledgelabs/mem-updater:${RC}"
+          if [[ "${PUSH_LATEST}" == "true" ]]; then
+            docker buildx imagetools create \
+              -t "docker.io/nowledgelabs/mem-updater:latest" \
+              "docker.io/nowledgelabs/mem-updater:${RC}"
+          fi
+
+      - name: Verify GA manifests
+        run: |
+          set -euo pipefail
+          echo "::group::mem:${GA}"
+          docker buildx imagetools inspect "docker.io/nowledgelabs/mem:${GA}"
+          echo "::endgroup::"
+          echo "::group::mem-updater:${GA}"
+          docker buildx imagetools inspect "docker.io/nowledgelabs/mem-updater:${GA}"
+          echo "::endgroup::"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Docker promoted ${RC} → ${GA}"
+            echo "- mem:           docker.io/nowledgelabs/mem:${GA}"
+            echo "- mem-updater:   docker.io/nowledgelabs/mem-updater:${GA}"
+            echo "- :latest moved: ${PUSH_LATEST}"
+            echo ""
+            echo "Cosign signatures are inherited from the rc digest. Verify with:"
+            echo '```'
+            echo "cosign verify docker.io/nowledgelabs/mem:${GA} \\"
+            echo "  --certificate-identity-regexp 'https://github.com/wey-gu/mem-releases' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  promote-desktop:
+    needs: validate
+    if: ${{ inputs.promote_desktop }}
+    runs-on: ubuntu-22.04
+    environment: release-publish
+    env:
+      RC: ${{ needs.validate.outputs.rc_tag }}
+      GA: ${{ needs.validate.outputs.ga_tag }}
+      RUN_LATEST: ${{ inputs.push_latest }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+      GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+      GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+    steps:
+      - name: Clone mem-backbone (private)
+        env:
+          PAT: ${{ secrets.MEM_BACKBONE_PAT }}
+        run: |
+          set -euo pipefail
+          AUTH_B64="$(printf 'x-access-token:%s' "$PAT" | base64 | tr -d '\n')"
+          git -c "http.https://github.com/.extraheader=Authorization: Basic ${AUTH_B64}" \
+              clone --depth=1 https://github.com/nowledge-co/mem-backbone.git mem-backbone
+          git -C mem-backbone config --unset-all http.https://github.com/.extraheader || true
+
+      - name: Install apt deps for APT repo signing
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnupg dpkg-dev gzip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install mem-backbone npm deps
+        working-directory: mem-backbone
+        run: npm ci --no-audit --no-fund
+
+      - name: Import GPG signing key
+        run: |
+          set -euo pipefail
+          if [[ -z "$GPG_PRIVATE_KEY" ]]; then
+            echo "::warning::GPG_PRIVATE_KEY not set — APT repo update will be skipped."
+            exit 0
+          fi
+          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo "use-agent"              >> ~/.gnupg/gpg.conf
+          echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
+          echo "allow-loopback-pinentry">> ~/.gnupg/gpg-agent.conf
+          gpgconf --kill gpg-agent || true
+
+      - name: Download RC assets from this repo's GH Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p rc-artifacts
+          gh release download "v${RC}" --dir rc-artifacts \
+            --repo "${{ github.repository }}"
+          ls -lh rc-artifacts
+
+      - name: Rename RC suffix to GA in every artifact
+        id: rename
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd rc-artifacts
+          for f in *; do
+            new="${f//${RC}/${GA}}"
+            if [[ "$f" != "$new" ]]; then
+              mv -v -- "$f" "$new"
+            fi
+          done
+          ls -lh
+          # Resolve concrete paths for the publish steps. Globs are kept
+          # permissive because tauri/AppImage/rpm filenames vary subtly
+          # (architecture suffix, lowercased/uppercased package names).
+          DMG_ARM="$(find . -maxdepth 1 -type f -iname '*aarch64*.dmg' -print -quit)"
+          DMG_X64="$(find . -maxdepth 1 -type f \( -iname '*x86_64*.dmg' -o -iname '*x64*.dmg' \) -print -quit)"
+          EXE_WIN="$(find . -maxdepth 1 -type f -iname '*.exe' -print -quit)"
+          DEB="$(find . -maxdepth 1 -type f -iname '*.deb' -print -quit)"
+          APPIMG="$(find . -maxdepth 1 -type f -iname '*.AppImage' -print -quit)"
+          RPM="$(find . -maxdepth 1 -type f -iname '*.rpm' -print -quit)"
+          for kv in DMG_ARM:"$DMG_ARM" DMG_X64:"$DMG_X64" EXE_WIN:"$EXE_WIN" DEB:"$DEB" APPIMG:"$APPIMG" RPM:"$RPM"; do
+            name="${kv%%:*}"; val="${kv#*:}"
+            if [[ -z "$val" || ! -f "$val" ]]; then
+              echo "::error::Missing artifact after rename: $name"
+              exit 1
+            fi
+          done
+          {
+            echo "dmg_arm=$PWD/$DMG_ARM"
+            echo "dmg_x64=$PWD/$DMG_X64"
+            echo "exe_win=$PWD/$EXE_WIN"
+            echo "deb=$PWD/$DEB"
+            echo "appimg=$PWD/$APPIMG"
+            echo "rpm=$PWD/$RPM"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload to Cloudflare R2 (under app/${{ env.GA }}/)
+        working-directory: mem-backbone
+        run: |
+          set -euo pipefail
+          node scripts/upload-package.cjs "$GA" mac       "${{ steps.rename.outputs.dmg_arm }}"
+          node scripts/upload-package.cjs "$GA" mac-intel "${{ steps.rename.outputs.dmg_x64 }}"
+          node scripts/upload-package.cjs "$GA" win       "${{ steps.rename.outputs.exe_win }}"
+          node scripts/upload-package.cjs "$GA" linux     "${{ steps.rename.outputs.deb }}"
+          node scripts/upload-package.cjs "$GA" linux     "${{ steps.rename.outputs.appimg }}"
+          node scripts/upload-package.cjs "$GA" linux     "${{ steps.rename.outputs.rpm }}"
+
+      - name: Update APT repo
+        working-directory: mem-backbone
+        if: ${{ env.GPG_PRIVATE_KEY != '' }}
+        run: node scripts/update-apt-repo.cjs "$GA" "${{ steps.rename.outputs.deb }}"
+
+      - name: Mark as latest (auto-updater feed)
+        if: ${{ env.RUN_LATEST == 'true' }}
+        working-directory: mem-backbone
+        run: node scripts/update-latest-version.js "$GA"
+
+      - name: Verify download delivery (R2 + APT + Worker)
+        working-directory: mem-backbone
+        run: |
+          set -euo pipefail
+          scope='latest,latest-redirect,direct,update'
+          if [[ -n "${GPG_PRIVATE_KEY:-}" ]]; then
+            scope="${scope},apt"
+          fi
+          VERIFY_RELEASE_VERSION="$GA" VERIFY_SCOPE="$scope" \
+            node scripts/verify-download-delivery.mjs
+
+      - name: Create draft GA GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v${GA}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
+            --title "Nowledge Mem ${GA}" \
+            --draft \
+            --notes "Promoted from v${RC}. Same bits; the rc workflow's cosign signature carries over. Generated by promote-rc-to-ga."
+          gh release upload "$TAG" --clobber \
+            "${{ steps.rename.outputs.dmg_arm }}" \
+            "${{ steps.rename.outputs.dmg_x64 }}" \
+            "${{ steps.rename.outputs.exe_win }}" \
+            "${{ steps.rename.outputs.deb }}" \
+            "${{ steps.rename.outputs.appimg }}" \
+            "${{ steps.rename.outputs.rpm }}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Desktop promoted v${RC} → v${GA}"
+            echo "- R2 prefix:      app/${GA}/"
+            echo "- GH release tag: v${GA} (draft on ${{ github.repository }})"
+            echo "- Latest feed:    ${RUN_LATEST}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  recap:
+    needs: [validate, promote-docker, promote-desktop]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Overall status
+        run: |
+          {
+            echo "## Promote ${{ needs.validate.outputs.rc_tag }} → ${{ needs.validate.outputs.ga_tag }}"
+            echo "| job              | result                                   |"
+            echo "| ---------------- | ---------------------------------------- |"
+            echo "| validate         | ${{ needs.validate.result }}             |"
+            echo "| promote-docker   | ${{ needs.promote-docker.result }}       |"
+            echo "| promote-desktop  | ${{ needs.promote-desktop.result }}      |"
+          } >> "$GITHUB_STEP_SUMMARY"
