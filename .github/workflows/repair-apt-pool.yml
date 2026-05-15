@@ -146,8 +146,18 @@ jobs:
             | awk -F': ' '$1=="SHA256"{print $2}' \
             | head -1)
 
-          actual_size=$(curl -fsSI "$deb_url" -o /dev/null \
-            -w "%header{content-length}")
+          # Read content-length from the response headers WITHOUT relying on
+          # curl's `%header{...}` format (curl 7.84+ — ubuntu-22.04 ships
+          # 7.81, where that format silently produces empty string and the
+          # verify gives misleading "size mismatch" even when content was
+          # right). Use a portable header grep instead.
+          actual_size=$(curl -fsSI "$deb_url" \
+            | awk -F': ' 'tolower($1)=="content-length"{gsub("\r",""); print $2; exit}')
+          # Fail loudly if we still couldn't extract a number.
+          if ! [[ "$actual_size" =~ ^[0-9]+$ ]]; then
+            echo "::error::Could not read Content-Length from $deb_url (got: $actual_size)"
+            exit 1
+          fi
           actual_sha=$(curl -fsS "$deb_url" | shasum -a 256 | awk '{print $1}')
 
           echo "Expected: size=${expected_size} sha256=${expected_sha}"
@@ -155,7 +165,17 @@ jobs:
 
           if [[ "$expected_size" != "$actual_size" ]] || [[ "$expected_sha" != "$actual_sha" ]]; then
             echo "::error::apt/pool does NOT match Packages manifest after repair."
-            echo "::error::CDN edges may still be warming. Try a manual Cloudflare purge for: $deb_url"
+            echo "::error::Most likely cause: the CF cache purge inside update-apt-repo.cjs"
+            echo "::error::silently failed (look for 'Cache purge skipped/failed' upstream)."
+            echo "::error::Check that the CLOUDFLARE_API_TOKEN secret has 'Zone -> Cache Purge'"
+            echo "::error::permission for the nowledge.co zone. Then either re-dispatch this"
+            echo "::error::workflow, or purge manually from Cloudflare dashboard:"
+            echo "::error::  $deb_url"
+            echo "::error::  https://${host}/apt/dists/stable/main/binary-amd64/Packages"
+            echo "::error::  https://${host}/apt/dists/stable/main/binary-amd64/Packages.gz"
+            echo "::error::  https://${host}/apt/dists/stable/Release"
+            echo "::error::  https://${host}/apt/dists/stable/InRelease"
+            echo "::error::  https://${host}/apt/dists/stable/Release.gpg"
             exit 1
           fi
           echo "✅ apt/pool ${VERSION} matches Packages manifest."
