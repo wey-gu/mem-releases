@@ -1,0 +1,170 @@
+# One-shot repair workflow for the apt/pool .deb when it drifts out of
+# sync with the Packages manifest (size or hash mismatch).
+#
+# Trigger scenario (seen on 0.8.4): a publish job ran multiple times for
+# the same version, an intermediate run uploaded different .deb bytes to
+# the apt/pool/ R2 key, but the corresponding run that updated the
+# Packages manifest had different bytes. CDN edges + R2 + Packages end
+# up at three different states. `apt-get install` rejects the size
+# mismatch.
+#
+# This workflow takes a version, downloads the canonical .deb from the
+# `v<version>` GH Release on this repo (which is the authoritative
+# archive after every release), and re-runs mem-backbone's
+# update-apt-repo.cjs against it. That script re-uploads the .deb to
+# apt/pool, regenerates Packages/Release/InRelease, re-signs with GPG,
+# and purges Cloudflare cache for both pool + dists URLs. Verifying
+# step at the end refuses to declare success until the served .deb
+# matches the Packages manifest.
+#
+# Use this when:
+#   - `apt-get install nowledge-mem=<version>` fails with
+#     "File has unexpected size (X != Y)".
+#   - A canary smoke catches an apt/pool vs Packages mismatch.
+#
+# Don't use this to publish a new version — that's release-desktop.yml's
+# job. This only repairs a drift on an already-published version.
+
+name: repair-apt-pool
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Clean-semver version to repair (e.g. 0.8.4). The .deb is fetched from the v<version> GH Release on this repo."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    environment: release-publish
+    env:
+      VERSION: ${{ inputs.version }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+      GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+      GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+    steps:
+      - name: Validate version is clean semver
+        run: |
+          set -euo pipefail
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version '$VERSION' must be clean semver (no -rc suffix)."
+            exit 1
+          fi
+
+      - name: Clone mem-backbone (private, at main HEAD)
+        env:
+          PAT: ${{ secrets.MEM_BACKBONE_PAT }}
+        run: |
+          set -euo pipefail
+          AUTH_B64="$(printf 'x-access-token:%s' "$PAT" | base64 | tr -d '\n')"
+          git -c "http.https://github.com/.extraheader=Authorization: Basic ${AUTH_B64}" \
+              clone --depth=1 https://github.com/nowledge-co/mem-backbone.git mem-backbone
+          git -C mem-backbone config --unset-all http.https://github.com/.extraheader || true
+
+      - name: Install apt-repo system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnupg dpkg-dev gzip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install mem-backbone npm deps
+        working-directory: mem-backbone
+        run: npm ci --no-audit --no-fund
+
+      - name: Import GPG signing key
+        run: |
+          set -euo pipefail
+          if [[ -z "$GPG_PRIVATE_KEY" ]]; then
+            echo "::error::GPG_PRIVATE_KEY not set — can't re-sign InRelease."
+            exit 1
+          fi
+          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo "use-agent"               >> ~/.gnupg/gpg.conf
+          echo "pinentry-mode loopback"  >> ~/.gnupg/gpg.conf
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          gpgconf --kill gpg-agent || true
+
+      - name: Download canonical .deb from v<version> GH Release
+        id: fetch_deb
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p repair-artifacts
+          gh release download "v${VERSION}" -R "${{ github.repository }}" \
+            --pattern '*amd64.deb' -D repair-artifacts
+          DEB="$(find "$PWD/repair-artifacts" -name '*amd64.deb' -print -quit)"
+          if [[ -z "$DEB" || ! -f "$DEB" ]]; then
+            echo "::error::No amd64.deb attached to v${VERSION} release. Re-publish it via release-desktop publish job first."
+            exit 1
+          fi
+          echo "Fetched: $DEB"
+          ls -lh "$DEB"
+          shasum -a 256 "$DEB"
+          echo "deb=$DEB" >> "$GITHUB_OUTPUT"
+
+      - name: Re-publish .deb + regenerate Packages + purge CDN
+        working-directory: mem-backbone
+        run: |
+          set -euo pipefail
+          node scripts/update-apt-repo.cjs "$VERSION" "${{ steps.fetch_deb.outputs.deb }}"
+
+      - name: Verify apt/pool matches Packages manifest
+        run: |
+          set -euo pipefail
+          host="${CUSTOM_DOMAIN:-download-mem.nowledge.co}"
+          host="${host#https://}"; host="${host#http://}"; host="${host%/}"
+          deb_url="https://${host}/apt/pool/nowledge-mem_${VERSION}_amd64.deb"
+          packages_url="https://${host}/apt/dists/stable/main/binary-amd64/Packages"
+
+          # Give CDN a few seconds to settle after purge
+          sleep 15
+
+          expected_size=$(curl -fsS "$packages_url" \
+            | awk '/^Package: nowledge-mem$/,/^$/' \
+            | awk -F': ' '$1=="Size"{print $2}' \
+            | head -1)
+          expected_sha=$(curl -fsS "$packages_url" \
+            | awk '/^Package: nowledge-mem$/,/^$/' \
+            | awk -F': ' '$1=="SHA256"{print $2}' \
+            | head -1)
+
+          actual_size=$(curl -fsSI "$deb_url" -o /dev/null \
+            -w "%header{content-length}")
+          actual_sha=$(curl -fsS "$deb_url" | shasum -a 256 | awk '{print $1}')
+
+          echo "Expected: size=${expected_size} sha256=${expected_sha}"
+          echo "Actual:   size=${actual_size} sha256=${actual_sha}"
+
+          if [[ "$expected_size" != "$actual_size" ]] || [[ "$expected_sha" != "$actual_sha" ]]; then
+            echo "::error::apt/pool does NOT match Packages manifest after repair."
+            echo "::error::CDN edges may still be warming. Try a manual Cloudflare purge for: $deb_url"
+            exit 1
+          fi
+          echo "✅ apt/pool ${VERSION} matches Packages manifest."
+
+      - name: Summary
+        run: |
+          {
+            echo "### apt/pool repaired for ${VERSION}"
+            echo "- .deb URL:        https://${CUSTOM_DOMAIN:-download-mem.nowledge.co}/apt/pool/nowledge-mem_${VERSION}_amd64.deb"
+            echo "- Verified bytes:  match Packages manifest"
+            echo "- CDN edges:       purged for pool + dists URLs"
+          } >> "$GITHUB_STEP_SUMMARY"
