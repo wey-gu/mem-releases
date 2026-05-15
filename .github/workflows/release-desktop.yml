@@ -453,7 +453,14 @@ jobs:
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libssl-dev libgtk-3-dev \
             librsvg2-dev libayatana-appindicator3-dev libxdo-dev \
-            patchelf zstd build-essential curl wget file
+            patchelf zstd build-essential curl wget file \
+            libfuse2
+          # libfuse2: required to run `linuxdeploy-plugin-appimage`'s
+          # AppImage during Tauri's AppImage bundling step. ubuntu-22.04
+          # GH runner images used to ship libfuse2 pre-installed; the
+          # 2026-05-15 image rotation dropped it, breaking AppImage
+          # bundling with the cryptic `failed to run linuxdeploy`. See
+          # postmortem/2026-05-15-0.8.4-release-pipeline-cascade.md.
 
       - uses: actions/setup-node@v4
         with:
@@ -484,6 +491,14 @@ jobs:
 
       - name: Build .deb + .AppImage (Tauri native)
         working-directory: nowledge-graph
+        # APPIMAGE_EXTRACT_AND_RUN=1 is belt-and-suspenders next to the
+        # libfuse2 install above: it makes inner AppImages extract their
+        # squashfs and run from a temp dir instead of FUSE-mounting it.
+        # Either alone would fix the immediate breakage; both together
+        # survive future runner-image churn (libfuse2 removed AGAIN, or
+        # FUSE blocked by kernel module changes).
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: ./scripts/build-linux-packages.sh --deb --appimage
 
       - name: Locate artifacts
