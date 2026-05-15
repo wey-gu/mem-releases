@@ -794,6 +794,49 @@ jobs:
           node scripts/upload-package.cjs "$VERSION" linux     "${{ steps.paths.outputs.appimg }}"
           node scripts/upload-package.cjs "$VERSION" linux     "${{ steps.paths.outputs.rpm }}"
 
+      # Why this step exists: if the publish job runs more than once for
+      # the same version (e.g. a downstream step failed and we re-ran),
+      # the second upload overwrites R2 but CDN edges that cached the
+      # first upload keep serving the OLD bytes for the cache-control's
+      # max-age (1 year). Even the cache-control fix landing in
+      # mem-backbone (drop `immutable`) only makes new edges revalidate
+      # on ETag — already-warmed edges still hold their copy until they
+      # naturally evict. Purging eliminates that race entirely.
+      #
+      # Guarded behind both `CLOUDFLARE_ZONE_ID` and `CLOUDFLARE_API_TOKEN`
+      # being set so this is opt-in. CUSTOM_DOMAIN gives the host; default
+      # falls back to download-mem.nowledge.co.
+      - name: Purge Cloudflare edge cache for uploaded keys
+        if: ${{ env.CLOUDFLARE_ZONE_ID != '' && env.CLOUDFLARE_API_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          host="${CUSTOM_DOMAIN:-download-mem.nowledge.co}"
+          host="${host#https://}"
+          host="${host#http://}"
+          host="${host%/}"
+          urls=(
+            "https://${host}/app/${VERSION}/aarch64-apple-darwin.dmg"
+            "https://${host}/app/${VERSION}/x86_64-apple-darwin.dmg"
+            "https://${host}/app/${VERSION}/x86_64-pc-windows-msvc.exe"
+            "https://${host}/app/${VERSION}/x86_64-unknown-linux-gnu.deb"
+            "https://${host}/app/${VERSION}/x86_64-unknown-linux-gnu.AppImage"
+            "https://${host}/app/${VERSION}/x86_64-unknown-linux-gnu.rpm"
+          )
+          files_json=$(printf '"%s",' "${urls[@]}")
+          files_json="[${files_json%,}]"
+          echo "Purging ${#urls[@]} URLs on zone ${CLOUDFLARE_ZONE_ID:0:8}…"
+          response="$(curl -fsS -X POST \
+            "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/purge_cache" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "{\"files\":${files_json}}")"
+          echo "$response" | python3 -m json.tool
+          # purge_cache returns {"success":true,...} on success. Refuse to
+          # continue if it didn't, so the verify-download-delivery step
+          # downstream catches stale bytes loudly instead of after an
+          # ambiguous edge cache window.
+          echo "$response" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('success') else 1)"
+
       - name: Update APT repo
         working-directory: mem-backbone
         if: ${{ env.GPG_PRIVATE_KEY != '' }}
