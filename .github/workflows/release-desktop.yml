@@ -34,8 +34,21 @@ on:
         type: boolean
         default: false
   push:
+    # Auto-fire on RC-style tags ONLY (anything with a `-` suffix:
+    # `-rcN`, `-betaN`, `-ciN`). Clean-semver GA tags like `v0.8.4`
+    # must NOT auto-fire — they are created as a side-effect when a
+    # GH Release draft is published on this repo (the publish step
+    # creates the tag), which would otherwise kick off a redundant
+    # full rebuild + publish that overwrites R2/APT/auto-updater
+    # feed. Seen on 0.8.4: publishing the draft fired a runaway
+    # release-desktop that we had to cancel mid-build.
+    #
+    # GA path is now: cut RC tag(s) -> rc workflows run automatically
+    # -> smoke -> promote-rc-to-ga.yml on this repo creates the GA
+    # GH Release draft -> publish that draft (which DOES create the
+    # v<ga> git tag here, but the trigger no longer fires).
     tags:
-      - "v*"
+      - "v*-*"
       - "!v*-rpmtest*"
   repository_dispatch:
     types: [release]

@@ -28,8 +28,18 @@ on:
         type: boolean
         default: true
   push:
+    # Auto-fire on RC-style tags ONLY (anything with a `-` suffix:
+    # `-rcN`, `-betaN`, `-ciN`). Clean-semver GA tags like `v0.8.4`
+    # must NOT auto-fire — they are created as a side-effect when a
+    # GH Release draft is published on this repo, which would
+    # otherwise kick off a redundant full rebuild that overwrites the
+    # promoted manifest (seen on 0.8.4: publishing the draft re-built
+    # the docker image and clobbered the rc7-promoted digest). GA
+    # publishes go through `promote-rc-to-ga.yml` (manifest re-tag,
+    # no rebuild) or explicit `workflow_dispatch` when a real rebuild
+    # is wanted.
     tags:
-      - "v*"
+      - "v*-*"
       - "!v*-ci*"
       - "!v*-rpmtest*"
 
