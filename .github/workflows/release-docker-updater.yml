@@ -28,8 +28,14 @@ on:
         type: boolean
         default: true
   push:
+    # Auto-fire on RC-style tags ONLY (anything with a `-` suffix:
+    # `-rcN`, `-betaN`, `-ciN`). See release-docker.yml for the why:
+    # publishing a GH Release on this repo creates the GA git tag,
+    # which would otherwise kick off a redundant full rebuild and
+    # overwrite the promoted manifest. GA goes through
+    # `promote-rc-to-ga.yml` or explicit workflow_dispatch.
     tags:
-      - "v*"
+      - "v*-*"
       - "!v*-ci*"
       - "!v*-rpmtest*"
 
