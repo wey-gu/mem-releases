@@ -907,13 +907,51 @@ jobs:
 
       - name: Verify download delivery (R2 + APT + Worker)
         working-directory: mem-backbone
+        # The verify script is read-only and idempotent, but it probes
+        # objects that were uploaded to R2 only seconds earlier. The very
+        # first edge GET on a freshly-written object can return 200 instead
+        # of 206 for a `Range: bytes=0-0` request before Cloudflare settles
+        # range support (the HEAD already advertises accept-ranges: bytes —
+        # it's pure propagation timing, not a real defect). Seen as a
+        # false-negative on 0.8.8 and 0.9.0: every real step (R2 upload, APT,
+        # auto-updater feed flip) succeeded, then this step failed on the
+        # AppImage range probe; re-running minutes later passed unchanged.
+        #
+        # Rather than loosen the strict 206 assertion (the desktop
+        # auto-updater genuinely needs working range requests for resumable
+        # downloads), absorb the settle window here at the process level:
+        # a short pre-settle plus bounded retries. Backbone stays untouched.
         run: |
           set -euo pipefail
           scope='latest,latest-redirect,direct,update'
           if [[ -n "${GPG_PRIVATE_KEY:-}" ]]; then
             scope="${scope},apt"
           fi
-          VERIFY_RELEASE_VERSION="$VERSION" VERIFY_SCOPE="$scope" node scripts/verify-download-delivery.mjs
+
+          # Let the just-uploaded R2 objects propagate to the edge before the
+          # first probe. The largest artifact (AppImage) is the last to settle.
+          echo "Pre-settle 20s before first verify attempt…"
+          sleep 20
+
+          attempts=5
+          delay=15
+          for i in $(seq 1 "$attempts"); do
+            echo "::group::Verify download delivery (attempt $i/$attempts)"
+            if VERIFY_RELEASE_VERSION="$VERSION" VERIFY_SCOPE="$scope" \
+                 node scripts/verify-download-delivery.mjs; then
+              echo "::endgroup::"
+              echo "✅ Download delivery verified on attempt $i."
+              exit 0
+            fi
+            echo "::endgroup::"
+            if [[ "$i" -lt "$attempts" ]]; then
+              echo "::warning::Verify attempt $i/$attempts failed (likely edge propagation race); retrying in ${delay}s…"
+              sleep "$delay"
+            fi
+          done
+
+          echo "::error::Download delivery verification failed after $attempts attempts."
+          exit 1
 
       - name: Create GitHub release (draft, on this public repo)
         env:
