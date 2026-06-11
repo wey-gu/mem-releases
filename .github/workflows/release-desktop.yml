@@ -667,12 +667,13 @@ jobs:
           # tag. `--draft` lets a maintainer review notes before publishing.
           # `gh release create` is idempotent under the `view||create`
           # pattern so a rerun reuses the existing release.
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
+          REPO="${{ github.repository }}"
+          gh release view "$TAG" -R "$REPO" >/dev/null 2>&1 || gh release create "$TAG" -R "$REPO" \
             --title "Nowledge Mem ${VERSION} (pre-release)" \
             --prerelease \
             --draft \
             --notes "Pre-release desktop bundles for ${VERSION}. Source: nowledge-co/mem @ ${SOURCE_REF}. Not promoted to :latest or APT. Consumed by promote-rc-to-ga.yml when this rc is ready for GA."
-          gh release upload "$TAG" --clobber \
+          gh release upload "$TAG" -R "$REPO" --clobber \
             "${{ steps.paths.outputs.dmg_arm }}" \
             "${{ steps.paths.outputs.dmg_x64 }}" \
             "${{ steps.paths.outputs.exe_win }}" \
