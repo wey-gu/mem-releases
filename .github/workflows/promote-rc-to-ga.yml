@@ -321,7 +321,18 @@ jobs:
       - name: Mark as latest (auto-updater feed)
         if: ${{ env.RUN_LATEST == 'true' }}
         working-directory: mem-backbone
-        run: node scripts/update-latest-version.js "$GA"
+        env:
+          WRANGLER_ENV: production
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/node_modules/.bin:$PATH"
+          if ! command -v wrangler >/dev/null 2>&1; then
+            echo "::warning::wrangler not found in node_modules/.bin; installing inline"
+            npm install --no-save --no-audit --no-fund wrangler
+            export PATH="$PWD/node_modules/.bin:$PATH"
+          fi
+          wrangler --version
+          node scripts/update-latest-version.js "$GA" "$WRANGLER_ENV"
 
       - name: Verify download delivery (R2 + APT + Worker)
         working-directory: mem-backbone
