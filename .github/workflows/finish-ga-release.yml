@@ -124,7 +124,7 @@ jobs:
           for i in $(seq 1 "$attempts"); do
             echo "::group::Verify download delivery (attempt $i/$attempts)"
             if VERIFY_RELEASE_VERSION="$GA" VERIFY_SCOPE="latest,latest-redirect,direct,update,apt" \
-                 timeout 90s node scripts/verify-download-delivery.mjs; then
+                 timeout -k 10s 90s node scripts/verify-download-delivery.mjs; then
               echo "::endgroup::"
               echo "Download delivery verified on attempt $i."
               exit 0
