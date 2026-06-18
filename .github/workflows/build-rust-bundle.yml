@@ -1,0 +1,137 @@
+# Rust-backend bundle CI for Nowledge Mem (the Rust port, strangler Phase 1).
+#
+# WHAT THIS IS
+# ------------
+# Compiles the standalone `nmem-server` Rust backend and stages it into the
+# `rust-backend/` bundle dir via the in-repo script
+# `nowledge-graph/scripts/build-rust-bundle.sh` (the SCRIPT is the source of
+# truth and lives in the product repo; THIS workflow only invokes it, to use
+# this OSS repo's free CI minutes). Uploads the staged bundle as an artifact.
+#
+# ISOLATION (read before editing)
+# -------------------------------
+# - `workflow_dispatch` ONLY. No `push`, no tag trigger, no `repository_dispatch`.
+#   It can never auto-fire, so it cannot interfere with `release-desktop.yml`,
+#   the Python/production release path, or any GA promotion.
+# - Build + artifact ONLY. No signing, no notarisation, no R2/APT publish, no
+#   GitHub Release. Nothing here mutates a published artifact.
+# - Separate Rust cache keys (`rust-bundle-*`) so it never shares or poisons the
+#   `release-desktop.yml` caches.
+# - Builds from the `nmem-rs` cargo workspace, independent of the Tauri/Python
+#   build. The default Python backend path is untouched (the desktop strangler
+#   toggle `NOWLEDGE_BACKEND` still defaults to `python`).
+#
+# Source is fetched at build time from the private product repo via the same
+# fine-grained PAT the desktop workflow uses (MEM_REPO_TOKEN, Contents: Read).
+
+name: build-rust-bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Source ref to build (branch or tag on nowledge-co/mem, e.g. rust_Port or 0.9.16)."
+        required: true
+        type: string
+        default: rust_Port
+      bundle_model:
+        description: "Stage the GGUF embedder into rust-backend/models/ (installer-size vs first-run-latency; off = smaller, model fetch-on-first-run)."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-rust-macos:
+    name: build-rust-${{ matrix.label }}
+    runs-on: macos-14
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macos-arm64
+            target: aarch64-apple-darwin
+            cache_key: rust-bundle-macos-aarch64
+          - label: macos-x86_64
+            target: x86_64-apple-darwin
+            cache_key: rust-bundle-macos-x86_64
+    env:
+      SOURCE_REF: ${{ inputs.ref }}
+    steps:
+      - name: Checkout private source (nowledge-co/mem)
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ env.SOURCE_REF }}
+          submodules: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Defensive: on the macos-14 arm64 runner the rustup proxy can route
+      # `cargo` to `rustup-init` when the toolchain target matches the host
+      # arch. `rustup default stable` + `rustup show` forces the proxy symlinks
+      # into a known state and makes the resolved toolchain visible in the log.
+      # (Mirrors the same workaround in release-desktop.yml.)
+      - name: Pin default toolchain (workaround for macos-14 arm64 proxy)
+        run: |
+          set -euo pipefail
+          rustup default stable
+          rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The bundle builds the `nmem-rs` workspace, not the Tauri crate.
+          workspaces: nmem-rs
+          key: ${{ matrix.cache_key }}
+          # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run; one bad
+          # save poisons the key). Same rule as release-desktop.yml.
+          cache-bin: false
+
+      # Optional: pre-fetch the GGUF embedder so --bundle-model can stage it.
+      # Skipped by default (model is fetch-on-first-run at the app; bundling is
+      # an installer-size choice, not a build-correctness requirement).
+      - name: Fetch GGUF embedder (only when bundling the model)
+        if: ${{ inputs.bundle_model }}
+        run: |
+          set -euo pipefail
+          cd nmem-rs
+          cargo run -p nmem-embed --bin models -- download qwen3-embedding-0.6b-q8_0
+
+      - name: Build rust-backend bundle
+        run: |
+          set -euo pipefail
+          cd nowledge-graph
+          ./scripts/build-rust-bundle.sh \
+            --target "${{ matrix.target }}" \
+            --skip-cloudflared \
+            ${{ inputs.bundle_model && '--bundle-model' || '' }}
+
+      # Smoke: the staged binary must exist, be non-empty, and be a Mach-O
+      # executable for the requested arch. We do NOT boot it here (it needs an
+      # app-data root + DB); the live GUI flip validation covers a real boot.
+      - name: Smoke-check the staged binary
+        run: |
+          set -euo pipefail
+          BIN="nowledge-graph/rust-backend/nmem-server"
+          test -s "$BIN" || { echo "::error::staged binary missing or empty: $BIN"; exit 1; }
+          file "$BIN"
+          echo "size: $(du -h "$BIN" | cut -f1)"
+          lipo -info "$BIN" || true
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) lipo -info "$BIN" | grep -qi "arm64"  || { echo "::error::expected arm64";  exit 1; } ;;
+            x86_64-apple-darwin)  lipo -info "$BIN" | grep -qi "x86_64" || { echo "::error::expected x86_64"; exit 1; } ;;
+          esac
+
+      - name: Upload rust-backend bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-backend-${{ matrix.label }}
+          path: nowledge-graph/rust-backend/
+          if-no-files-found: error
+          retention-days: 14
