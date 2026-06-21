@@ -39,6 +39,24 @@ on:
         required: false
         type: boolean
         default: false
+  # Reusable: `release-desktop.yml` calls this as a NON-GATING companion job so
+  # each desktop release also produces the macOS rust-backend bundles as extra
+  # artifacts. The release itself never depends on this (its failure cannot block
+  # the Python app build/publish); it stays artifact-only — no signing, no R2.
+  workflow_call:
+    inputs:
+      ref:
+        description: "Source ref to build (the Rust backend lives on rust_Port, not the Python release tag)."
+        required: true
+        type: string
+      bundle_model:
+        description: "Stage the GGUF embedder into the bundle (default off: fetch-on-first-run from R2)."
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      MEM_REPO_TOKEN:
+        required: true
 
 permissions:
   contents: read

@@ -33,6 +33,11 @@ on:
         required: false
         type: boolean
         default: false
+      rust_backend_ref:
+        description: "Source ref for the NON-GATING rust-backend companion bundle (the Rust port lives on rust_Port, not the Python release tag)."
+        required: false
+        type: string
+        default: rust_Port
   push:
     # Auto-fire on RC-style tags ONLY (anything with a `-` suffix:
     # `-rcN`, `-betaN`, `-ciN`). Clean-semver GA tags like `v0.8.4`
@@ -129,6 +134,25 @@ jobs:
           echo "run_publish=$PUBLISH"    >> "$GITHUB_OUTPUT"
           echo "run_latest=$LATEST"      >> "$GITHUB_OUTPUT"
           echo "Resolved: version=$VERSION source_ref=$SOURCE_REF dry=$DRY publish=$PUBLISH latest=$LATEST"
+
+  # -----------------------------------------------------------------------
+  # NON-GATING rust-backend companion (strangler Phase 1). Produces the macOS
+  # rust-backend bundles (nmem-server + pdfium) as EXTRA release artifacts via
+  # the isolated reusable workflow. It is deliberately NOT in the `publish` /
+  # `prerelease-upload` needs graph, so its failure can never block the Python
+  # app build or publish. Builds from `rust_Port` (the Rust port branch), not
+  # the Python release tag. Artifact-only: no signing, no R2, no GH release.
+  # No model is bundled (fetch-on-first-run from R2); flip `bundle_model` to
+  # trade installer size for first-run latency.
+  # -----------------------------------------------------------------------
+  rust-backend:
+    needs: meta
+    uses: ./.github/workflows/build-rust-bundle.yml
+    with:
+      ref: ${{ inputs.rust_backend_ref || 'rust_Port' }}
+      bundle_model: false
+    secrets:
+      MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
 
   # -----------------------------------------------------------------------
   # Reusable composite-action shape inlined per job below. The "checkout
