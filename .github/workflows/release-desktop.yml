@@ -471,6 +471,12 @@ jobs:
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
+      # ladybug's bundled simsimd uses AVX512-FP16 (`__m512h`), which needs
+      # gcc >= 12. ubuntu-22.04's default is gcc-11 (→ "unknown type name
+      # '__m512h'"). Pin gcc-12 for the native C/C++ build. This does NOT change
+      # the glibc baseline (still 22.04), so .deb/.AppImage portability holds.
+      CC: gcc-12
+      CXX: g++-12
     steps:
       - name: Checkout private source (nowledge-co/mem)
         uses: actions/checkout@v4
@@ -488,7 +494,10 @@ jobs:
             librsvg2-dev libayatana-appindicator3-dev libxdo-dev \
             patchelf zstd build-essential curl wget file \
             libfuse2 \
-            cmake clang libclang-dev pkg-config protobuf-compiler
+            cmake clang libclang-dev pkg-config protobuf-compiler \
+            gcc-12 g++-12
+          # gcc-12/g++-12: ladybug simsimd needs AVX512-FP16 (gcc >= 12); the
+          # job pins CC=gcc-12/CXX=g++-12 (see env). 22.04 default gcc-11 fails.
           # cmake/clang/libclang/pkg-config: native Rust backend toolchain
           # protobuf-compiler: protoc for lancedb's lance-datafusion build-script.
           # (llama.cpp / ladybug / bindgen). build-essential is already above.
