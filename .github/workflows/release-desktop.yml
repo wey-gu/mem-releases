@@ -419,7 +419,12 @@ jobs:
   build-windows:
     needs: meta
     runs-on: windows-latest
-    timeout-minutes: 90
+    # windows-latest is the slowest runner for our cold build: it does TWO
+    # native Rust compiles (build-rust-bundle.ps1 for the nmem-rs backend, then
+    # the Tauri app) and only the Tauri workspace is rust-cached. 0.10.0-rc1
+    # hit the old 90-minute cap mid-build (1h30m07s). macos-x86_64 already gets
+    # 120; Windows needs more headroom than that.
+    timeout-minutes: 150
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
