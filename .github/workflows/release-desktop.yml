@@ -602,10 +602,13 @@ jobs:
             libappindicator-gtk3-devel openssl-devel rpm-build \
             zstd nodejs npm git file findutils which \
             gcc gcc-c++ make patchelf curl wget tar \
-            cmake clang-devel ninja-build protobuf-compiler
+            cmake clang-devel ninja-build protobuf-compiler protobuf-devel
           # cmake/clang-devel/ninja-build + gcc-c++ (already above): native
           # Rust backend toolchain (llama.cpp / ladybug / bindgen).
           # protobuf-compiler: protoc for lancedb's lance-datafusion build-script.
+          # protobuf-devel: the well-known .proto types (google/protobuf/*.proto)
+          # that lance-encoding imports; Fedora's protobuf-compiler omits them
+          # (like Debian), so a clean build fails "empty.proto: File not found".
 
       - name: Checkout private source (nowledge-co/mem)
         uses: actions/checkout@v4
