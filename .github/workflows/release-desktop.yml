@@ -259,6 +259,15 @@ jobs:
       - name: Install Rust backend build toolchain (macOS)
         run: brew install cmake ninja protobuf
 
+      # ladybug/kuzu C++ uses C++20 std::construct_at; the macos-14 runner's
+      # default Xcode (15.4) ships a libc++ that rejects it. Select the newest
+      # Xcode installed on the image (16.x) so the C++ stack compiles.
+      - name: Select newest Xcode
+        run: |
+          newest="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$newest" ] && sudo xcode-select -s "$newest"
+          xcodebuild -version
+
       - name: Build (arm64, rust backend, signed, notarized)
         working-directory: nowledge-graph
         run: |
@@ -357,6 +366,15 @@ jobs:
         run: |
           brew install cmake ninja protobuf
           rustup target add x86_64-apple-darwin
+
+      # ladybug/kuzu C++ uses C++20 std::construct_at; the macos-14 runner's
+      # default Xcode (15.4) ships a libc++ that rejects it. Select the newest
+      # Xcode installed on the image (16.x) so the C++ stack compiles.
+      - name: Select newest Xcode
+        run: |
+          newest="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$newest" ] && sudo xcode-select -s "$newest"
+          xcodebuild -version
 
       # RISK H1 (cross-arch build): this compiles the full static stack
       # (llama.cpp + Metal, ladybug/kuzu C++, lancedb, boringssl) for
