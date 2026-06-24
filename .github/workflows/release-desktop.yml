@@ -33,11 +33,6 @@ on:
         required: false
         type: boolean
         default: false
-      rust_backend_ref:
-        description: "Source ref for the NON-GATING rust-backend companion bundle (the Rust port lives on rust_Port, not the Python release tag)."
-        required: false
-        type: string
-        default: rust_Port
   push:
     # Auto-fire on RC-style tags ONLY (anything with a `-` suffix:
     # `-rcN`, `-betaN`, `-ciN`). Clean-semver GA tags like `v0.8.4`
@@ -136,23 +131,13 @@ jobs:
           echo "Resolved: version=$VERSION source_ref=$SOURCE_REF dry=$DRY publish=$PUBLISH latest=$LATEST"
 
   # -----------------------------------------------------------------------
-  # NON-GATING rust-backend companion (strangler Phase 1). Produces the macOS
-  # rust-backend bundles (nmem-server + pdfium) as EXTRA release artifacts via
-  # the isolated reusable workflow. It is deliberately NOT in the `publish` /
-  # `prerelease-upload` needs graph, so its failure can never block the Python
-  # app build or publish. Builds from `rust_Port` (the Rust port branch), not
-  # the Python release tag. Artifact-only: no signing, no R2, no GH release.
-  # No model is bundled (fetch-on-first-run from R2); flip `bundle_model` to
-  # trade installer size for first-run latency.
+  # NOTE: the former NON-GATING `rust-backend` companion job (strangler
+  # Phase 1, via build-rust-bundle.yml) has been retired. 0.10.0 desktop
+  # ships RUST-ONLY: each of the five build jobs below now builds its own
+  # native nmem-server binary in-place (via build-rust-bundle.{sh,ps1})
+  # and bundles it through Tauri's resources, so a separate companion
+  # artifact job is no longer needed.
   # -----------------------------------------------------------------------
-  rust-backend:
-    needs: meta
-    uses: ./.github/workflows/build-rust-bundle.yml
-    with:
-      ref: ${{ inputs.rust_backend_ref || 'rust_Port' }}
-      bundle_model: false
-    secrets:
-      MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
 
   # -----------------------------------------------------------------------
   # Reusable composite-action shape inlined per job below. The "checkout
@@ -268,14 +253,20 @@ jobs:
         working-directory: nowledge-graph
         run: npm ci --no-audit --no-fund
 
-      - name: Build (arm64, pyarmor, signed, notarized)
+      # Native Rust backend toolchain (llama.cpp / ladybug / bindgen).
+      # clang ships with Xcode on the macOS runner; we only need cmake + ninja.
+      - name: Install Rust backend build toolchain (macOS)
+        run: brew install cmake ninja
+
+      - name: Build (arm64, rust backend, signed, notarized)
         working-directory: nowledge-graph
         run: |
           set -euo pipefail
           unset APPLE_CERTIFICATE
           unset APPLE_CERTIFICATE_PASSWORD
-          rm -rf python-standalone
-          ./scripts/build-macos.sh --arch arm64 --pyarmor
+          rm -rf python-standalone rust-backend
+          ./scripts/build-rust-bundle.sh --target aarch64-apple-darwin
+          ./scripts/build-macos.sh --arch arm64 --skip-python
 
       - name: Locate + rename DMG
         id: locate
@@ -357,14 +348,29 @@ jobs:
         working-directory: nowledge-graph
         run: npm ci --no-audit --no-fund
 
-      - name: Build (x86_64, pyarmor, signed, notarized)
+      # Native Rust backend toolchain (llama.cpp / ladybug / bindgen).
+      # clang ships with Xcode on the macOS runner; we only need cmake + ninja.
+      # The x86_64-apple-darwin target is already installed by the
+      # dtolnay/rust-toolchain step above; ensure it explicitly here too.
+      - name: Install Rust backend build toolchain (macOS)
+        run: |
+          brew install cmake ninja
+          rustup target add x86_64-apple-darwin
+
+      # RISK H1 (cross-arch build): this compiles the full static stack
+      # (llama.cpp + Metal, ladybug/kuzu C++, lancedb, boringssl) for
+      # x86_64 ON the arm64 macos-14 runner. This is the highest-risk build
+      # of the matrix and may need a native x86_64 runner if the cross-arch
+      # C/C++ toolchain misbehaves.
+      - name: Build (x86_64, rust backend, signed, notarized)
         working-directory: nowledge-graph
         run: |
           set -euo pipefail
           unset APPLE_CERTIFICATE
           unset APPLE_CERTIFICATE_PASSWORD
-          rm -rf python-standalone
-          ./scripts/build-macos.sh --arch x86_64 --pyarmor
+          rm -rf python-standalone rust-backend
+          ./scripts/build-rust-bundle.sh --target x86_64-apple-darwin
+          ./scripts/build-macos.sh --arch x86_64 --skip-python
 
       - name: Locate + rename DMG
         id: locate
@@ -420,17 +426,19 @@ jobs:
         working-directory: nowledge-graph
         run: npm ci --no-audit --no-fund
 
-      - name: Download Python standalone (Windows)
-        working-directory: nowledge-graph
+      # Native Rust backend toolchain (llama.cpp / ladybug / bindgen).
+      # MSVC is present on windows-latest; we add LLVM/clang (bindgen),
+      # ninja, and cmake.
+      - name: Install Rust backend build toolchain (Windows)
         shell: pwsh
         run: |
-          if (Test-Path python-standalone) { Remove-Item python-standalone -Recurse -Force }
-          .\scripts\download-python-standalone.ps1
+          choco install -y llvm ninja cmake
+          rustup target add x86_64-pc-windows-msvc
 
-      - name: Build Python bundle (PyArmor)
+      - name: Build Rust backend bundle (Windows)
         working-directory: nowledge-graph
         shell: pwsh
-        run: .\scripts\build-python-bundle.ps1 --pyarmor
+        run: .\scripts\build-rust-bundle.ps1 -Target x86_64-pc-windows-msvc
 
       - name: Build Tauri (NSIS)
         working-directory: nowledge-graph
@@ -478,7 +486,10 @@ jobs:
             libwebkit2gtk-4.1-dev libssl-dev libgtk-3-dev \
             librsvg2-dev libayatana-appindicator3-dev libxdo-dev \
             patchelf zstd build-essential curl wget file \
-            libfuse2
+            libfuse2 \
+            cmake clang libclang-dev pkg-config
+          # cmake/clang/libclang/pkg-config: native Rust backend toolchain
+          # (llama.cpp / ladybug / bindgen). build-essential is already above.
           # libfuse2: required to run `linuxdeploy-plugin-appimage`'s
           # AppImage during Tauri's AppImage bundling step. ubuntu-22.04
           # GH runner images used to ship libfuse2 pre-installed; the
@@ -503,15 +514,9 @@ jobs:
         working-directory: nowledge-graph
         run: npm ci --no-audit --no-fund
 
-      - name: Download Python standalone (Linux x86_64)
+      - name: Build Rust backend bundle (Linux x86_64)
         working-directory: nowledge-graph
-        run: |
-          rm -rf python-standalone
-          ./scripts/download-python-standalone.sh
-
-      - name: Build Python bundle (PyArmor)
-        working-directory: nowledge-graph
-        run: ./scripts/build-python-bundle.sh --pyarmor
+        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu
 
       - name: Build .deb + .AppImage (Tauri native)
         working-directory: nowledge-graph
@@ -567,7 +572,10 @@ jobs:
             webkit2gtk4.1-devel gtk3-devel librsvg2-devel \
             libappindicator-gtk3-devel openssl-devel rpm-build \
             zstd nodejs npm git file findutils which \
-            gcc gcc-c++ make patchelf curl wget tar
+            gcc gcc-c++ make patchelf curl wget tar \
+            cmake clang-devel ninja-build
+          # cmake/clang-devel/ninja-build + gcc-c++ (already above): native
+          # Rust backend toolchain (llama.cpp / ladybug / bindgen).
 
       - name: Checkout private source (nowledge-co/mem)
         uses: actions/checkout@v4
@@ -581,6 +589,7 @@ jobs:
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" target add x86_64-unknown-linux-gnu
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -591,15 +600,9 @@ jobs:
         working-directory: nowledge-graph
         run: npm ci --no-audit --no-fund
 
-      - name: Download Python standalone (Linux x86_64)
+      - name: Build Rust backend bundle (Linux x86_64)
         working-directory: nowledge-graph
-        run: |
-          rm -rf python-standalone
-          ./scripts/download-python-standalone.sh
-
-      - name: Build Python bundle (PyArmor)
-        working-directory: nowledge-graph
-        run: ./scripts/build-python-bundle.sh --pyarmor
+        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu
 
       - name: Build native .rpm (Tauri rpmbuild)
         # Tauri's rpm-rs compression is universally slow regardless of
