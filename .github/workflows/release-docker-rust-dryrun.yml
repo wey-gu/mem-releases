@@ -1,0 +1,61 @@
+name: release-docker-rust-dryrun
+
+# Non-publishing CI validation of the RUST headless image (Dockerfile.rust).
+#
+# Builds the rust `nmem-server` container image WITHOUT pushing, so the headless
+# rust image is proven to compile + assemble green BEFORE release-docker.yml is
+# flipped from the Python `Dockerfile` to `Dockerfile.rust` (the headless
+# cutover). The production publish pipeline (release-docker.yml) is untouched —
+# this is a standing dry-run gate only.
+#
+# Mirrors build-rust-bundle.sh's fork-submodule init: the checkout takes
+# `submodules: false` (the Python build never needed them) and we init the two
+# public rust path-dep forks (wey-gu/ladybug, wey-gu/liteparse) over HTTPS so the
+# Dockerfile's `COPY upstream_forks` has them. lance-linalg is a tracked vendored
+# dir, already present in the checkout.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Source tag on nowledge-co/mem to build (e.g. 0.10.0-rc1)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source (nowledge-co/mem @ v<tag>)
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: v${{ inputs.tag }}
+          submodules: false
+
+      - name: Init rust fork submodules (parity with build-rust-bundle.sh)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory '*' || true
+          for sm in upstream_forks/ladybug upstream_forks/liteparse; do
+            git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
+            git submodule update --init --depth 1 "$sm"
+          done
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build rust headless image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: nowledge-graph/docker/Dockerfile.rust
+          platforms: linux/amd64
+          push: false
+          load: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
