@@ -452,12 +452,21 @@ jobs:
         run: npm ci --no-audit --no-fund
 
       # Native Rust backend toolchain (llama.cpp / ladybug / bindgen).
-      # MSVC is present on windows-latest; we add LLVM/clang (bindgen),
-      # ninja, and cmake.
+      # MSVC + cmake are present on windows-latest; we add LLVM/clang (bindgen),
+      # ninja, protoc. cmake is preinstalled — do NOT choco-install it (the choco
+      # cmake package flakily "fails to install" exit 1 when cmake is already
+      # present, which is what broke 0.10.0-ci4-windows after ci3 passed). Only
+      # install cmake if it's genuinely missing, then verify the toolchain.
       - name: Install Rust backend build toolchain (Windows)
         shell: pwsh
         run: |
-          choco install -y llvm ninja cmake protoc
+          choco install -y --no-progress llvm ninja protoc
+          if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+            choco install -y --no-progress cmake
+            Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1" -ErrorAction SilentlyContinue
+            refreshenv
+          }
+          cmake --version
           rustup target add x86_64-pc-windows-msvc
 
       - name: Build Rust backend bundle (Windows)
