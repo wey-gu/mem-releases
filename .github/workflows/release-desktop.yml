@@ -574,7 +574,11 @@ jobs:
             libappindicator-gtk3-devel openssl-devel rpm-build \
             zstd nodejs npm git file findutils which \
             gcc gcc-c++ make patchelf curl wget tar \
-            cmake clang-devel ninja-build protobuf-compiler
+            cmake clang-devel ninja-build protobuf-compiler protobuf-devel
+          # protobuf-devel: Fedora's protobuf-compiler ships only the protoc
+          # binary, NOT the well-known .proto includes (google/protobuf/*.proto)
+          # that lance-encoding's build-script imports. apt/brew/choco bundle
+          # them; Fedora splits them into protobuf-devel.
           # cmake/clang-devel/ninja-build + gcc-c++ (already above): native
           # Rust backend toolchain (llama.cpp / ladybug / bindgen).
 
