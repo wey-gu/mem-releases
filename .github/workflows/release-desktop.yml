@@ -255,8 +255,9 @@ jobs:
 
       # Native Rust backend toolchain (llama.cpp / ladybug / bindgen).
       # clang ships with Xcode on the macOS runner; we only need cmake + ninja.
+      # protobuf: protoc is required by lancedb's lance-datafusion build-script.
       - name: Install Rust backend build toolchain (macOS)
-        run: brew install cmake ninja
+        run: brew install cmake ninja protobuf
 
       - name: Build (arm64, rust backend, signed, notarized)
         working-directory: nowledge-graph
@@ -354,7 +355,7 @@ jobs:
       # dtolnay/rust-toolchain step above; ensure it explicitly here too.
       - name: Install Rust backend build toolchain (macOS)
         run: |
-          brew install cmake ninja
+          brew install cmake ninja protobuf
           rustup target add x86_64-apple-darwin
 
       # RISK H1 (cross-arch build): this compiles the full static stack
@@ -432,7 +433,7 @@ jobs:
       - name: Install Rust backend build toolchain (Windows)
         shell: pwsh
         run: |
-          choco install -y llvm ninja cmake
+          choco install -y llvm ninja cmake protoc
           rustup target add x86_64-pc-windows-msvc
 
       - name: Build Rust backend bundle (Windows)
@@ -487,7 +488,7 @@ jobs:
             librsvg2-dev libayatana-appindicator3-dev libxdo-dev \
             patchelf zstd build-essential curl wget file \
             libfuse2 \
-            cmake clang libclang-dev pkg-config
+            cmake clang libclang-dev pkg-config protobuf-compiler
           # cmake/clang/libclang/pkg-config: native Rust backend toolchain
           # (llama.cpp / ladybug / bindgen). build-essential is already above.
           # libfuse2: required to run `linuxdeploy-plugin-appimage`'s
@@ -573,7 +574,7 @@ jobs:
             libappindicator-gtk3-devel openssl-devel rpm-build \
             zstd nodejs npm git file findutils which \
             gcc gcc-c++ make patchelf curl wget tar \
-            cmake clang-devel ninja-build
+            cmake clang-devel ninja-build protobuf-compiler
           # cmake/clang-devel/ninja-build + gcc-c++ (already above): native
           # Rust backend toolchain (llama.cpp / ladybug / bindgen).
 
