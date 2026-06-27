@@ -209,13 +209,15 @@ jobs:
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
-          # Bumped from `macos-aarch64` to invalidate the previously-
-          # poisoned cache. The old cache contained a `cargo` binary in
-          # ~/.cargo/bin/ that routed to `rustup-init`, breaking every
-          # run on this key with `cargo metadata: error: unexpected
-          # argument 'metadata' found`. macos-x86_64 wasn't affected —
-          # its cache key (macos-x86_64) was never poisoned.
-          key: macos-aarch64-v2
+          # Bumped to -v3 (2026-06-27) to invalidate a SECOND poison: the
+          # rust-cache keys on Cargo.lock, not on nmem-rs source, so a
+          # source-only change (no dep bump) restored a STALE nmem-server
+          # from cache and cargo logged 0 "Compiling" lines — rc<=18 shipped
+          # an old backend (missing the feed-503 string, int community ids).
+          # Any future source-behavior fix that lands without a Cargo.lock
+          # change must bump these keys (all 5 platforms) again.
+          # (-v2 had earlier invalidated a poisoned ~/.cargo/bin cargo binary.)
+          key: macos-aarch64-v3
 
       # SOTA build-cache: sccache → R2 (S3). Content-keyed, unbounded, shared
       # across runs/branches. Caches BOTH rust (RUSTC_WRAPPER) and the heavy C++
@@ -368,7 +370,8 @@ jobs:
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
-          key: macos-x86_64
+          # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
+          key: macos-x86_64-v2
 
       # sccache → R2 (see build-macos-arm64 for rationale).
       - name: Setup sccache
@@ -496,7 +499,8 @@ jobs:
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
-          key: windows-x86_64
+          # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
+          key: windows-x86_64-v2
 
       # sccache → R2 (see build-macos-arm64 for rationale). MSVC + cmake are
       # both sccache-cacheable; graceful local fallback on any backend error.
@@ -632,7 +636,8 @@ jobs:
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
-          key: linux-deb-appimage
+          # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
+          key: linux-deb-appimage-v2
 
       # sccache → R2 (see build-macos-arm64 for rationale).
       - name: Setup sccache
@@ -749,7 +754,8 @@ jobs:
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
-          key: linux-rpm-fedora40
+          # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
+          key: linux-rpm-fedora40-v2
 
       # sccache → R2 (see build-macos-arm64 for rationale). Fedora container.
       - name: Setup sccache
