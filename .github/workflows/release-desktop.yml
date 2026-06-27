@@ -256,6 +256,16 @@ jobs:
       # Native Rust backend toolchain (llama.cpp / ladybug / bindgen).
       # clang ships with Xcode on the macOS runner; we only need cmake + ninja.
       # protobuf: protoc is required by lancedb's lance-datafusion build-script.
+      # ladybug's C++ uses C++20 parenthesized-init of aggregates (P0960) via
+      # vector::emplace_back → construct_at; clang < 16 (Xcode 15.x) rejects it
+      # ("no matching constructor for SegmentCheckpointState"). Select the newest
+      # installed Xcode 16+ (clang 16+) before building. Deployment-target stays
+      # pinned to 14.0 in build-rust-bundle.sh, so the runtime floor is unchanged.
+      - name: Use Xcode 16+ (ladybug C++20 construct_at needs clang 16+)
+        run: |
+          newest=$(ls -d /Applications/Xcode_1[6-9]*.app /Applications/Xcode_2*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$newest" ]; then sudo xcode-select -s "$newest"; fi
+          echo "DEVELOPER_DIR=$(xcode-select -p)"; cc --version
       - name: Install Rust backend build toolchain (macOS)
         run: brew install cmake ninja protobuf
 
@@ -353,6 +363,13 @@ jobs:
       # clang ships with Xcode on the macOS runner; we only need cmake + ninja.
       # The x86_64-apple-darwin target is already installed by the
       # dtolnay/rust-toolchain step above; ensure it explicitly here too.
+      # ladybug C++20 P0960 (construct_at) needs clang 16+ (Xcode 16+); pick the
+      # newest installed Xcode so the cross-compiled C++ deps build.
+      - name: Use Xcode 16+ (ladybug C++20 construct_at needs clang 16+)
+        run: |
+          newest=$(ls -d /Applications/Xcode_1[6-9]*.app /Applications/Xcode_2*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$newest" ]; then sudo xcode-select -s "$newest"; fi
+          echo "DEVELOPER_DIR=$(xcode-select -p)"; cc --version
       - name: Install Rust backend build toolchain (macOS)
         run: |
           brew install cmake ninja protobuf
@@ -488,7 +505,16 @@ jobs:
             librsvg2-dev libayatana-appindicator3-dev libxdo-dev \
             patchelf zstd build-essential curl wget file \
             libfuse2 \
-            cmake clang libclang-dev pkg-config protobuf-compiler
+            cmake clang libclang-dev pkg-config protobuf-compiler \
+            gcc-12 g++-12
+          # ladybug's bundled simsimd uses AVX512-FP16 (__m512h); ubuntu-22.04's
+          # default gcc-11 lacks the intrinsic type (docker's gcc-12 compiles it
+          # fine, and the Fedora rpm job's gcc-14 too). Make gcc-12 the default
+          # cc/c++ so cmake/cc-rs pick it up for the ladybug C/C++ build.
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100
+          sudo update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-12 100
+          sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-12 100
           # cmake/clang/libclang/pkg-config: native Rust backend toolchain
           # (llama.cpp / ladybug / bindgen). build-essential is already above.
           # libfuse2: required to run `linuxdeploy-plugin-appimage`'s
