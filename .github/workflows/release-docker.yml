@@ -207,6 +207,64 @@ jobs:
           cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:arm64
           cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:arm64,mode=max
 
+  # Opt-in GPU image, published as a STANDALONE single-arch tag `:<ver>-cuda`
+  # (amd64 only — CUDA is x86). Independent of the multi-arch default image and
+  # its `publish` manifest job, so it never blocks or alters the CPU release. The
+  # binary's runtime auto-detects the GPU and falls back to CPU, so the image is
+  # usable without --gpus, just slower.
+  build-cuda:
+    needs: meta
+    # Build the ~3GB GPU image only on GA (push_latest=true → non-prerelease tag)
+    # or a manual dispatch — NOT on every rc. rc-stage GPU verification is done
+    # locally on a GPU host; the published `:cuda` tag is reserved for GA/on-demand.
+    if: ${{ needs.meta.outputs.push_latest == 'true' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ needs.meta.outputs.source_ref }}
+          submodules: false
+      - name: Init Rust fork submodules (https)
+        run: |
+          git config --global --add safe.directory '*' || true
+          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig; do
+            git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
+            git submodule update --init --depth 1 "$sm"
+          done
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - id: tags
+        run: |
+          set -euo pipefail
+          V="${{ needs.meta.outputs.version }}"
+          MINOR="${V%.*}"
+          # CUDA image is never :latest (no arm64 + GPU is opt-in). A pre-release
+          # version already carries a dash (0.10.0-rc1 -> 0.10.0-rc1-cuda).
+          echo "list=${IMAGE}:${V}-cuda,${IMAGE}:${MINOR}-cuda" >> "$GITHUB_OUTPUT"
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: nowledge-graph/docker/Dockerfile.rust.cuda
+          platforms: linux/amd64
+          build-args: |
+            NMEM_BUILD_SHA_FULL=${{ needs.meta.outputs.source_sha }}
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.tags.outputs.list }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:cuda-amd64
+          cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:cuda-amd64,mode=max
+
   publish:
     needs: [meta, build-amd64, build-arm64]
     runs-on: ubuntu-latest
