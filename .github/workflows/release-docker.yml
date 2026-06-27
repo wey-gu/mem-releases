@@ -62,6 +62,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       source_ref: ${{ steps.v.outputs.source_ref }}
+      source_sha: ${{ steps.sha.outputs.source_sha }}
       push_latest: ${{ steps.v.outputs.push_latest }}
     steps:
       - id: v
@@ -87,6 +88,20 @@ jobs:
           echo "version=$VERSION"        >> "$GITHUB_OUTPUT"
           echo "source_ref=$SOURCE_REF"  >> "$GITHUB_OUTPUT"
           echo "push_latest=$PUSH_LATEST" >> "$GITHUB_OUTPUT"
+
+      # Resolve the source commit once, so both arch builds bake the same
+      # build-provenance sha into nmem-server (the build context has no .git).
+      # See docs/implementation/BUILD_PROVENANCE_AND_CACHE_INTEGRITY.md.
+      - name: Resolve source commit
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ steps.v.outputs.source_ref }}
+          submodules: false
+          fetch-depth: 1
+      - id: sha
+        run: echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   build-amd64:
     needs: meta
@@ -128,6 +143,8 @@ jobs:
           context: .
           file: nowledge-graph/docker/Dockerfile.rust
           platforms: linux/amd64
+          build-args: |
+            NMEM_BUILD_SHA_FULL=${{ needs.meta.outputs.source_sha }}
           push: true
           provenance: mode=max
           sbom: true
@@ -178,6 +195,8 @@ jobs:
           context: .
           file: nowledge-graph/docker/Dockerfile.rust
           platforms: linux/arm64
+          build-args: |
+            NMEM_BUILD_SHA_FULL=${{ needs.meta.outputs.source_sha }}
           push: true
           provenance: mode=max
           sbom: true
