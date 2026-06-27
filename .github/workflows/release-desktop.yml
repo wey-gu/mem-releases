@@ -33,6 +33,11 @@ on:
         required: false
         type: boolean
         default: false
+      build_vulkan:
+        description: "ALSO build the OPTIONAL -vulkan GPU variants (Windows + Linux only). Manual downloads only — NEVER added to the auto-updater feed. Off for tag-triggered runs."
+        required: false
+        type: boolean
+        default: false
   push:
     # Auto-fire on RC-style tags ONLY (anything with a `-` suffix:
     # `-rcN`, `-betaN`, `-ciN`). Clean-semver GA tags like `v0.8.4`
@@ -76,6 +81,7 @@ jobs:
       is_dry_run: ${{ steps.resolve.outputs.is_dry_run }}
       run_publish: ${{ steps.resolve.outputs.run_publish }}
       run_latest: ${{ steps.resolve.outputs.run_latest }}
+      run_vulkan: ${{ steps.resolve.outputs.run_vulkan }}
     steps:
       - id: resolve
         name: Resolve version + source ref + flags
@@ -84,18 +90,25 @@ jobs:
           DISPATCH_TAG: ${{ inputs.tag }}
           DISPATCH_PUBLISH: ${{ inputs.publish }}
           DISPATCH_LATEST: ${{ inputs.latest }}
+          DISPATCH_VULKAN: ${{ inputs.build_vulkan }}
           PAYLOAD_REF: ${{ github.event.client_payload.ref }}
           PAYLOAD_VERSION: ${{ github.event.client_payload.version }}
           PUSH_REF: ${{ github.ref_name }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          # VULKAN is the OPTIONAL -vulkan GPU variant gate. It is ONLY ever
+          # opt-in via the workflow_dispatch `build_vulkan` input; tag-push and
+          # repository_dispatch triggers always leave it off, so the normal
+          # automated release path is byte-for-byte unchanged.
+          VULKAN="false"
           case "$EVENT_NAME" in
             workflow_dispatch)
               VERSION="$DISPATCH_TAG"
               SOURCE_REF="v${VERSION}"
               PUBLISH="$DISPATCH_PUBLISH"
               LATEST="$DISPATCH_LATEST"
+              VULKAN="$DISPATCH_VULKAN"
               ;;
             push)
               # tag push on THIS repo — assume the same tag exists on source
@@ -123,12 +136,16 @@ jobs:
           else
             DRY="false"
           fi
+          # Normalize VULKAN to a strict true/false ("" from a non-dispatch
+          # trigger becomes false). NEVER touches publish/latest/updater.
+          if [[ "$VULKAN" == "true" ]]; then VULKAN="true"; else VULKAN="false"; fi
           echo "version=$VERSION"        >> "$GITHUB_OUTPUT"
           echo "source_ref=$SOURCE_REF"  >> "$GITHUB_OUTPUT"
           echo "is_dry_run=$DRY"         >> "$GITHUB_OUTPUT"
           echo "run_publish=$PUBLISH"    >> "$GITHUB_OUTPUT"
           echo "run_latest=$LATEST"      >> "$GITHUB_OUTPUT"
-          echo "Resolved: version=$VERSION source_ref=$SOURCE_REF dry=$DRY publish=$PUBLISH latest=$LATEST"
+          echo "run_vulkan=$VULKAN"      >> "$GITHUB_OUTPUT"
+          echo "Resolved: version=$VERSION source_ref=$SOURCE_REF dry=$DRY publish=$PUBLISH latest=$LATEST vulkan=$VULKAN"
 
   # -----------------------------------------------------------------------
   # NOTE: the former NON-GATING `rust-backend` companion job (strangler
@@ -812,6 +829,375 @@ jobs:
           path: ${{ steps.locate.outputs.rpm }}
           if-no-files-found: error
           retention-days: 7
+
+  # =======================================================================
+  # OPTIONAL -vulkan GPU variant jobs (Windows + Linux only).
+  #
+  # WHY THESE ARE FULLY SEPARATE JOBS (not matrix entries on the CPU jobs):
+  #   - The default CPU build path MUST stay byte-for-byte unchanged when
+  #     the opt-in is off. These jobs only run when `meta.run_vulkan` is
+  #     'true', which is ONLY set by the workflow_dispatch `build_vulkan`
+  #     input. Tag-push / repository_dispatch leave it false, so the normal
+  #     automated release is untouched.
+  #   - macOS is intentionally absent: Metal is already the default there
+  #     (target-cfg dep override), so there is no -vulkan macOS artifact.
+  #
+  # AUTO-UPDATER SAFETY (the load-bearing invariant):
+  #   These jobs are NOT in the `needs:` list of `publish` or
+  #   `prerelease-upload`, and they upload to DISTINCTLY-NAMED workflow
+  #   artifact buckets (`windows-x86_64-vulkan`, `linux-vulkan`). The
+  #   publish/prerelease jobs `find` artifacts only under the CPU bucket
+  #   names (`windows-x86_64`, `linux-deb-appimage`, `linux-rpm`), so a
+  #   -vulkan artifact can never be picked up by the R2 upload, the APT
+  #   repo, or the `Mark as latest` updater-feed step. The -vulkan bundles
+  #   are attached DIRECTLY to the GH Release as MANUAL DOWNLOADS ONLY.
+  #   See docs/implementation/RUST_DESKTOP_GPU_ACCELERATION.md (CI plan §4).
+  # =======================================================================
+  build-windows-vulkan:
+    needs: meta
+    if: ${{ needs.meta.outputs.run_vulkan == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 180
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
+      IS_DRY_RUN: ${{ needs.meta.outputs.is_dry_run }}
+    steps:
+      - name: Checkout private source (nowledge-co/mem)
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ env.SOURCE_REF }}
+          submodules: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: nowledge-graph/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          workspaces: |
+            nowledge-graph/src-tauri
+            nmem-rs
+          # Separate cache key from the CPU windows job: the GPU feature pulls
+          # in the GGML Vulkan backend, so the compiled artifacts differ and
+          # must not share/poison the CPU build cache.
+          key: windows-x86_64-vulkan-v1
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Point sccache at R2
+        shell: bash
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
+            echo "SCCACHE_GHA_ENABLED=false"
+            echo "SCCACHE_BUCKET=nowledge-mem-sccache"
+            echo "SCCACHE_REGION=auto"
+            echo "SCCACHE_ENDPOINT=https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+            echo "AWS_ACCESS_KEY_ID=${R2_KEY}"
+            echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET}"
+          } >> "$GITHUB_ENV"
+
+      - name: Install npm deps
+        working-directory: nowledge-graph
+        run: npm ci --no-audit --no-fund
+
+      - name: Install Rust backend build toolchain (Windows)
+        shell: pwsh
+        run: |
+          choco install -y llvm ninja cmake protoc
+          rustup target add x86_64-pc-windows-msvc
+          $cb = "C:\ProgramData\chocolatey\bin"
+          "$cb" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          $protoc = (Get-Command protoc -ErrorAction SilentlyContinue).Source
+          if (-not $protoc) { $protoc = Join-Path $cb "protoc.exe" }
+          if (Test-Path $protoc) { "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+          Write-Host "protoc resolved to: $protoc"
+
+      # Vulkan SDK: provides vulkan-1.lib (the import the GGML Vulkan backend
+      # hard-links) + glslangValidator/glslc (SPIR-V shader compiler the GGML
+      # Vulkan build needs). The official LunarG installer via this action sets
+      # VULKAN_SDK for subsequent steps. `vulkan-1.dll` itself ships in System32
+      # with every modern GPU driver on the END-USER machine (documented runtime
+      # requirement), so no DLL bundling is needed in the installer.
+      - name: Install Vulkan SDK (Windows)
+        uses: jakoch/install-vulkan-sdk-action@v1.2.5
+        with:
+          vulkan_version: 1.3.290.0
+          install_runtime: true
+          cache: true
+      - name: Verify Vulkan SDK on PATH
+        shell: pwsh
+        run: |
+          if (-not $env:VULKAN_SDK) { Write-Error "VULKAN_SDK not set after install"; exit 1 }
+          Write-Host "VULKAN_SDK = $env:VULKAN_SDK"
+          $glslang = Get-Command glslangValidator -ErrorAction SilentlyContinue
+          $glslc = Get-Command glslc -ErrorAction SilentlyContinue
+          if (-not $glslang -and -not $glslc) {
+            # Fall back to the SDK Bin dir if the action did not add it to PATH.
+            $sdkBin = Join-Path $env:VULKAN_SDK "Bin"
+            "$sdkBin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+            Write-Host "Added $sdkBin to PATH for shader compiler"
+          }
+
+      - name: Build Rust backend bundle (Windows, Vulkan)
+        working-directory: nowledge-graph
+        shell: pwsh
+        run: .\scripts\build-rust-bundle.ps1 -Target x86_64-pc-windows-msvc -Gpu vulkan
+
+      - name: Build Tauri (NSIS)
+        working-directory: nowledge-graph
+        shell: pwsh
+        run: npm run tauri:build:windows
+
+      - name: Locate + rename installer (-vulkan)
+        id: locate
+        working-directory: nowledge-graph
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *.exe -Recurse | Select-Object -First 1
+          if (-not $exe) { Write-Error "::error::No NSIS installer produced"; exit 1 }
+          $out = Join-Path $env:RUNNER_TEMP "Nowledge Mem_${env:VERSION}_x64-vulkan-setup.exe"
+          Move-Item -Force $exe.FullName $out
+          "exe=$out" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64-vulkan
+          path: ${{ steps.locate.outputs.exe }}
+          if-no-files-found: error
+          retention-days: 7
+
+      # Attach DIRECTLY to the GH Release as a manual download. This is the
+      # ONLY distribution path for -vulkan: it never touches R2, APT, or the
+      # auto-updater feed. `--clobber` makes a rerun idempotent, and
+      # `view || create` tolerates this job racing ahead of the
+      # publish / prerelease-upload jobs by creating the tag if needed. We
+      # MATCH the release flavor those jobs use so we never accidentally
+      # create a GA-flavored release for an rc: a dry-run (rc/ci/beta) gets
+      # `--prerelease --draft` (the load-bearing flag that keeps the rc OUT of
+      # the auto-updater feed); a clean GA tag gets `--draft`.
+      - name: Attach -vulkan installer to GH Release (manual download only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          FLAGS=(--draft)
+          if [[ "$IS_DRY_RUN" == "true" ]]; then FLAGS+=(--prerelease); fi
+          gh release view "$TAG" -R "$REPO" >/dev/null 2>&1 || gh release create "$TAG" -R "$REPO" \
+            "${FLAGS[@]}" \
+            --title "Nowledge Mem ${VERSION}" \
+            --notes "Desktop bundles for ${VERSION}."
+          gh release upload "$TAG" -R "$REPO" --clobber "${{ steps.locate.outputs.exe }}"
+
+  build-linux-vulkan:
+    needs: meta
+    if: ${{ needs.meta.outputs.run_vulkan == 'true' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
+      IS_DRY_RUN: ${{ needs.meta.outputs.is_dry_run }}
+    steps:
+      - name: Checkout private source (nowledge-co/mem)
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ env.SOURCE_REF }}
+          submodules: false
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libssl-dev libgtk-3-dev \
+            librsvg2-dev libayatana-appindicator3-dev libxdo-dev \
+            patchelf zstd build-essential curl wget file \
+            libfuse2 \
+            cmake clang libclang-dev pkg-config protobuf-compiler \
+            gcc-12 g++-12 \
+            libvulkan-dev glslang-tools libvulkan1
+          # libvulkan-dev + glslang-tools: GGML Vulkan build-time deps (the
+          # vulkan loader dev lib it links against + the glslangValidator SPIR-V
+          # shader compiler). libvulkan1 provides libvulkan.so.1 (the runtime
+          # loader) which we BUNDLE into the -vulkan AppImage below so it runs on
+          # minimal/headless systems without the distro loader package.
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100
+          sudo update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-12 100
+          sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-12 100
+
+      - name: Verify shader compiler on PATH
+        run: |
+          set -euo pipefail
+          if command -v glslangValidator >/dev/null 2>&1; then
+            glslangValidator --version | head -1
+          elif command -v glslc >/dev/null 2>&1; then
+            glslc --version | head -1
+          else
+            echo "::error::No SPIR-V shader compiler (glslangValidator/glslc) on PATH"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: nowledge-graph/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          workspaces: |
+            nowledge-graph/src-tauri
+            nmem-rs
+          # Separate cache key from the CPU linux job (GPU feature -> different
+          # compiled artifacts; must not poison the CPU build cache).
+          key: linux-vulkan-v1
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Point sccache at R2
+        shell: bash
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
+            echo "SCCACHE_GHA_ENABLED=false"
+            echo "SCCACHE_BUCKET=nowledge-mem-sccache"
+            echo "SCCACHE_REGION=auto"
+            echo "SCCACHE_ENDPOINT=https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+            echo "AWS_ACCESS_KEY_ID=${R2_KEY}"
+            echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET}"
+          } >> "$GITHUB_ENV"
+
+      - name: Install npm deps
+        working-directory: nowledge-graph
+        run: npm ci --no-audit --no-fund
+
+      - name: Build Rust backend bundle (Linux x86_64, Vulkan)
+        working-directory: nowledge-graph
+        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --gpu vulkan
+
+      - name: Build .deb + .AppImage (Tauri native)
+        working-directory: nowledge-graph
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: ./scripts/build-linux-packages.sh --deb --appimage
+
+      # Bundle libvulkan.so.1 into the AppImage so it self-contains the loader
+      # and runs on minimal/headless systems that lack the distro vulkan-loader
+      # package. The GGML Vulkan backend hard-links libvulkan.so.1 (DT_NEEDED),
+      # so without this the -vulkan process would fail to load at startup — the
+      # exact failure mode the spec (RUST_DESKTOP_GPU_ACCELERATION.md, "Runtime
+      # loader requirement") warns about. We extract the AppImage, drop the
+      # loader into usr/lib next to the other bundled libs, and repackage with
+      # appimagetool. The CPU AppImage is built by a SEPARATE job and never gains
+      # this loader.
+      - name: Bundle libvulkan.so.1 into the AppImage
+        working-directory: nowledge-graph
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -euo pipefail
+          APP="$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)"
+          [[ -f "$APP" ]] || { echo "::error::No .AppImage produced for vulkan variant"; exit 1; }
+          LOADER="$(ldconfig -p | awk '/libvulkan\.so\.1/{print $NF; exit}')"
+          [[ -n "$LOADER" && -f "$LOADER" ]] || LOADER="/usr/lib/x86_64-linux-gnu/libvulkan.so.1"
+          [[ -f "$LOADER" ]] || { echo "::error::libvulkan.so.1 not found on runner; cannot bundle"; exit 1; }
+          echo "Bundling loader: $LOADER"
+          WORK="$(mktemp -d)"
+          cp "$APP" "$WORK/app.AppImage"
+          ( cd "$WORK" && ./app.AppImage --appimage-extract >/dev/null )
+          mkdir -p "$WORK/squashfs-root/usr/lib"
+          cp -L "$LOADER" "$WORK/squashfs-root/usr/lib/libvulkan.so.1"
+          # appimagetool repackages the AppDir back into a single-file AppImage.
+          TOOL="$WORK/appimagetool"
+          curl -L -f --retry 3 -o "$TOOL" \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x "$TOOL"
+          ARCH=x86_64 "$TOOL" --appimage-extract-and-run "$WORK/squashfs-root" "$WORK/repacked.AppImage"
+          mv -f "$WORK/repacked.AppImage" "$APP"
+          echo "Repacked AppImage now bundles libvulkan.so.1"
+
+      - name: Locate + rename artifacts (-vulkan)
+        id: locate
+        working-directory: nowledge-graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEB="$(find src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)"
+          APP="$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)"
+          [[ -f "$DEB" ]] || { echo "::error::No .deb produced"; exit 1; }
+          [[ -f "$APP" ]] || { echo "::error::No .AppImage produced"; exit 1; }
+          OUT_DEB="$RUNNER_TEMP/Nowledge Mem_${VERSION}_amd64-vulkan.deb"
+          OUT_APP="$RUNNER_TEMP/Nowledge Mem_${VERSION}_amd64-vulkan.AppImage"
+          mv -f "$DEB" "$OUT_DEB"
+          mv -f "$APP" "$OUT_APP"
+          echo "deb=$OUT_DEB"      >> "$GITHUB_OUTPUT"
+          echo "appimage=$OUT_APP" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-vulkan
+          path: |
+            ${{ steps.locate.outputs.deb }}
+            ${{ steps.locate.outputs.appimage }}
+          if-no-files-found: error
+          retention-days: 7
+
+      # Attach DIRECTLY to the GH Release as manual downloads only (never R2 /
+      # APT / auto-updater). See the Windows -vulkan job for the rationale.
+      # NOTE for the lead: the AppImage self-contains libvulkan.so.1 (bundled
+      # above). The -vulkan .deb does NOT yet declare a dependency on libvulkan1
+      # in its control metadata (that lives in Tauri's bundle config, out of
+      # this PR's additive scope), so a -vulkan .deb on a host WITHOUT the distro
+      # vulkan loader package would fail to start. The AppImage is the
+      # recommended, self-contained Linux -vulkan download.
+      - name: Attach -vulkan bundles to GH Release (manual download only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          FLAGS=(--draft)
+          if [[ "$IS_DRY_RUN" == "true" ]]; then FLAGS+=(--prerelease); fi
+          gh release view "$TAG" -R "$REPO" >/dev/null 2>&1 || gh release create "$TAG" -R "$REPO" \
+            "${FLAGS[@]}" \
+            --title "Nowledge Mem ${VERSION}" \
+            --notes "Desktop bundles for ${VERSION}."
+          gh release upload "$TAG" -R "$REPO" --clobber \
+            "${{ steps.locate.outputs.deb }}" \
+            "${{ steps.locate.outputs.appimage }}"
 
   # -----------------------------------------------------------------------
   # Pre-release upload: for rc/ci/beta tags, create a draft pre-release GH
