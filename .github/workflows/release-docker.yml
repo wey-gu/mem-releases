@@ -265,6 +265,59 @@ jobs:
           cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:cuda-amd64
           cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:cuda-amd64,mode=max
 
+  build-vulkan:
+    needs: meta
+    # Vulkan GPU image (AMD/Intel via Mesa, NVIDIA via the Vulkan ICD). Same gate
+    # as :cuda — GA or manual dispatch only, NOT every rc. Independent of the CPU
+    # publish/manifest job (separate :<ver>-vulkan tag, never folded into :latest).
+    if: ${{ needs.meta.outputs.push_latest == 'true' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ needs.meta.outputs.source_ref }}
+          submodules: false
+      - name: Init Rust fork submodules (https)
+        run: |
+          git config --global --add safe.directory '*' || true
+          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig; do
+            git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
+            git submodule update --init --depth 1 "$sm"
+          done
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - id: tags
+        run: |
+          set -euo pipefail
+          V="${{ needs.meta.outputs.version }}"
+          MINOR="${V%.*}"
+          # Vulkan image is never :latest (amd64-only + GPU is opt-in). A
+          # pre-release version already carries a dash (0.10.0-rc1 -> -rc1-vulkan).
+          echo "list=${IMAGE}:${V}-vulkan,${IMAGE}:${MINOR}-vulkan" >> "$GITHUB_OUTPUT"
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: nowledge-graph/docker/Dockerfile.rust.vulkan
+          platforms: linux/amd64
+          build-args: |
+            NMEM_BUILD_SHA_FULL=${{ needs.meta.outputs.source_sha }}
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.tags.outputs.list }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:vulkan-amd64
+          cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:vulkan-amd64,mode=max
+
   publish:
     needs: [meta, build-amd64, build-arm64]
     runs-on: ubuntu-latest
