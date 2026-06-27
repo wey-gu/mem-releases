@@ -148,7 +148,7 @@ jobs:
   build-macos-arm64:
     needs: meta
     runs-on: macos-14
-    timeout-minutes: 90
+    timeout-minutes: 180
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
@@ -329,7 +329,7 @@ jobs:
   build-macos-x86_64:
     needs: meta
     runs-on: macos-14
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
@@ -464,7 +464,7 @@ jobs:
   build-windows:
     needs: meta
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
@@ -572,7 +572,7 @@ jobs:
   build-linux-deb-appimage:
     needs: meta
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 180
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
@@ -698,7 +698,7 @@ jobs:
   build-linux-rpm:
     needs: meta
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     container:
       image: fedora:40
     env:
