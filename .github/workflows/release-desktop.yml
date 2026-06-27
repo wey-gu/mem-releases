@@ -203,6 +203,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run by
+          # dtolnay/rust-toolchain; caching it once poisoned every later run).
+          cache-bin: false
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
@@ -239,11 +242,6 @@ jobs:
             echo "AWS_ACCESS_KEY_ID=${R2_KEY}"
             echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET}"
           } >> "$GITHUB_ENV"
-          # CRITICAL: do NOT cache ~/.cargo/bin/. The bin dir is small
-          # (~50MB) and dtolnay/rust-toolchain rebuilds it fresh every
-          # run, so caching has no real upside and one bad save poisons
-          # every subsequent run on the same key.
-          cache-bin: false
 
       # Defensive: force rustup proxy symlinks into a known state AFTER
       # the cache restore (in case the bin cache somehow gets re-enabled
@@ -364,6 +362,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run by
+          # dtolnay/rust-toolchain; caching it once poisoned every later run).
+          cache-bin: false
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
@@ -489,6 +490,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run by
+          # dtolnay/rust-toolchain; caching it once poisoned every later run).
+          cache-bin: false
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
@@ -622,6 +626,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run by
+          # dtolnay/rust-toolchain; caching it once poisoned every later run).
+          cache-bin: false
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
@@ -736,6 +743,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run by
+          # dtolnay/rust-toolchain; caching it once poisoned every later run).
+          cache-bin: false
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
