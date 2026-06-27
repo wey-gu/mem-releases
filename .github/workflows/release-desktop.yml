@@ -452,6 +452,17 @@ jobs:
         run: |
           choco install -y llvm ninja cmake protoc
           rustup target add x86_64-pc-windows-msvc
+          # choco updates the *machine* PATH, but the next step's process PATH does
+          # not always pick it up (known choco-on-GHA gotcha) — build-rust-bundle.ps1
+          # then fails "protoc not found". Export protoc explicitly for later steps:
+          # the script (and prost/lance build-scripts) honor $env:PROTOC, and we also
+          # add the choco shim dir to PATH.
+          $cb = "C:\ProgramData\chocolatey\bin"
+          "$cb" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          $protoc = (Get-Command protoc -ErrorAction SilentlyContinue).Source
+          if (-not $protoc) { $protoc = Join-Path $cb "protoc.exe" }
+          if (Test-Path $protoc) { "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+          Write-Host "protoc resolved to: $protoc"
 
       - name: Build Rust backend bundle (Windows)
         working-directory: nowledge-graph
