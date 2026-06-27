@@ -203,7 +203,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: nowledge-graph/src-tauri
+          workspaces: |
+            nowledge-graph/src-tauri
+            nmem-rs
           # Bumped from `macos-aarch64` to invalidate the previously-
           # poisoned cache. The old cache contained a `cargo` binary in
           # ~/.cargo/bin/ that routed to `rustup-init`, breaking every
@@ -336,7 +338,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: nowledge-graph/src-tauri
+          workspaces: |
+            nowledge-graph/src-tauri
+            nmem-rs
           key: macos-x86_64
 
       - name: Import code-signing certificate
@@ -437,7 +441,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: nowledge-graph/src-tauri
+          workspaces: |
+            nowledge-graph/src-tauri
+            nmem-rs
           key: windows-x86_64
 
       - name: Install npm deps
@@ -545,7 +551,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: nowledge-graph/src-tauri
+          workspaces: |
+            nowledge-graph/src-tauri
+            nmem-rs
           key: linux-deb-appimage
 
       - name: Install npm deps
@@ -635,7 +643,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: nowledge-graph/src-tauri
+          workspaces: |
+            nowledge-graph/src-tauri
+            nmem-rs
           key: linux-rpm-fedora40
 
       - name: Install npm deps
