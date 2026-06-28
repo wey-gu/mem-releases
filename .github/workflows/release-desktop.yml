@@ -1017,7 +1017,12 @@ jobs:
   build-linux-vulkan:
     needs: meta
     if: ${{ needs.meta.outputs.run_vulkan == 'true' }}
-    runs-on: ubuntu-22.04
+    # 24.04 (not 22.04 like the CPU jobs): llama.cpp's ggml-vulkan needs
+    # Vulkan-Hpp >= 1.3.275 (PipelineRobustnessCreateInfoEXT / LayerSettingEXT /
+    # eMesaDozen) which 22.04's libvulkan-dev (1.3.204) lacks, AND the `glslc`
+    # package. Both are on 24.04. The -vulkan AppImage's glibc floor rises to
+    # 2.39 as a result; acceptable for this opt-in GPU artifact.
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
       VERSION: ${{ needs.meta.outputs.version }}
