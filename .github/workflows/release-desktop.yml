@@ -485,7 +485,11 @@ jobs:
   build-windows:
     needs: meta
     runs-on: windows-latest
-    timeout-minutes: 180
+    # 240 (not 180): the bundle build runs sccache-disabled on Windows (the sccache
+    # daemon dropped mid-lance-compile with os error 10054, a hard fail), so the
+    # heavy C++ (ladybug/llama.cpp) rebuilds without cache. Headroom over the ~110min
+    # cached run.
+    timeout-minutes: 240
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
