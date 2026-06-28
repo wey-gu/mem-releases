@@ -253,6 +253,7 @@ jobs:
           {
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
             echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_GHA_ENABLED=false"
             echo "SCCACHE_BUCKET=nowledge-mem-sccache"
@@ -403,6 +404,7 @@ jobs:
           {
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
             echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_GHA_ENABLED=false"
             echo "SCCACHE_BUCKET=nowledge-mem-sccache"
@@ -485,11 +487,7 @@ jobs:
   build-windows:
     needs: meta
     runs-on: windows-latest
-    # 240 (not 180): the bundle build runs sccache-disabled on Windows (the sccache
-    # daemon dropped mid-lance-compile with os error 10054, a hard fail), so the
-    # heavy C++ (ladybug/llama.cpp) rebuilds without cache. Headroom over the ~110min
-    # cached run.
-    timeout-minutes: 240
+    timeout-minutes: 180
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
@@ -537,6 +535,7 @@ jobs:
           {
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
             echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_GHA_ENABLED=false"
             echo "SCCACHE_BUCKET=nowledge-mem-sccache"
@@ -673,6 +672,7 @@ jobs:
           {
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
             echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_GHA_ENABLED=false"
             echo "SCCACHE_BUCKET=nowledge-mem-sccache"
@@ -791,6 +791,7 @@ jobs:
           {
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
             echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_GHA_ENABLED=false"
             echo "SCCACHE_BUCKET=nowledge-mem-sccache"
@@ -908,6 +909,7 @@ jobs:
           {
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
             echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_GHA_ENABLED=false"
             echo "SCCACHE_BUCKET=nowledge-mem-sccache"
@@ -1093,6 +1095,7 @@ jobs:
           {
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
             echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_GHA_ENABLED=false"
             echo "SCCACHE_BUCKET=nowledge-mem-sccache"
