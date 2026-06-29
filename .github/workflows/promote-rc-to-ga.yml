@@ -6,12 +6,21 @@
 # this workflow publishes the same exact bits under the GA tag
 # (e.g. v0.8.4) across every distribution surface, in lockstep:
 #
-#   Docker:
+#   Docker (CPU):
 #     - re-tags nowledgelabs/mem:<rc> → nowledgelabs/mem:<ga> (and :latest)
 #     - re-tags nowledgelabs/mem-updater:<rc> → mem-updater:<ga> (and :latest)
 #     The cosign signatures are bound to the manifest digest, so verification
 #     by `cosign verify nowledgelabs/mem:<ga>` continues to succeed — the
 #     signature was produced during the rc release-docker workflow run.
+#
+#   Docker (GPU):
+#     - BUILDS nowledgelabs/mem:<ga>-cuda and :<ga>-vulkan (amd64-only) from
+#       the SAME rc source ref the CPU images were validated against. GPU
+#       images can't be re-tagged like the CPU manifest because release-docker
+#       skips its GPU jobs on rc tags (gated on push_latest), so no
+#       :<rc>-cuda / :<rc>-vulkan exists to promote. These feature builds are
+#       unsigned, matching release-docker's GPU jobs (only the CPU manifest is
+#       cosign-signed in either path).
 #
 #   Desktop:
 #     - downloads .dmg/.exe/.deb/.AppImage/.rpm from the rc GH Release
@@ -66,6 +75,10 @@ on:
         type: string
       promote_docker:
         description: "Promote docker images (mem + mem-updater)"
+        type: boolean
+        default: true
+      promote_gpu:
+        description: "Build & publish GPU images (:<ga>-cuda / :<ga>-vulkan) from the rc source ref"
         type: boolean
         default: true
       promote_desktop:
@@ -195,6 +208,130 @@ jobs:
             echo "  --certificate-identity-regexp 'https://github.com/wey-gu/mem-releases' \\"
             echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
             echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # GPU images (:<ga>-cuda / :<ga>-vulkan) cannot be promoted by a manifest
+  # re-tag the way the CPU image is: the rc never built them. release-docker's
+  # build-cuda/build-vulkan jobs gate on `push_latest == true`, which is false
+  # for every rc tag, so no `:<rc>-cuda` / `:<rc>-vulkan` exists on Hub to
+  # imagetools-create from. So GA builds them here, from the SAME rc source ref
+  # the validated CPU images were built from (`v${RC}` on nowledge-co/mem — the
+  # GA source tag does not exist on the source repo until the GH draft is
+  # published later, so the rc ref is the correct, already-validated source).
+  # These are single-arch amd64 feature builds, mirroring release-docker's GPU
+  # job setup verbatim (buildx, login, Dockerfile + build-args, cache, tags).
+  #
+  # Signing parity: release-docker only cosign-signs the CPU multi-arch
+  # manifest in its `publish` job; its build-cuda/build-vulkan jobs push
+  # UNSIGNED tags. This job matches that model exactly — GPU variants are
+  # intentionally unsigned in both the rc and GA paths.
+  promote-gpu:
+    needs: validate
+    if: ${{ inputs.promote_gpu }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      IMAGE: docker.io/nowledgelabs/mem
+      REGISTRY_CACHE_REPO: docker.io/nowledgelabs/mem-buildcache
+      RC: ${{ needs.validate.outputs.rc_tag }}
+      GA: ${{ needs.validate.outputs.ga_tag }}
+    steps:
+      - name: Checkout source (rc ref)
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: v${{ needs.validate.outputs.rc_tag }}
+          submodules: false
+
+      - name: Resolve source commit
+        id: sha
+        run: echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Dockerfile.rust.* COPYs upstream_forks/ into the build context and
+      # compiles nmem-server's path-deps (ladybug, liteparse, rig). Init them
+      # over HTTPS (public wey-gu forks, no SSH key). Mirrors release-docker.
+      - name: Init Rust fork submodules (https)
+        run: |
+          git config --global --add safe.directory '*' || true
+          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig; do
+            git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
+            git submodule update --init --depth 1 "$sm"
+          done
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: tags
+        run: |
+          set -euo pipefail
+          MINOR="${GA%.*}"
+          # GA tag carries no dash (validate enforces clean semver), so the
+          # GPU tags read 0.10.0-cuda / 0.10-cuda, matching release-docker's
+          # `:<ver>-cuda` / `:<ver>-vulkan` convention.
+          echo "cuda=${IMAGE}:${GA}-cuda,${IMAGE}:${MINOR}-cuda"       >> "$GITHUB_OUTPUT"
+          echo "vulkan=${IMAGE}:${GA}-vulkan,${IMAGE}:${MINOR}-vulkan" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push :<ga>-cuda
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: nowledge-graph/docker/Dockerfile.rust.cuda
+          platforms: linux/amd64
+          build-args: |
+            NMEM_BUILD_SHA_FULL=${{ steps.sha.outputs.source_sha }}
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.tags.outputs.cuda }}
+          labels: |
+            org.opencontainers.image.version=${{ env.GA }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:cuda-amd64
+          cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:cuda-amd64,mode=max
+
+      - name: Build & push :<ga>-vulkan
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: nowledge-graph/docker/Dockerfile.rust.vulkan
+          platforms: linux/amd64
+          build-args: |
+            NMEM_BUILD_SHA_FULL=${{ steps.sha.outputs.source_sha }}
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.tags.outputs.vulkan }}
+          labels: |
+            org.opencontainers.image.version=${{ env.GA }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:vulkan-amd64
+          cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:vulkan-amd64,mode=max
+
+      - name: Verify GPU manifests
+        run: |
+          set -euo pipefail
+          echo "::group::mem:${GA}-cuda"
+          docker buildx imagetools inspect "${IMAGE}:${GA}-cuda"
+          echo "::endgroup::"
+          echo "::group::mem:${GA}-vulkan"
+          docker buildx imagetools inspect "${IMAGE}:${GA}-vulkan"
+          echo "::endgroup::"
+
+      - name: Summary
+        run: |
+          {
+            echo "### GPU images built for ${GA} (from rc source v${RC})"
+            echo "- cuda:   docker.io/nowledgelabs/mem:${GA}-cuda (amd64-only)"
+            echo "- vulkan: docker.io/nowledgelabs/mem:${GA}-vulkan (amd64-only)"
+            echo ""
+            echo "GPU variants are unsigned, matching release-docker's GPU jobs."
+            echo "Run with: docker run --gpus all ... docker.io/nowledgelabs/mem:${GA}-cuda"
           } >> "$GITHUB_STEP_SUMMARY"
 
   promote-desktop:
@@ -421,7 +558,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   recap:
-    needs: [validate, promote-docker, promote-desktop]
+    needs: [validate, promote-docker, promote-gpu, promote-desktop]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -433,5 +570,6 @@ jobs:
             echo "| ---------------- | ---------------------------------------- |"
             echo "| validate         | ${{ needs.validate.result }}             |"
             echo "| promote-docker   | ${{ needs.promote-docker.result }}       |"
+            echo "| promote-gpu      | ${{ needs.promote-gpu.result }}          |"
             echo "| promote-desktop  | ${{ needs.promote-desktop.result }}      |"
           } >> "$GITHUB_STEP_SUMMARY"
