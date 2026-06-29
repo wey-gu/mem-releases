@@ -917,11 +917,35 @@ jobs:
             echo "SCCACHE_ENDPOINT=https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
             echo "AWS_ACCESS_KEY_ID=${R2_KEY}"
             echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET}"
+            # Force the Ninja generator for ALL CMake invocations from the
+            # `cmake` Rust crate (llama-cpp-sys-2). This is the load-bearing fix
+            # for the -vulkan build: ggml-vulkan builds `vulkan-shaders-gen` as a
+            # nested ExternalProject_Add, and an ExternalProject inherits the
+            # PARENT's generator. With the default Visual Studio generator the
+            # nested host-tool TryCompile runs parallel CL.exe writing one shared
+            # vc145.pdb -> `error C1041 ... please use /FS` -> CMake declares the
+            # C compiler "broken" -> no cmake_install.cmake -> "Not a file". Ninja
+            # writes per-object PDBs and runs no MSBuild PDB race, so both the
+            # parent and the inherited nested build configure cleanly. Ninja with
+            # MSVC needs the dev environment active (cl.exe + INCLUDE/LIB), set up
+            # by the ilammy/msvc-dev-cmd step below. Scoped to this -vulkan job;
+            # the CPU windows job is untouched.
+            echo "CMAKE_GENERATOR=Ninja"
           } >> "$GITHUB_ENV"
 
       - name: Install npm deps
         working-directory: nowledge-graph
         run: npm ci --no-audit --no-fund
+
+      # Activate the MSVC developer environment (cl.exe, INCLUDE, LIB on the
+      # process env) for the whole job. REQUIRED because CMAKE_GENERATOR=Ninja
+      # (set above) makes CMake invoke cl.exe directly instead of routing through
+      # MSBuild's auto-activation. Without this, Ninja builds fail with "cl.exe
+      # not found" / "No CMAKE_CXX_COMPILER could be found". x64 host + target.
+      - name: Activate MSVC developer environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       - name: Install Rust backend build toolchain (Windows)
         shell: pwsh
@@ -1047,12 +1071,20 @@ jobs:
             libfuse2 \
             cmake clang libclang-dev pkg-config protobuf-compiler \
             gcc-12 g++-12 \
-            libvulkan-dev glslang-tools libvulkan1
-          # libvulkan-dev + glslang-tools: GGML Vulkan build-time deps (the
-          # vulkan loader dev lib it links against + the glslangValidator SPIR-V
-          # shader compiler). libvulkan1 provides libvulkan.so.1 (the runtime
-          # loader) which we BUNDLE into the -vulkan AppImage below so it runs on
-          # minimal/headless systems without the distro loader package.
+            libvulkan-dev glslang-tools glslc libvulkan1
+          # libvulkan-dev + glslc + glslang-tools: GGML Vulkan build-time deps.
+          #   - libvulkan-dev: the vulkan loader dev lib the backend links against.
+          #   - glslc: Google shaderc's SPIR-V compiler. ggml-vulkan's CMake does
+          #     `find_package(Vulkan COMPONENTS glslc)` and HARD-FAILS without the
+          #     `glslc` BINARY ("Could NOT find Vulkan (missing: glslc)").
+          #     glslang-tools only provides `glslangValidator`, NOT `glslc`, so it
+          #     does NOT satisfy this. On noble (24.04) `glslc` is a real apt
+          #     package (universe, source: shaderc) shipping /usr/bin/glslc, which
+          #     CMake's FindVulkan picks up off PATH. (22.04 lacks it -> the reason
+          #     this job pins 24.04.)
+          # libvulkan1 provides libvulkan.so.1 (the runtime loader) which we BUNDLE
+          # into the -vulkan AppImage below so it runs on minimal/headless systems
+          # without the distro loader package.
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100
           sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100
           sudo update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-12 100
@@ -1061,14 +1093,16 @@ jobs:
       - name: Verify shader compiler on PATH
         run: |
           set -euo pipefail
-          if command -v glslangValidator >/dev/null 2>&1; then
-            glslangValidator --version | head -1
-          elif command -v glslc >/dev/null 2>&1; then
-            glslc --version | head -1
-          else
-            echo "::error::No SPIR-V shader compiler (glslangValidator/glslc) on PATH"
+          # ggml-vulkan's CMake requires `glslc` SPECIFICALLY (find_package(Vulkan
+          # COMPONENTS glslc)). glslangValidator does NOT satisfy it, so this step
+          # must REQUIRE glslc and fail fast — accepting glslangValidator as a
+          # substitute produced a false-green here while the real CMake build later
+          # died with "Could NOT find Vulkan (missing: glslc)".
+          if ! command -v glslc >/dev/null 2>&1; then
+            echo "::error::glslc (Google shaderc SPIR-V compiler) not on PATH. ggml-vulkan's find_package(Vulkan COMPONENTS glslc) needs it; install the 'glslc' apt package."
             exit 1
           fi
+          glslc --version | head -1
 
       - uses: actions/setup-node@v4
         with:
