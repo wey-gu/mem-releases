@@ -454,7 +454,12 @@ jobs:
             libwebkit2gtk-4.1-dev libssl-dev libgtk-3-dev \
             librsvg2-dev libayatana-appindicator3-dev libxdo-dev \
             patchelf zstd build-essential curl wget file \
-            libfuse2
+            libfuse2 desktop-file-utils
+          # desktop-file-utils: provides `desktop-file-validate`, which
+          # appimagetool's continuous build (build 295, 2025-12-04) now
+          # hard-requires during the AppImage Wayland-compat repack.
+          # Missing it broke the 0.9.29 deb/AppImage build with
+          # "desktop-file-validate command is missing, please install it".
           # libfuse2: required to run `linuxdeploy-plugin-appimage`'s
           # AppImage during Tauri's AppImage bundling step. ubuntu-22.04
           # GH runner images used to ship libfuse2 pre-installed; the
