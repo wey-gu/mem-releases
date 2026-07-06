@@ -305,8 +305,9 @@ jobs:
       # ladybug's C++ uses C++20 parenthesized-init of aggregates (P0960) via
       # vector::emplace_back → construct_at; clang < 16 (Xcode 15.x) rejects it
       # ("no matching constructor for SegmentCheckpointState"). Select the newest
-      # installed Xcode 16+ (clang 16+) before building. Deployment-target stays
-      # pinned to 14.0 in build-rust-bundle.sh, so the runtime floor is unchanged.
+      # installed Xcode 16+ (clang 16+) before building. Deployment-target is
+      # pinned to 12.0 in build-rust-bundle.sh (Xcode 16 SDK can build for the
+      # older 12.0 runtime floor), so the app supports macOS 12 (Monterey) and up.
       - name: Use Xcode 16+ (ladybug C++20 construct_at needs clang 16+)
         run: |
           newest=$(ls -d /Applications/Xcode_1[6-9]*.app /Applications/Xcode_2*.app 2>/dev/null | sort -V | tail -1)
