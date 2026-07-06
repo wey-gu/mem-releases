@@ -121,6 +121,19 @@ jobs:
           cd nmem-rs
           cargo run -p nmem-embed --bin models -- download qwen3-embedding-0.6b-q8_0
 
+      # Native toolchain (mirrors release-desktop.yml): ladybug's C++20
+      # construct_at needs clang 16 (Xcode 16); protoc is required by lancedb's
+      # lance-datafusion build-script; cmake + ninja for the C/C++ deps. Without
+      # these the standalone bundle build dies at "protoc not found" before it
+      # ever compiles (so it could never actually validate the macOS floor).
+      - name: Use Xcode 16+ (ladybug C++20 construct_at needs clang 16+)
+        run: |
+          newest=$(ls -d /Applications/Xcode_1[6-9]*.app /Applications/Xcode_2*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$newest" ]; then sudo xcode-select -s "$newest"; fi
+          echo "DEVELOPER_DIR=$(xcode-select -p)"; cc --version
+      - name: Install Rust backend build toolchain (macOS)
+        run: brew install cmake ninja protobuf
+
       - name: Build rust-backend bundle
         run: |
           set -euo pipefail
