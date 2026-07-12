@@ -720,6 +720,12 @@ jobs:
           echo "deb=$OUT_DEB"      >> "$GITHUB_OUTPUT"
           echo "appimage=$OUT_APP" >> "$GITHUB_OUTPUT"
 
+      - name: Verify Linux payloads and ABI floor
+        working-directory: nowledge-graph
+        run: |
+          ./scripts/verify-linux-package.sh "${{ steps.locate.outputs.deb }}"
+          ./scripts/verify-linux-package.sh "${{ steps.locate.outputs.appimage }}"
+
       - uses: actions/upload-artifact@v4
         with:
           name: linux-deb-appimage
@@ -731,29 +737,17 @@ jobs:
 
   build-linux-rpm:
     needs: meta
-    runs-on: ubuntu-latest
+    # Build every default Linux artifact against one explicit runtime floor.
+    # Fedora 40 raised the RPM to GLIBC_2.39/CXXABI_1.3.15, so it could not run
+    # on Fedora 39 (GLIBC 2.38) even though the Ubuntu-built AppImage/DEB could.
+    # Ubuntu 22.04 gives all three packages the supported GLIBC 2.35 floor;
+    # rpmbuild only creates the archive and does not change the ELF ABI.
+    runs-on: ubuntu-22.04
     timeout-minutes: 180
-    container:
-      image: fedora:40
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
     steps:
-      - name: Install system deps (Fedora)
-        run: |
-          dnf install -y \
-            webkit2gtk4.1-devel gtk3-devel librsvg2-devel \
-            libappindicator-gtk3-devel openssl-devel rpm-build \
-            zstd nodejs npm git file findutils which \
-            gcc gcc-c++ make patchelf curl wget tar \
-            cmake clang-devel ninja-build protobuf-compiler protobuf-devel
-          # protobuf-devel: Fedora's protobuf-compiler ships only the protoc
-          # binary, NOT the well-known .proto includes (google/protobuf/*.proto)
-          # that lance-encoding's build-script imports. apt/brew/choco bundle
-          # them; Fedora splits them into protobuf-devel.
-          # cmake/clang-devel/ninja-build + gcc-c++ (already above): native
-          # Rust backend toolchain (llama.cpp / ladybug / bindgen).
-
       - name: Checkout private source (nowledge-co/mem)
         uses: actions/checkout@v4
         with:
@@ -762,11 +756,27 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - name: Install Rust
+      - name: Install system deps
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          "$HOME/.cargo/bin/rustup" target add x86_64-unknown-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libssl-dev libgtk-3-dev \
+            librsvg2-dev libayatana-appindicator3-dev libxdo-dev \
+            patchelf zstd build-essential curl wget file \
+            cmake clang libclang-dev pkg-config protobuf-compiler \
+            gcc-12 g++-12 rpm cpio
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100
+          sudo update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-12 100
+          sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-12 100
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: nowledge-graph/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -776,10 +786,10 @@ jobs:
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
-          # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
-          key: linux-rpm-fedora40-v2
+          # Separate from the retired Fedora-40 ABI and stale binary caches.
+          key: linux-rpm-ubuntu22-v1
 
-      # sccache → R2 (see build-macos-arm64 for rationale). Fedora container.
+      # sccache → R2 (see build-macos-arm64 for rationale).
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
       - name: Point sccache at R2
@@ -828,6 +838,10 @@ jobs:
           OUT="$RUNNER_TEMP/$(basename "$RPM")"
           mv -f "$RPM" "$OUT"
           echo "rpm=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Linux payloads and ABI floor
+        working-directory: nowledge-graph
+        run: ./scripts/verify-linux-package.sh "${{ steps.locate.outputs.rpm }}"
 
       - uses: actions/upload-artifact@v4
         with:
