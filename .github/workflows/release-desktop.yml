@@ -511,6 +511,11 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      # BoringSSL (boring-sys2) assembles its crypto with NASM. The pinned
+      # windows-2022 image (MSVC 14.44, needed because 14.51 breaks ladybug's
+      # C++ link) does not expose NASM on PATH, so install it explicitly.
+      - uses: ilammy/setup-nasm@v1
+
       - uses: Swatinem/rust-cache@v2
         with:
           # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run by
@@ -900,6 +905,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+
+      # BoringSSL (boring-sys2) assembles its crypto with NASM. The pinned
+      # windows-2022 image (MSVC 14.44, needed because 14.51 breaks ladybug's
+      # C++ link) does not expose NASM on PATH, so install it explicitly.
+      - uses: ilammy/setup-nasm@v1
 
       - uses: Swatinem/rust-cache@v2
         with:
