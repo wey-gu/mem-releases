@@ -487,7 +487,7 @@ jobs:
 
   build-windows:
     needs: meta
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 180
     env:
       VERSION: ${{ needs.meta.outputs.version }}
@@ -522,13 +522,8 @@ jobs:
           # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
           key: windows-x86_64-v2
 
-      # sccache → R2 (see build-macos-arm64 for rationale). Rust is cached via
-      # RUSTC_WRAPPER. The heavy C/C++ (ladybug + llama.cpp via cmake) is
-      # intentionally NOT routed through sccache on Windows: sccache 0.16.0
-      # mishandles MSVC 14.51 (VS18), reporting a phantom cache "hit" without
-      # materializing the .obj, so lib.exe later fails with LNK1181 (e.g. brotli
-      # constants.c.obj, antlr4 ANTLRErrorListener.cpp.obj). Compiling C/C++
-      # locally via cl.exe is reliable; revisit once sccache handles MSVC 14.51.
+      # sccache → R2 (see build-macos-arm64 for rationale). MSVC + cmake are
+      # both sccache-cacheable; graceful local fallback on any backend error.
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
       - name: Point sccache at R2
@@ -540,7 +535,9 @@ jobs:
         run: |
           {
             echo "RUSTC_WRAPPER=sccache"
+            echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_IDLE_TIMEOUT=0"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_GHA_ENABLED=false"
             echo "SCCACHE_BUCKET=nowledge-mem-sccache"
             echo "SCCACHE_REGION=auto"
@@ -879,7 +876,7 @@ jobs:
   build-windows-vulkan:
     needs: meta
     if: ${{ needs.meta.outputs.run_vulkan == 'true' }}
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 180
     env:
       VERSION: ${{ needs.meta.outputs.version }}
@@ -915,8 +912,6 @@ jobs:
           # must not share/poison the CPU build cache.
           key: windows-x86_64-vulkan-v1
 
-      # C/C++ NOT routed through sccache on Windows (MSVC 14.51 phantom-cache-hit
-      # LNK1181; see build-windows). Rust still cached via RUSTC_WRAPPER.
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
       - name: Point sccache at R2
@@ -928,7 +923,9 @@ jobs:
         run: |
           {
             echo "RUSTC_WRAPPER=sccache"
+            echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_IDLE_TIMEOUT=0"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_GHA_ENABLED=false"
             echo "SCCACHE_BUCKET=nowledge-mem-sccache"
             echo "SCCACHE_REGION=auto"
