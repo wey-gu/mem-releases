@@ -1664,6 +1664,33 @@ jobs:
               >/dev/null 2>&1 && echo "deleted artifact $id" || true
           done
 
+      # A failure anywhere after "Upload to Cloudflare R2" leaves a release that
+      # is already public on the download page and apt, but has no GitHub release
+      # and a stale auto-updater feed. Nothing about that state looks wrong from
+      # the outside, so say it out loud on the run itself.
+      - name: Report partial publish
+        if: failure()
+        run: |
+          echo "::error::PARTIAL PUBLISH for ${VERSION}. Some surfaces are already live."
+          {
+            echo "### Partial publish: ${VERSION}"
+            echo ""
+            echo "The publish job failed part-way. Every surface BEFORE the failing"
+            echo "step is already live and does not roll back:"
+            echo ""
+            echo "- R2 / download page (artifacts may already be downloadable)"
+            echo "- APT repo (apt users may already see this version)"
+            echo ""
+            echo "Check what actually landed, then finish by hand:"
+            echo ""
+            echo '```'
+            echo "curl -sIL https://backbone-mem.nowledge.co/download/${VERSION}/mac | grep -i location"
+            echo "gh release view v${VERSION} --repo ${{ github.repository }}"
+            echo "# auto-updater feed (needs CF creds, mem-backbone):"
+            echo "node scripts/update-latest-version.js ${VERSION} production"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Summary
         run: |
           echo "### Desktop release $VERSION published"          >> "$GITHUB_STEP_SUMMARY"
