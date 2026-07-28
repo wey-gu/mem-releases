@@ -232,9 +232,17 @@ jobs:
           # from cache and cargo logged 0 "Compiling" lines — rc<=18 shipped
           # an old backend (missing the feed-503 string, int community ids).
           # Any future source-behavior fix that lands without a Cargo.lock
-          # change must bump these keys (all 5 platforms) again.
+          # change must bump these keys (all 7, not just the 5 GA platforms)
+          # again.
           # (-v2 had earlier invalidated a poisoned ~/.cargo/bin cargo binary.)
-          key: macos-aarch64-v3
+          #
+          # Bumped again (2026-07-28) for a case worth naming, because it does
+          # not look like a source change at all: a bump of an upstream_forks/
+          # submodule. Those are cargo PATH deps, so their version never moves
+          # and Cargo.lock never changes, yet the C++ they compile is linked
+          # into nmem-server. The trigger here was a ladybug FTS concurrency
+          # backport. Treat a submodule pointer bump as a source-behavior fix.
+          key: macos-aarch64-v4
 
       # SOTA build-cache: sccache → R2 (S3). Content-keyed, unbounded, shared
       # across runs/branches. Caches BOTH rust (RUSTC_WRAPPER) and the heavy C++
@@ -390,7 +398,7 @@ jobs:
             nowledge-graph/src-tauri
             nmem-rs
           # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
-          key: macos-x86_64-v2
+          key: macos-x86_64-v3
 
       # sccache → R2 (see build-macos-arm64 for rationale).
       - name: Setup sccache
@@ -525,7 +533,7 @@ jobs:
             nowledge-graph/src-tauri
             nmem-rs
           # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
-          key: windows-x86_64-v2
+          key: windows-x86_64-v3
 
       # sccache → R2 (see build-macos-arm64 for rationale). MSVC + cmake are
       # both sccache-cacheable; graceful local fallback on any backend error.
@@ -663,7 +671,7 @@ jobs:
             nowledge-graph/src-tauri
             nmem-rs
           # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
-          key: linux-deb-appimage-v2
+          key: linux-deb-appimage-v3
 
       # sccache → R2 (see build-macos-arm64 for rationale).
       - name: Setup sccache
@@ -792,7 +800,7 @@ jobs:
             nowledge-graph/src-tauri
             nmem-rs
           # Separate from the retired Fedora-40 ABI and stale binary caches.
-          key: linux-rpm-ubuntu22-v1
+          key: linux-rpm-ubuntu22-v2
 
       # sccache → R2 (see build-macos-arm64 for rationale).
       - name: Setup sccache
@@ -920,7 +928,7 @@ jobs:
           # Separate cache key from the CPU windows job: the GPU feature pulls
           # in the GGML Vulkan backend, so the compiled artifacts differ and
           # must not share/poison the CPU build cache.
-          key: windows-x86_64-vulkan-v1
+          key: windows-x86_64-vulkan-v2
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -1145,7 +1153,7 @@ jobs:
             nmem-rs
           # Separate cache key from the CPU linux job (GPU feature -> different
           # compiled artifacts; must not poison the CPU build cache).
-          key: linux-vulkan-v1
+          key: linux-vulkan-v2
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
