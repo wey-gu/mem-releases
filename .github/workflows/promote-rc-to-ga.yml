@@ -371,7 +371,14 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # wrangler requires Node >= 22, and this job runs it in "Mark as latest
+          # (auto-updater feed)". Pinned at 20 this promote fails AFTER R2 and APT
+          # have already published, which is the same silent half-ship that hit
+          # 0.10.43 (release-desktop) and then 0.10.45 (here). release-desktop's
+          # publish job and finish-ga-release were fixed first; this was the third
+          # wrangler caller and was missed because that sweep was not exhaustive.
+          # Before changing any node pin, check EVERY job that runs wrangler.
+          node-version: "22"
 
       - name: Install mem-backbone npm deps
         working-directory: mem-backbone
@@ -547,6 +554,33 @@ jobs:
             "${{ steps.rename.outputs.deb }}" \
             "${{ steps.rename.outputs.appimg }}" \
             "${{ steps.rename.outputs.rpm }}"
+
+      # R2 and APT publish BEFORE the auto-updater feed and the GA release, so a
+      # failure in between leaves GA downloadable while the updater still points
+      # at the previous version and no GA release exists. Nothing about the
+      # download page looks wrong in that state, so say it out loud.
+      - name: Report partial promote
+        if: failure()
+        run: |
+          echo "::error::PARTIAL PROMOTE for ${GA}. Some surfaces are already live."
+          {
+            echo "### Partial promote: ${GA}"
+            echo ""
+            echo "Every surface BEFORE the failing step is already public and does"
+            echo "not roll back:"
+            echo ""
+            echo "- R2 / download page (app/${GA}/ artifacts)"
+            echo "- APT repo"
+            echo ""
+            echo "Still to confirm or finish by hand:"
+            echo ""
+            echo '```'
+            echo "curl -sIL https://backbone-mem.nowledge.co/download/${GA}/mac | grep -i location"
+            echo "gh release view v${GA} --repo ${{ github.repository }}"
+            echo "# auto-updater feed (needs CF creds, in mem-backbone):"
+            echo "node scripts/update-latest-version.js ${GA} production"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Summary
         run: |
