@@ -125,10 +125,14 @@ jobs:
       - name: Init Rust fork submodules (https)
         run: |
           git config --global --add safe.directory '*' || true
-          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig skein; do
-            owner=wey-gu
-            if [[ "$sm" == "skein" ]]; then owner=nowledge-co; fi
-            git config "submodule.$sm.url" "https://github.com/$owner/$(basename "$sm").git"
+          # `skein` is deliberately NOT in this list. nowledge-co/skein is PRIVATE
+          # and this pipeline has no credentials for it, so `git submodule update`
+          # aborts the job on the clone failure. It was added in #14 because Cargo
+          # needed the path manifest during workspace resolution; nowledge-co/mem
+          # removed that dependency, so the release build no longer resolves it at
+          # all. See nowledge-co/mem#980 before adding it back.
+          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig; do
+            git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
             git submodule update --init --depth 1 "$sm"
           done
 
@@ -179,10 +183,14 @@ jobs:
       - name: Init Rust fork submodules (https)
         run: |
           git config --global --add safe.directory '*' || true
-          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig skein; do
-            owner=wey-gu
-            if [[ "$sm" == "skein" ]]; then owner=nowledge-co; fi
-            git config "submodule.$sm.url" "https://github.com/$owner/$(basename "$sm").git"
+          # `skein` is deliberately NOT in this list. nowledge-co/skein is PRIVATE
+          # and this pipeline has no credentials for it, so `git submodule update`
+          # aborts the job on the clone failure. It was added in #14 because Cargo
+          # needed the path manifest during workspace resolution; nowledge-co/mem
+          # removed that dependency, so the release build no longer resolves it at
+          # all. See nowledge-co/mem#980 before adding it back.
+          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig; do
+            git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
             git submodule update --init --depth 1 "$sm"
           done
 
@@ -234,10 +242,14 @@ jobs:
       - name: Init Rust fork submodules (https)
         run: |
           git config --global --add safe.directory '*' || true
-          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig skein; do
-            owner=wey-gu
-            if [[ "$sm" == "skein" ]]; then owner=nowledge-co; fi
-            git config "submodule.$sm.url" "https://github.com/$owner/$(basename "$sm").git"
+          # `skein` is deliberately NOT in this list. nowledge-co/skein is PRIVATE
+          # and this pipeline has no credentials for it, so `git submodule update`
+          # aborts the job on the clone failure. It was added in #14 because Cargo
+          # needed the path manifest during workspace resolution; nowledge-co/mem
+          # removed that dependency, so the release build no longer resolves it at
+          # all. See nowledge-co/mem#980 before adding it back.
+          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig; do
+            git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
             git submodule update --init --depth 1 "$sm"
           done
       - uses: docker/setup-buildx-action@v3
@@ -289,10 +301,14 @@ jobs:
       - name: Init Rust fork submodules (https)
         run: |
           git config --global --add safe.directory '*' || true
-          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig skein; do
-            owner=wey-gu
-            if [[ "$sm" == "skein" ]]; then owner=nowledge-co; fi
-            git config "submodule.$sm.url" "https://github.com/$owner/$(basename "$sm").git"
+          # `skein` is deliberately NOT in this list. nowledge-co/skein is PRIVATE
+          # and this pipeline has no credentials for it, so `git submodule update`
+          # aborts the job on the clone failure. It was added in #14 because Cargo
+          # needed the path manifest during workspace resolution; nowledge-co/mem
+          # removed that dependency, so the release build no longer resolves it at
+          # all. See nowledge-co/mem#980 before adding it back.
+          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig; do
+            git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
             git submodule update --init --depth 1 "$sm"
           done
       - uses: docker/setup-buildx-action@v3
