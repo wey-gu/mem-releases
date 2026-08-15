@@ -563,24 +563,26 @@ jobs:
         working-directory: nowledge-graph
         run: npm ci --no-audit --no-fund
 
-      # Native Rust backend toolchain (llama.cpp / ladybug / bindgen).
-      # MSVC is present on windows-latest; we add LLVM/clang (bindgen),
-      # ninja, and cmake.
-      - name: Install Rust backend build toolchain (Windows)
+      # The hosted Windows image already includes LLVM/clang, CMake, and Ninja.
+      # Install only protoc from its upstream GitHub release so a Chocolatey
+      # outage cannot block every Windows release artifact.
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          version: "26.x"
+          repo-token: ${{ github.token }}
+
+      - name: Verify Rust backend build toolchain (Windows)
         shell: pwsh
         run: |
-          choco install -y llvm ninja cmake protoc
           rustup target add x86_64-pc-windows-msvc
-          # choco updates the *machine* PATH, but the next step's process PATH does
-          # not always pick it up (known choco-on-GHA gotcha) — build-rust-bundle.ps1
-          # then fails "protoc not found". Export protoc explicitly for later steps:
-          # the script (and prost/lance build-scripts) honor $env:PROTOC, and we also
-          # add the choco shim dir to PATH.
-          $cb = "C:\ProgramData\chocolatey\bin"
-          "$cb" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          $protoc = (Get-Command protoc -ErrorAction SilentlyContinue).Source
-          if (-not $protoc) { $protoc = Join-Path $cb "protoc.exe" }
-          if (Test-Path $protoc) { "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+          if ($LASTEXITCODE -ne 0) { throw "rustup target add failed ($LASTEXITCODE)" }
+          foreach ($tool in @("clang", "cmake", "ninja", "protoc")) {
+            $resolved = (Get-Command $tool -ErrorAction Stop).Source
+            Write-Host "$tool resolved to: $resolved"
+          }
+          $protoc = (Get-Command protoc -ErrorAction Stop).Source
+          "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "protoc resolved to: $protoc"
 
       - name: Build Rust backend bundle (Windows)
@@ -980,16 +982,23 @@ jobs:
         with:
           arch: x64
 
-      - name: Install Rust backend build toolchain (Windows)
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          version: "26.x"
+          repo-token: ${{ github.token }}
+
+      - name: Verify Rust backend build toolchain (Windows)
         shell: pwsh
         run: |
-          choco install -y llvm ninja cmake protoc
           rustup target add x86_64-pc-windows-msvc
-          $cb = "C:\ProgramData\chocolatey\bin"
-          "$cb" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          $protoc = (Get-Command protoc -ErrorAction SilentlyContinue).Source
-          if (-not $protoc) { $protoc = Join-Path $cb "protoc.exe" }
-          if (Test-Path $protoc) { "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+          if ($LASTEXITCODE -ne 0) { throw "rustup target add failed ($LASTEXITCODE)" }
+          foreach ($tool in @("clang", "cmake", "ninja", "protoc")) {
+            $resolved = (Get-Command $tool -ErrorAction Stop).Source
+            Write-Host "$tool resolved to: $resolved"
+          }
+          $protoc = (Get-Command protoc -ErrorAction Stop).Source
+          "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "protoc resolved to: $protoc"
 
       # Vulkan SDK: provides vulkan-1.lib (the import the GGML Vulkan backend
