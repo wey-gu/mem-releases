@@ -234,6 +234,7 @@ jobs:
     env:
       IMAGE: docker.io/nowledgelabs/mem
       REGISTRY_CACHE_REPO: docker.io/nowledgelabs/mem-buildcache
+      LEGACY_RELEASE_RUST_SUBMODULES: "upstream_forks/ladybug upstream_forks/rig"
       RC: ${{ needs.validate.outputs.rc_tag }}
       GA: ${{ needs.validate.outputs.ga_tag }}
     steps:
@@ -249,16 +250,21 @@ jobs:
         id: sha
         run: echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      # Dockerfile.rust.* COPYs upstream_forks/ into the build context and
-      # compiles nmem-server's path-deps (ladybug, liteparse, rig). Init them
-      # over HTTPS (public wey-gu forks, no SSH key). Mirrors release-docker.
+      # Prefer the source-owned release contract. The fallback keeps historical
+      # source tags, which predate the helper, reproducibly buildable.
       - name: Init Rust fork submodules (https)
         run: |
           git config --global --add safe.directory '*' || true
-          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig; do
-            git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
-            git submodule update --init --depth 1 "$sm"
-          done
+          if [[ -x scripts/init-release-rust-submodules.sh ]]; then
+            scripts/init-release-rust-submodules.sh --init-https
+          else
+            echo "::warning::Source ref predates the release submodule helper; using the legacy contract."
+            read -r -a legacy_submodules <<< "$LEGACY_RELEASE_RUST_SUBMODULES"
+            for sm in "${legacy_submodules[@]}"; do
+              git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
+              git submodule update --init --depth 1 "$sm"
+            done
+          fi
 
       - uses: docker/setup-buildx-action@v3
 
