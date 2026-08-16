@@ -149,8 +149,25 @@ jobs:
             echo "::error::Change runs-on to an image that ships Xcode 26, or install it in a setup step."
             exit 1
           fi
+          # DEVELOPER_DIR alone is NOT enough. The 0.10.64 run selected Xcode
+          # 26.3 here and still built with the iOS 18.5 SDK: the log mentions
+          # Xcode_16.4 115 times against 26.3's 24, because tauri shells out to
+          # `xcodebuild` which resolves through the xcode-select global path.
+          # Switch it for real, then prove the switch took.
+          sudo xcode-select -s "$BEST/Contents/Developer"
           echo "DEVELOPER_DIR=$BEST/Contents/Developer" >> "$GITHUB_ENV"
-          "$BEST/Contents/Developer/usr/bin/xcodebuild" -version | sed 's/^/  /'
+          ACTIVE="$(xcode-select -p)"
+          echo "xcode-select -p -> $ACTIVE"
+          [[ "$ACTIVE" == "$BEST/Contents/Developer" ]] || {
+            echo "::error::xcode-select still points at $ACTIVE"; exit 1; }
+          xcodebuild -version | sed 's/^/  /'
+          SDK="$(xcodebuild -showsdks 2>/dev/null | grep -oE 'iphoneos[0-9.]+' | sort -V | tail -1)"
+          echo "newest iOS SDK now visible: ${SDK:-unknown}"
+          case "$SDK" in
+            iphoneos2[6-9]*|iphoneos[3-9][0-9]*) ;;
+            *) echo "::error::Active toolchain exposes $SDK; Apple requires iphoneos26 or newer."
+               exit 1 ;;
+          esac
 
       - uses: dtolnay/rust-toolchain@stable
         with:
