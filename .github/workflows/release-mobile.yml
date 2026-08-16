@@ -106,8 +106,14 @@ jobs:
           # The web frontend is built by tauri's beforeBuildCommand
           # (`npm --prefix .. run build:mobile`), so the PARENT project's
           # dependencies are needed too, not just mobile/.
+          # These two use different commands on purpose. nowledge-graph has a
+          # package-lock.json, so `ci` is right there. nowledge-graph/mobile has
+          # NONE -- `npm ci` fails outright with EUSAGE, which is how the first
+          # run of this workflow died in both jobs. Its only dependency is
+          # `@tauri-apps/cli: ^2`, so `install` is the working command until a
+          # lockfile is committed there.
           npm --prefix nowledge-graph ci --no-audit --no-fund
-          npm --prefix nowledge-graph/mobile ci --no-audit --no-fund
+          npm --prefix nowledge-graph/mobile install --no-audit --no-fund
 
       # Import the Apple Distribution certificate into an ephemeral keychain.
       #
@@ -311,8 +317,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # These two use different commands on purpose. nowledge-graph has a
+          # package-lock.json, so `ci` is right there. nowledge-graph/mobile has
+          # NONE -- `npm ci` fails outright with EUSAGE, which is how the first
+          # run of this workflow died in both jobs. Its only dependency is
+          # `@tauri-apps/cli: ^2`, so `install` is the working command until a
+          # lockfile is committed there.
           npm --prefix nowledge-graph ci --no-audit --no-fund
-          npm --prefix nowledge-graph/mobile ci --no-audit --no-fund
+          npm --prefix nowledge-graph/mobile install --no-audit --no-fund
 
       # keystore.properties is gitignored on purpose. `storeFile` is resolved
       # relative to gen/android/app, so the keystore is written next to it.
