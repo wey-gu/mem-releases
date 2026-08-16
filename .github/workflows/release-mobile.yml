@@ -194,6 +194,12 @@ jobs:
           mkdir -p "$DIR"
           echo "$APPLE_API_KEY_BASE64" | base64 --decode > "$DIR/AuthKey_${APPLE_API_KEY}.p8"
           chmod 600 "$DIR/AuthKey_${APPLE_API_KEY}.p8"
+          # `npx tauri ios build` does its OWN signing preflight and demands all
+          # THREE of APPLE_API_KEY, APPLE_API_ISSUER and APPLE_API_KEY_PATH. Only
+          # altool is happy with the id alone. Exporting the path here is what
+          # lets the build step past tauri's check; the first run died on exactly
+          # this, before producing an xcarchive.
+          echo "APPLE_API_KEY_PATH=$DIR/AuthKey_${APPLE_API_KEY}.p8" >> "$GITHUB_ENV"
 
       - name: Build, sign and upload to TestFlight
         working-directory: nowledge-graph/mobile
