@@ -184,6 +184,7 @@ jobs:
       - name: Install provisioning profile
         env:
           IOS_PROVISIONING_PROFILE_B64: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+          IOS_SHARE_PROFILE_B64: ${{ secrets.IOS_SHARE_PROVISIONING_PROFILE }}
         shell: bash
         run: |
           set -euo pipefail
@@ -196,6 +197,20 @@ jobs:
           mkdir -p "$DEST"
           cp "$PROFILE" "$DEST/"
           echo "IOS_PROVISIONING_PROFILE=$PROFILE" >> "$GITHUB_ENV"
+
+          # The share extension has its own bundle id, so it needs its own
+          # profile. Signing only the outer app leaves the appex carrying
+          # tauri's dummy identity and Apple rejects the upload with a 409.
+          if [[ -n "${IOS_SHARE_PROFILE_B64:-}" ]]; then
+            SHARE="$RUNNER_TEMP/nowledge-mem-share.mobileprovision"
+            echo "$IOS_SHARE_PROFILE_B64" | base64 --decode > "$SHARE"
+            cp "$SHARE" "$DEST/"
+            echo "IOS_SHARE_PROVISIONING_PROFILE=$SHARE" >> "$GITHUB_ENV"
+            SNAME="$(security cms -D -i "$SHARE" | plutil -extract Name raw - 2>/dev/null || echo '?')"
+            echo "Share profile: $SNAME"
+          else
+            echo "::warning::IOS_SHARE_PROVISIONING_PROFILE not set; the build script will refuse if an appex is present."
+          fi
           NAME="$(security cms -D -i "$PROFILE" | plutil -extract Name raw - 2>/dev/null || echo '?')"
           EXPIRES="$(security cms -D -i "$PROFILE" | plutil -extract ExpirationDate raw - 2>/dev/null || echo '?')"
           echo "Profile: $NAME (expires $EXPIRES)"
