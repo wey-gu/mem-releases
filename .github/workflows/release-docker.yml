@@ -55,6 +55,7 @@ permissions:
 env:
   IMAGE: docker.io/nowledgelabs/mem
   REGISTRY_CACHE_REPO: docker.io/nowledgelabs/mem-buildcache
+  LEGACY_RELEASE_RUST_SUBMODULES: "upstream_forks/ladybug upstream_forks/rig"
 
 jobs:
   meta:
@@ -117,24 +118,21 @@ jobs:
           ref: ${{ needs.meta.outputs.source_ref }}
           submodules: false
 
-      # Dockerfile.rust COPYs upstream_forks/ and skein into the build context
-      # and resolves nmem-server's path-deps (ladybug, liteparse, rig, skein).
-      # The Python image never needed them, so checkout uses submodules:false;
-      # init them here over HTTPS before the build. Skein is optional at compile
-      # time, but Cargo still needs its path manifest during workspace resolution.
+      # Prefer the source-owned release contract. The fallback keeps historical
+      # source tags, which predate the helper, reproducibly buildable.
       - name: Init Rust fork submodules (https)
         run: |
           git config --global --add safe.directory '*' || true
-          # `skein` is deliberately NOT in this list. nowledge-co/skein is PRIVATE
-          # and this pipeline has no credentials for it, so `git submodule update`
-          # aborts the job on the clone failure. It was added in #14 because Cargo
-          # needed the path manifest during workspace resolution; nowledge-co/mem
-          # removed that dependency, so the release build no longer resolves it at
-          # all. See nowledge-co/mem#980 before adding it back.
-          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig; do
-            git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
-            git submodule update --init --depth 1 "$sm"
-          done
+          if [[ -x scripts/init-release-rust-submodules.sh ]]; then
+            scripts/init-release-rust-submodules.sh --init-https
+          else
+            echo "::warning::Source ref predates the release submodule helper; using the legacy contract."
+            read -r -a legacy_submodules <<< "$LEGACY_RELEASE_RUST_SUBMODULES"
+            for sm in "${legacy_submodules[@]}"; do
+              git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
+              git submodule update --init --depth 1 "$sm"
+            done
+          fi
 
       - uses: docker/setup-buildx-action@v3
 
@@ -175,24 +173,21 @@ jobs:
           ref: ${{ needs.meta.outputs.source_ref }}
           submodules: false
 
-      # Dockerfile.rust COPYs upstream_forks/ and skein into the build context
-      # and resolves nmem-server's path-deps (ladybug, liteparse, rig, skein).
-      # The Python image never needed them, so checkout uses submodules:false;
-      # init them here over HTTPS before the build. Skein is optional at compile
-      # time, but Cargo still needs its path manifest during workspace resolution.
+      # Prefer the source-owned release contract. The fallback keeps historical
+      # source tags, which predate the helper, reproducibly buildable.
       - name: Init Rust fork submodules (https)
         run: |
           git config --global --add safe.directory '*' || true
-          # `skein` is deliberately NOT in this list. nowledge-co/skein is PRIVATE
-          # and this pipeline has no credentials for it, so `git submodule update`
-          # aborts the job on the clone failure. It was added in #14 because Cargo
-          # needed the path manifest during workspace resolution; nowledge-co/mem
-          # removed that dependency, so the release build no longer resolves it at
-          # all. See nowledge-co/mem#980 before adding it back.
-          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig; do
-            git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
-            git submodule update --init --depth 1 "$sm"
-          done
+          if [[ -x scripts/init-release-rust-submodules.sh ]]; then
+            scripts/init-release-rust-submodules.sh --init-https
+          else
+            echo "::warning::Source ref predates the release submodule helper; using the legacy contract."
+            read -r -a legacy_submodules <<< "$LEGACY_RELEASE_RUST_SUBMODULES"
+            for sm in "${legacy_submodules[@]}"; do
+              git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
+              git submodule update --init --depth 1 "$sm"
+            done
+          fi
 
       - uses: docker/setup-buildx-action@v3
 
@@ -242,16 +237,16 @@ jobs:
       - name: Init Rust fork submodules (https)
         run: |
           git config --global --add safe.directory '*' || true
-          # `skein` is deliberately NOT in this list. nowledge-co/skein is PRIVATE
-          # and this pipeline has no credentials for it, so `git submodule update`
-          # aborts the job on the clone failure. It was added in #14 because Cargo
-          # needed the path manifest during workspace resolution; nowledge-co/mem
-          # removed that dependency, so the release build no longer resolves it at
-          # all. See nowledge-co/mem#980 before adding it back.
-          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig; do
-            git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
-            git submodule update --init --depth 1 "$sm"
-          done
+          if [[ -x scripts/init-release-rust-submodules.sh ]]; then
+            scripts/init-release-rust-submodules.sh --init-https
+          else
+            echo "::warning::Source ref predates the release submodule helper; using the legacy contract."
+            read -r -a legacy_submodules <<< "$LEGACY_RELEASE_RUST_SUBMODULES"
+            for sm in "${legacy_submodules[@]}"; do
+              git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
+              git submodule update --init --depth 1 "$sm"
+            done
+          fi
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -301,16 +296,16 @@ jobs:
       - name: Init Rust fork submodules (https)
         run: |
           git config --global --add safe.directory '*' || true
-          # `skein` is deliberately NOT in this list. nowledge-co/skein is PRIVATE
-          # and this pipeline has no credentials for it, so `git submodule update`
-          # aborts the job on the clone failure. It was added in #14 because Cargo
-          # needed the path manifest during workspace resolution; nowledge-co/mem
-          # removed that dependency, so the release build no longer resolves it at
-          # all. See nowledge-co/mem#980 before adding it back.
-          for sm in upstream_forks/ladybug upstream_forks/liteparse upstream_forks/rig; do
-            git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
-            git submodule update --init --depth 1 "$sm"
-          done
+          if [[ -x scripts/init-release-rust-submodules.sh ]]; then
+            scripts/init-release-rust-submodules.sh --init-https
+          else
+            echo "::warning::Source ref predates the release submodule helper; using the legacy contract."
+            read -r -a legacy_submodules <<< "$LEGACY_RELEASE_RUST_SUBMODULES"
+            for sm in "${legacy_submodules[@]}"; do
+              git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
+              git submodule update --init --depth 1 "$sm"
+            done
+          fi
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
