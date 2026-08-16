@@ -119,6 +119,39 @@ jobs:
         with:
           node-version: "20"
 
+      # Apple now refuses uploads built with an SDK older than iOS 26:
+      #   "This app was built with the iOS 18.5 SDK. All iOS and iPadOS apps
+      #    must be built with the iOS 26 SDK or later, included in Xcode 26."
+      # The runner defaults to Xcode 16.4 (iOS 18.5 SDK), which is why the
+      # 0.10.64 upload was rejected after signing was already correct.
+      #
+      # Selects the newest Xcode present and fails loudly if it is too old,
+      # printing what the image actually has -- an image without Xcode 26 needs
+      # a different runner label, and guessing at that from a build failure two
+      # steps later wastes a whole run.
+      - name: Select Xcode 26 or newer
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Xcode versions on this runner:"
+          ls -d /Applications/Xcode*.app | sed 's/^/  /'
+          BEST=""; BEST_VER="0"
+          for app in /Applications/Xcode*.app; do
+            ver="$(/usr/bin/defaults read "$app/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo 0)"
+            if [[ "$(printf '%s\n%s\n' "$ver" "$BEST_VER" | sort -V | tail -1)" == "$ver" ]]; then
+              BEST="$app"; BEST_VER="$ver"
+            fi
+          done
+          echo "Newest: $BEST ($BEST_VER)"
+          MAJOR="${BEST_VER%%.*}"
+          if (( MAJOR < 26 )); then
+            echo "::error::Xcode $BEST_VER is the newest on this runner, but Apple requires Xcode 26+ (iOS 26 SDK) for App Store uploads."
+            echo "::error::Change runs-on to an image that ships Xcode 26, or install it in a setup step."
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$BEST/Contents/Developer" >> "$GITHUB_ENV"
+          "$BEST/Contents/Developer/usr/bin/xcodebuild" -version | sed 's/^/  /'
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios
