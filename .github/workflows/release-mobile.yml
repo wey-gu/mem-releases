@@ -265,6 +265,26 @@ jobs:
             exit 1
           fi
 
+      # MEM_REPO_TOKEN is named "...-source-read-..." but its fine-grained
+      # permissions are Contents: Read AND Write over the nowledge-co repos,
+      # including community -- which is what `gh release` needs. Assert it here
+      # rather than assume it: if the secret ever gets rotated to a read-only
+      # token, this fails in seconds instead of after a 30-minute build.
+      - name: Verify release-upload permission on nowledge-co/community
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PUSH="$(gh api repos/nowledge-co/community --jq .permissions.push 2>/dev/null || echo false)"
+          if [[ "$PUSH" != "true" ]]; then
+            echo "::error::MEM_REPO_TOKEN cannot write to nowledge-co/community (permissions.push=$PUSH)."
+            echo "::error::Give it Contents: Read and write there, or set a dedicated token."
+            exit 1
+          fi
+          echo "MEM_REPO_TOKEN can write to nowledge-co/community."
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -355,12 +375,12 @@ jobs:
       - name: Publish APK to nowledge-co/community release
         if: inputs.publish
         env:
-          GH_TOKEN: ${{ secrets.COMMUNITY_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
           APK: ${{ steps.apk.outputs.path }}
         shell: bash
         run: |
           set -euo pipefail
-          [[ -n "$GH_TOKEN" ]] || { echo "::error::COMMUNITY_REPO_TOKEN is not set"; exit 1; }
+          [[ -n "$GH_TOKEN" ]] || { echo "::error::MEM_REPO_TOKEN is not set"; exit 1; }
           TAG="v${VERSION}"
           if ! gh release view "$TAG" -R nowledge-co/community >/dev/null 2>&1; then
             echo "Creating release $TAG"
