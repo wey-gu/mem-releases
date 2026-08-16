@@ -25,9 +25,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Source tag to build (e.g. 0.10.64). Must already exist on nowledge-co/mem."
+        description: "Version being built (e.g. 0.10.64). Used for the version check, artifact names and the community release tag."
         required: true
         type: string
+      ref:
+        description: "What to check out from nowledge-co/mem. Blank = v<tag>. Use a branch or SHA to test a mobile-only fix without moving a released tag."
+        required: false
+        type: string
+        default: ""
       ios:
         description: "Build and upload the iOS app to TestFlight."
         required: false
@@ -63,7 +68,10 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 90
     env:
-      SOURCE_REF: v${{ inputs.tag }}
+      # A released tag is immutable provenance: desktop and docker already built
+      # from it. When a mobile-only fix lands after the tag, point `ref` at a
+      # branch instead of moving the tag out from under those artifacts.
+      SOURCE_REF: ${{ inputs.ref != '' && inputs.ref || format('v{0}', inputs.tag) }}
       VERSION: ${{ inputs.tag }}
     steps:
       - name: Checkout private source (nowledge-co/mem)
@@ -291,7 +299,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      SOURCE_REF: v${{ inputs.tag }}
+      # A released tag is immutable provenance: desktop and docker already built
+      # from it. When a mobile-only fix lands after the tag, point `ref` at a
+      # branch instead of moving the tag out from under those artifacts.
+      SOURCE_REF: ${{ inputs.ref != '' && inputs.ref || format('v{0}', inputs.tag) }}
       VERSION: ${{ inputs.tag }}
     steps:
       - name: Checkout private source (nowledge-co/mem)
