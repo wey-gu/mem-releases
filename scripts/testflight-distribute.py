@@ -110,33 +110,69 @@ def main() -> int:
         app_id = client.call("GET", "/v1/apps?limit=1")["data"][0]["id"]
         build = wait_for_valid_build(client, app_id, version)
 
-        client.call(
-            "POST",
-            f"/v1/betaGroups/{group}/relationships/builds",
-            {"data": [{"type": "builds", "id": build["id"]}]},
+        # "What to Test", shown to testers in TestFlight and read by the Beta
+        # App Review team. Set BEFORE submitting: a submitted build's
+        # localisation is no longer editable.
+        notes = (
+            f"Nowledge Mem {version}\n\n"
+            f"What changed in this release:\n"
+            f"https://mem.nowledge.co/changelog\n\n"
+            f"Please report anything that looks wrong via the in-app feedback."
         )
-        print(f"attached build {build['id']} to beta group {group}")
+        existing = client.call(
+            "GET", f"/v1/builds/{build['id']}/betaBuildLocalizations")["data"]
+        if existing:
+            client.call(
+                "PATCH", f"/v1/betaBuildLocalizations/{existing[0]['id']}",
+                {"data": {"type": "betaBuildLocalizations",
+                          "id": existing[0]["id"],
+                          "attributes": {"whatsNew": notes}}})
+        else:
+            client.call(
+                "POST", "/v1/betaBuildLocalizations",
+                {"data": {"type": "betaBuildLocalizations",
+                          "attributes": {"locale": "en-US", "whatsNew": notes},
+                          "relationships": {"build": {"data": {
+                              "type": "builds", "id": build["id"]}}}}})
+        print("set What to Test notes")
 
-        # Required for an EXTERNAL group. "Already submitted" is a normal
-        # outcome when an earlier run got this far, so it is not a failure.
+        # Submit for Beta App Review BEFORE attaching to the group. An external
+        # group refuses a build that has not been submitted:
+        #   422 ENTITY_UNPROCESSABLE "Build is not in an externally assignable
+        #   state."
+        # Doing it the other way round is what failed on 0.10.64.
+        review = "submitted for Beta App Review"
         try:
             client.call(
-                "POST",
-                "/v1/betaAppReviewSubmissions",
-                {
-                    "data": {
-                        "type": "betaAppReviewSubmissions",
-                        "relationships": {
-                            "build": {"data": {"type": "builds", "id": build["id"]}}
-                        },
-                    }
-                },
-            )
-            print("submitted for Beta App Review")
-            review = "Submitted for Beta App Review."
+                "POST", "/v1/betaAppReviewSubmissions",
+                {"data": {"type": "betaAppReviewSubmissions",
+                          "relationships": {"build": {"data": {
+                              "type": "builds", "id": build["id"]}}}}})
         except RuntimeError as error:
-            print(f"Beta App Review not newly submitted: {error}")
-            review = "Already submitted for Beta App Review, or pending from an earlier run."
+            # A retry reaching this point again is normal, not a failure.
+            if "ENTITY_ERROR" in str(error) or "already" in str(error).lower():
+                review = "already submitted for Beta App Review"
+            else:
+                raise
+        print(review)
+
+        # Attaching can only succeed once review has been requested, and Apple
+        # takes a moment to move the build into that state.
+        for attempt in range(10):
+            try:
+                client.call(
+                    "POST", f"/v1/betaGroups/{group}/relationships/builds",
+                    {"data": [{"type": "builds", "id": build["id"]}]})
+                print(f"attached build {build['id']} to beta group {group}")
+                break
+            except RuntimeError as error:
+                if "externally assignable" in str(error) and attempt < 9:
+                    print("not externally assignable yet; waiting")
+                    time.sleep(30)
+                    continue
+                raise
+        else:
+            raise RuntimeError("build never became externally assignable")
     except RuntimeError as error:
         print(f"::error::{error}", file=sys.stderr)
         return 1
