@@ -43,6 +43,11 @@ on:
         required: false
         type: boolean
         default: false
+      distribute:
+        description: "After upload, wait for processing and attach the build to the TestFlight group. Needs publish. Apple's Beta App Review still gates the external group; CI submits but cannot approve."
+        required: false
+        type: boolean
+        default: true
 
 concurrency:
   group: release-mobile-${{ inputs.tag }}
@@ -68,6 +73,17 @@ jobs:
           token: ${{ secrets.MEM_REPO_TOKEN }}
           ref: ${{ env.SOURCE_REF }}
           submodules: false
+
+      # The workspace holds nowledge-co/mem, so this repo's own scripts are not
+      # in it. Check them out beside it.
+      - name: Checkout this repo's scripts
+        uses: actions/checkout@v4
+        with:
+          path: .release-scripts
+
+      - name: Locate release scripts
+        shell: bash
+        run: echo "RELEASE_SCRIPTS=$GITHUB_WORKSPACE/.release-scripts/scripts" >> "$GITHUB_ENV"
 
       # Fail before any 40-minute build if the version set is inconsistent.
       # App Store Connect rejects a duplicate or non-incrementing CFBundleVersion
@@ -219,6 +235,25 @@ jobs:
           else
             ./build-ios-appstore.sh
           fi
+
+      # An upload is not a testable build. It must finish PROCESSING, then be
+      # attached to a beta group; our group is EXTERNAL, so Apple's Beta App
+      # Review gates it after that. The script does the first two and submits
+      # the third, and says so rather than implying testers can install
+      # immediately.
+      - name: Distribute the build to TestFlight
+        if: inputs.publish && inputs.distribute
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          BETA_GROUP_ID: ${{ vars.TESTFLIGHT_BETA_GROUP_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$BETA_GROUP_ID" ]] || { echo "::error::TESTFLIGHT_BETA_GROUP_ID repo variable is not set"; exit 1; }
+          python3 -m venv "$RUNNER_TEMP/asc" >/dev/null
+          "$RUNNER_TEMP/asc/bin/pip" install -q pyjwt cryptography
+          "$RUNNER_TEMP/asc/bin/python" "$RELEASE_SCRIPTS/testflight-distribute.py"
 
       - name: Upload IPA as a run artifact
         if: always()
