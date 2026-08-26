@@ -205,21 +205,29 @@ jobs:
           cache: pnpm
           cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: aarch64-apple-darwin
 
       # Defensive: on the macos-14 arm64 runner the rustup proxy ends up
       # routing `cargo` to `rustup-init` when the toolchain target matches
       # the host arch (seen 2026-05-14 — `cargo metadata` printed
-      # rustup-init's help text). `rustup default stable` + `rustup show`
-      # forces the proxy symlinks into a known state and prints the
-      # resolved toolchain so failures are diagnosable from the log.
+      # rustup-init's help text). Pin the default to the source-declared Rust
+      # version and print the resolved toolchain so failures are diagnosable.
       - name: Pin default toolchain (workaround for macos-14 arm64 proxy)
         run: |
           set -euo pipefail
-          rustup default stable
+          rustup default 1.97.1
           rustup show
+
+      - name: Initialize Rust path dependencies before cache restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/nmem-pdfium-cache" >> "$GITHUB_ENV"
+          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git \
+              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
+              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -229,6 +237,9 @@ jobs:
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
+          # liteparse-pdfium-sys records this path in its build-script output.
+          # Keep the matching runtime library alongside Cargo's target cache.
+          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
           # Bumped to -v3 (2026-06-27) to invalidate a SECOND poison: the
           # rust-cache keys on Cargo.lock, not on nmem-rs source, so a
           # source-only change (no dep bump) restored a STALE nmem-server
@@ -245,7 +256,7 @@ jobs:
           # and Cargo.lock never changes, yet the C++ they compile is linked
           # into nmem-server. The trigger here was a ladybug FTS concurrency
           # backport. Treat a submodule pointer bump as a source-behavior fix.
-          key: macos-aarch64-v4
+          key: macos-aarch64-v5-pdfium
 
       # SOTA build-cache: sccache → R2 (S3). Content-keyed, unbounded, shared
       # across runs/branches. Caches BOTH rust (RUSTC_WRAPPER) and the heavy C++
@@ -282,7 +293,7 @@ jobs:
       - name: Pin default toolchain + sanity check cargo
         run: |
           set -euo pipefail
-          rustup default stable
+          rustup default 1.97.1
           rustup show
           echo "::group::cargo resolution"
           which cargo
@@ -391,9 +402,18 @@ jobs:
           cache: pnpm
           cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: x86_64-apple-darwin
+
+      - name: Initialize Rust path dependencies before cache restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/nmem-pdfium-cache" >> "$GITHUB_ENV"
+          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git \
+              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
+              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -403,8 +423,9 @@ jobs:
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
+          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
           # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
-          key: macos-x86_64-v3
+          key: macos-x86_64-v4-pdfium
 
       # sccache → R2 (see build-macos-arm64 for rationale).
       - name: Setup sccache
@@ -524,9 +545,18 @@ jobs:
           cache: pnpm
           cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: x86_64-pc-windows-msvc
+
+      - name: Initialize Rust path dependencies before cache restore
+        shell: pwsh
+        run: |
+          "XDG_CACHE_HOME=$env:RUNNER_TEMP/nmem-pdfium-cache" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git `
+              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git `
+              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # BoringSSL (boring-sys2) assembles its crypto with NASM. The pinned
       # windows-2022 image (MSVC 14.44, needed because 14.51 breaks ladybug's
@@ -541,8 +571,9 @@ jobs:
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
+          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
           # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
-          key: windows-x86_64-v3
+          key: windows-x86_64-v4-pdfium
 
       # sccache → R2 (see build-macos-arm64 for rationale). MSVC + cmake are
       # both sccache-cacheable; graceful local fallback on any backend error.
@@ -674,7 +705,16 @@ jobs:
           cache: pnpm
           cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Initialize Rust path dependencies before cache restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/nmem-pdfium-cache" >> "$GITHUB_ENV"
+          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git \
+              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
+              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -684,8 +724,9 @@ jobs:
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
+          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
           # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
-          key: linux-deb-appimage-v3
+          key: linux-deb-appimage-v4-pdfium
 
       # sccache → R2 (see build-macos-arm64 for rationale).
       - name: Setup sccache
@@ -806,7 +847,16 @@ jobs:
           cache: pnpm
           cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Initialize Rust path dependencies before cache restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/nmem-pdfium-cache" >> "$GITHUB_ENV"
+          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git \
+              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
+              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -816,8 +866,9 @@ jobs:
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
+          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
           # Separate from the retired Fedora-40 ABI and stale binary caches.
-          key: linux-rpm-ubuntu22-v2
+          key: linux-rpm-ubuntu22-v3-pdfium
 
       # sccache → R2 (see build-macos-arm64 for rationale).
       - name: Setup sccache
@@ -930,9 +981,18 @@ jobs:
           cache: pnpm
           cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: x86_64-pc-windows-msvc
+
+      - name: Initialize Rust path dependencies before cache restore
+        shell: pwsh
+        run: |
+          "XDG_CACHE_HOME=$env:RUNNER_TEMP/nmem-pdfium-cache" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git `
+              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git `
+              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # BoringSSL (boring-sys2) assembles its crypto with NASM. The pinned
       # windows-2022 image (MSVC 14.44, needed because 14.51 breaks ladybug's
@@ -945,10 +1005,11 @@ jobs:
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
+          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
           # Separate cache key from the CPU windows job: the GPU feature pulls
           # in the GGML Vulkan backend, so the compiled artifacts differ and
           # must not share/poison the CPU build cache.
-          key: windows-x86_64-vulkan-v2
+          key: windows-x86_64-vulkan-v3-pdfium
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -1173,7 +1234,16 @@ jobs:
           cache: pnpm
           cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Initialize Rust path dependencies before cache restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/nmem-pdfium-cache" >> "$GITHUB_ENV"
+          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git \
+              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
+              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -1181,9 +1251,10 @@ jobs:
           workspaces: |
             nowledge-graph/src-tauri
             nmem-rs
+          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
           # Separate cache key from the CPU linux job (GPU feature -> different
           # compiled artifacts; must not poison the CPU build cache).
-          key: linux-vulkan-v2
+          key: linux-vulkan-v3-pdfium
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
