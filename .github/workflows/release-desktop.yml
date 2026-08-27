@@ -625,6 +625,43 @@ jobs:
           "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "protoc resolved to: $protoc"
 
+      # Compatibility backport for source refs predating nowledge-co/mem#2061.
+      # It only corrects release-time DLL staging and skips refs already fixed.
+      - name: Backport Windows PDFium runtime staging compatibility
+        shell: pwsh
+        run: |
+          $scriptPath = "nowledge-graph/scripts/build-rust-bundle.ps1"
+          $scriptContent = Get-Content -Path $scriptPath -Raw
+          $fixedMarker = '$resolvedCandidates = @((Join-Path $resolvedDir $PdfiumLib))'
+          if ($scriptContent.Contains($fixedMarker)) {
+            Write-Host "Windows PDFium runtime staging is already fixed in the source ref."
+            exit 0
+          }
+
+          $oldBlock = @'
+                      $candidate = Join-Path $resolvedDir $PdfiumLib
+                      if (Test-Path $candidate) { $PdfiumSrc = $candidate }
+          '@
+          $newBlock = @'
+                      $resolvedCandidates = @((Join-Path $resolvedDir $PdfiumLib))
+                      if ($Target -like "*windows*") {
+                          $resolvedParent = Split-Path -Parent $resolvedDir
+                          if ($resolvedParent) {
+                              $resolvedCandidates += Join-Path (Join-Path $resolvedParent "bin") $PdfiumLib
+                          }
+                      }
+                      foreach ($candidate in $resolvedCandidates) {
+                          if (Test-Path $candidate) { $PdfiumSrc = $candidate; break }
+                      }
+          '@
+          $matchCount = ([regex]::Matches($scriptContent, [regex]::Escape($oldBlock))).Count
+          if ($matchCount -ne 1) {
+            throw "Expected exactly one legacy PDFium staging block, found $matchCount. Refusing an ambiguous source patch."
+          }
+          $scriptContent = $scriptContent.Replace($oldBlock, $newBlock)
+          Set-Content -Path $scriptPath -Value $scriptContent -NoNewline -Encoding utf8
+          Write-Host "Applied Windows PDFium runtime staging compatibility backport."
+
       - name: Build Rust backend bundle (Windows)
         working-directory: nowledge-graph
         shell: pwsh
