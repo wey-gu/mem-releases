@@ -119,6 +119,10 @@ jobs:
         with:
           node-version: "20"
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+
       # Apple now refuses uploads built with an SDK older than iOS 26:
       #   "This app was built with the iOS 18.5 SDK. All iOS and iPadOS apps
       #    must be built with the iOS 26 SDK or later, included in Xcode 26."
@@ -173,20 +177,16 @@ jobs:
         with:
           targets: aarch64-apple-ios
 
-      - name: Install npm dependencies
+      - name: Install JavaScript dependencies
         shell: bash
         run: |
           set -euo pipefail
           # The web frontend is built by tauri's beforeBuildCommand
           # (`npm --prefix .. run build:mobile`), so the PARENT project's
           # dependencies are needed too, not just mobile/.
-          # These two use different commands on purpose. nowledge-graph has a
-          # package-lock.json, so `ci` is right there. nowledge-graph/mobile has
-          # NONE -- `npm ci` fails outright with EUSAGE, which is how the first
-          # run of this workflow died in both jobs. Its only dependency is
-          # `@tauri-apps/cli: ^2`, so `install` is the working command until a
-          # lockfile is committed there.
-          npm --prefix nowledge-graph ci --no-audit --no-fund
+          # The parent project is pnpm-managed and pins pnpm in package.json.
+          # mobile/ has no lockfile, so keep npm install only for that package.
+          pnpm --dir nowledge-graph install --frozen-lockfile --prefer-offline
           npm --prefix nowledge-graph/mobile install --no-audit --no-fund
 
       # Import the Apple Distribution certificate into an ephemeral keychain.
@@ -412,6 +412,10 @@ jobs:
         with:
           node-version: "20"
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -430,17 +434,13 @@ jobs:
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 
-      - name: Install npm dependencies
+      - name: Install JavaScript dependencies
         shell: bash
         run: |
           set -euo pipefail
-          # These two use different commands on purpose. nowledge-graph has a
-          # package-lock.json, so `ci` is right there. nowledge-graph/mobile has
-          # NONE -- `npm ci` fails outright with EUSAGE, which is how the first
-          # run of this workflow died in both jobs. Its only dependency is
-          # `@tauri-apps/cli: ^2`, so `install` is the working command until a
-          # lockfile is committed there.
-          npm --prefix nowledge-graph ci --no-audit --no-fund
+          # The parent project is pnpm-managed and pins pnpm in package.json.
+          # mobile/ has no lockfile, so keep npm install only for that package.
+          pnpm --dir nowledge-graph install --frozen-lockfile --prefer-offline
           npm --prefix nowledge-graph/mobile install --no-audit --no-fund
 
       # keystore.properties is gitignored on purpose. `storeFile` is resolved
