@@ -411,7 +411,11 @@ jobs:
         run: |
           set -euo pipefail
           docker pull "${IMAGE}:${TAG}"
-          CID=$(docker run -d -p 14242:14242 "${IMAGE}:${TAG}")
+          # CI owns this disposable container and does not expose it beyond
+          # localhost. Disable LAN auth so the verifier can inspect the
+          # protected readiness/build-details endpoint without parsing the
+          # auto-generated key from container logs.
+          CID=$(docker run -d -p 127.0.0.1:14242:14242 -e NMEM_LAN_AUTH=disabled "${IMAGE}:${TAG}")
           trap "docker logs $CID || true; docker rm -f $CID || true" EXIT
 
           for i in $(seq 1 60); do
@@ -426,7 +430,17 @@ jobs:
           done
           HEALTH=$(curl -fsS http://127.0.0.1:14242/health)
           echo "$HEALTH"
-          echo "$HEALTH" | TAG="$TAG" python3 -c '
+          echo "$HEALTH" | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)
+          if d != {"status": "ok"}:
+              raise AssertionError(f"unexpected public health payload: {d!r}")
+          print("public health contract OK: status-only")
+          '
+
+          DETAILS=$(curl -fsS http://127.0.0.1:14242/health/details)
+          echo "$DETAILS"
+          echo "$DETAILS" | TAG="$TAG" python3 -c '
           import json, os, re, sys
           d = json.load(sys.stdin)
           v = d.get("version") or ""
