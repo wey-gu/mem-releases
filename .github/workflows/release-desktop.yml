@@ -575,12 +575,11 @@ jobs:
           # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
           key: windows-x86_64-v4-pdfium
 
-      # A Cargo target cache can restore liteparse-pdfium-sys as already built
-      # while its separately cached runtime directory is absent. In that state
-      # Cargo skips the build script, so pdfium.dll is never downloaded or
-      # copied into target/deps. Invalidate only that package and let the normal
-      # release build repopulate the exact locked PDFium runtime.
-      - name: Repair an incomplete PDFium runtime cache
+      # A Cargo target cache can restore liteparse-pdfium-sys build output from
+      # another runner. Point bundle staging at this runner's restored DLL when
+      # it exists; otherwise invalidate only that package so the normal release
+      # build repopulates the exact locked PDFium runtime.
+      - name: Resolve or repair the PDFium runtime cache
         working-directory: nmem-rs
         shell: pwsh
         run: |
@@ -589,6 +588,7 @@ jobs:
               -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($pdfiumDll) {
             Write-Host "PDFium runtime cache is complete: $($pdfiumDll.FullName)"
+            "PDFIUM_LIB_PATH=$($pdfiumDll.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             exit 0
           }
 
