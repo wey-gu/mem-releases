@@ -575,6 +575,27 @@ jobs:
           # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
           key: windows-x86_64-v4-pdfium
 
+      # A Cargo target cache can restore liteparse-pdfium-sys as already built
+      # while its separately cached runtime directory is absent. In that state
+      # Cargo skips the build script, so pdfium.dll is never downloaded or
+      # copied into target/deps. Invalidate only that package and let the normal
+      # release build repopulate the exact locked PDFium runtime.
+      - name: Repair an incomplete PDFium runtime cache
+        working-directory: nmem-rs
+        shell: pwsh
+        run: |
+          $pdfiumCache = Join-Path $env:XDG_CACHE_HOME "pdfium-rs"
+          $pdfiumDll = Get-ChildItem -Path $pdfiumCache -Filter "pdfium.dll" `
+              -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($pdfiumDll) {
+            Write-Host "PDFium runtime cache is complete: $($pdfiumDll.FullName)"
+            exit 0
+          }
+
+          Write-Host "PDFium runtime cache is incomplete; invalidating liteparse-pdfium-sys build artifacts."
+          cargo clean -p liteparse-pdfium-sys --release --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "cargo clean failed ($LASTEXITCODE)" }
+
       # sccache → R2 (see build-macos-arm64 for rationale). MSVC + cmake are
       # both sccache-cacheable; graceful local fallback on any backend error.
       - name: Setup sccache
