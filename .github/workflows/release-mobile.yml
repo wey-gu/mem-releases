@@ -4,8 +4,8 @@
 #   iOS      cd nowledge-graph/mobile && ./build-ios-appstore.sh   (needs Xcode,
 #            an Apple Distribution cert, the provisioning profile, and an App
 #            Store Connect API key on the operator's machine)
-#   Android  npx tauri android build, then hand-upload the APK to a
-#            nowledge-co/community release
+#   Android  npx tauri android build, retain the Play-ready AAB, then
+#            hand-upload the APK to a nowledge-co/community release
 #
 # Source is fetched from the private nowledge-co/mem at the given tag, same as
 # release-desktop.yml. The mobile app is a THIN client: its Cargo manifest pulls
@@ -39,7 +39,7 @@ on:
         type: boolean
         default: true
       android:
-        description: "Build the Android APK."
+        description: "Build the Android APK and AAB."
         required: false
         type: boolean
         default: true
@@ -359,7 +359,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   android-apk:
-    name: Android -> APK
+    name: Android -> APK + AAB
     if: inputs.android
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -423,11 +423,11 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: Install Android NDK
+      - name: Install Android SDK and NDK
         shell: bash
         run: |
           set -euo pipefail
-          sdkmanager --install "ndk;27.2.12479018" "platforms;android-35" "build-tools;35.0.0"
+          sdkmanager --install "ndk;27.2.12479018" "platforms;android-36" "build-tools;36.0.0"
           echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
@@ -467,7 +467,7 @@ jobs:
           } > "$APPDIR/keystore.properties"
           chmod 600 "$APPDIR/keystore.properties" "$APPDIR/upload-keystore.jks"
 
-      - name: Build APK
+      - name: Build APK and AAB
         working-directory: nowledge-graph/mobile
         shell: bash
         run: |
@@ -477,25 +477,42 @@ jobs:
           # tag automatically. A stale checkout cannot pin an old versionCode here.
           npx tauri android build
 
-      - name: Locate and verify the APK
-        id: apk
+      - name: Locate and verify Android artifacts
+        id: android_artifacts
         shell: bash
         run: |
           set -euo pipefail
           APK="$(find nowledge-graph/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/release -name '*.apk' | head -1)"
+          AAB="$(find nowledge-graph/mobile/src-tauri/gen/android/app/build/outputs/bundle/universalRelease -name '*.aab' | head -1)"
           [[ -n "$APK" && -f "$APK" ]] || { echo "::error::No universal release APK produced"; exit 1; }
+          [[ -n "$AAB" && -f "$AAB" ]] || { echo "::error::No universal release AAB produced"; exit 1; }
           # An unsigned APK installs nowhere. Prove the signature exists rather
           # than trusting that keystore.properties was picked up.
-          APKSIGNER="$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner | sort | tail -1)"
+          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner"
+          [[ -x "$APKSIGNER" ]] || { echo "::error::Android build-tools 36.0.0 apksigner is missing"; exit 1; }
           "$APKSIGNER" verify --print-certs "$APK" | sed 's/^/  /'
-          echo "path=$APK" >> "$GITHUB_OUTPUT"
-          echo "size=$(du -h "$APK" | cut -f1)" >> "$GITHUB_OUTPUT"
+          # `jarsigner -verify` exits zero for an unsigned archive, so require
+          # its explicit success marker as well as the process exit code.
+          AAB_VERIFY="$(jarsigner -verify "$AAB" 2>&1)"
+          printf '%s\n' "$AAB_VERIFY"
+          grep -Fq "jar verified." <<< "$AAB_VERIFY" || {
+            echo "::error::AAB signature verification did not report a verified archive"
+            exit 1
+          }
+          {
+            echo "apk_path=$APK"
+            echo "apk_size=$(du -h "$APK" | cut -f1)"
+            echo "aab_path=$AAB"
+            echo "aab_size=$(du -h "$AAB" | cut -f1)"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Upload APK as a run artifact
+      - name: Upload Android run artifacts
         uses: actions/upload-artifact@v4
         with:
           name: NowledgeMem-${{ inputs.tag }}-android
-          path: ${{ steps.apk.outputs.path }}
+          path: |
+            ${{ steps.android_artifacts.outputs.apk_path }}
+            ${{ steps.android_artifacts.outputs.aab_path }}
           retention-days: 14
 
       # The release process already creates a v<version> tag on
@@ -505,7 +522,7 @@ jobs:
         if: inputs.publish
         env:
           GH_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
-          APK: ${{ steps.apk.outputs.path }}
+          APK: ${{ steps.android_artifacts.outputs.apk_path }}
         shell: bash
         run: |
           set -euo pipefail
@@ -526,10 +543,11 @@ jobs:
           {
             echo "### Android ${VERSION}"
             echo
-            echo "APK: \`${{ steps.apk.outputs.path }}\` (${{ steps.apk.outputs.size }})"
+            echo "APK: \`${{ steps.android_artifacts.outputs.apk_path }}\` (${{ steps.android_artifacts.outputs.apk_size }})"
+            echo "AAB: \`${{ steps.android_artifacts.outputs.aab_path }}\` (${{ steps.android_artifacts.outputs.aab_size }})"
             if [[ "${{ inputs.publish }}" == "true" ]]; then
               echo "Published to https://github.com/nowledge-co/community/releases/tag/v${VERSION}"
             else
-              echo "Not published (publish=false). The APK is attached to this run as an artifact."
+              echo "Not published (publish=false). The APK and AAB are attached to this run as artifacts."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
