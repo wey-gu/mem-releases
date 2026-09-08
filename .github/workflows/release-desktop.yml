@@ -209,6 +209,13 @@ jobs:
           path: skein
           persist-credentials: false
 
+      - &setup_desktop_python
+        name: Set up Desktop build Python
+        if: steps.desktop_dependency.outputs.sha != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Verify package.json version matches
         shell: bash
         run: |
@@ -417,6 +424,8 @@ jobs:
       - *resolve_private_desktop_dependency
       - *checkout_private_desktop_dependency
 
+      - *setup_desktop_python
+
       - name: Install Rosetta 2
         run: softwareupdate --install-rosetta --agree-to-license || true
 
@@ -565,6 +574,8 @@ jobs:
 
       - *resolve_private_desktop_dependency
       - *checkout_private_desktop_dependency
+
+      - *setup_desktop_python
 
       - uses: pnpm/action-setup@v4
         with:
@@ -760,6 +771,8 @@ jobs:
       - *resolve_private_desktop_dependency
       - *checkout_private_desktop_dependency
 
+      - *setup_desktop_python
+
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -918,6 +931,8 @@ jobs:
       - *resolve_private_desktop_dependency
       - *checkout_private_desktop_dependency
 
+      - *setup_desktop_python
+
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -1068,6 +1083,8 @@ jobs:
 
       - *resolve_private_desktop_dependency
       - *checkout_private_desktop_dependency
+
+      - *setup_desktop_python
 
       - uses: pnpm/action-setup@v4
         with:
@@ -1281,6 +1298,8 @@ jobs:
 
       - *resolve_private_desktop_dependency
       - *checkout_private_desktop_dependency
+
+      - *setup_desktop_python
 
       - name: Install system deps
         run: |
