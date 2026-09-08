@@ -134,6 +134,34 @@ jobs:
             done
           fi
 
+      - &prepare_docker_recipes
+        name: Prepare exact-source Docker recipes
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.meta.outputs.source_sha }}
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+          import subprocess
+
+          source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          assert source_sha == os.environ["SOURCE_SHA"], "source checkout moved"
+          output = Path(os.environ["RUNNER_TEMP"]) / "nmem-dockerfiles"
+          output.mkdir(exist_ok=True)
+          frozen_source = "5a272fd06e3624f27de31f4d815cea9a1dddc232"
+          build = "RUN pnpm run build:web && test -f dist-web/index-web.html\n"
+          contract = "COPY nmem-cloud/src/web_static.rs /nmem-cloud/src/web_static.rs\n"
+          for name in ("Dockerfile.rust", "Dockerfile.rust.cuda", "Dockerfile.rust.vulkan"):
+              recipe = Path("nowledge-graph/docker", name).read_text()
+              if source_sha == frozen_source:
+                  assert Path("nmem-cloud/src/web_static.rs").is_file()
+                  assert recipe.count(build) == 1 and contract not in recipe, name
+                  recipe = recipe.replace(build, contract + build, 1)
+                  print(f"{name}: stage the tagged CSP contract for 0.10.79 Web validation")
+              (output / name).write_text(recipe)
+          PYTHON
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -145,7 +173,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: nowledge-graph/docker/Dockerfile.rust
+          file: ${{ runner.temp }}/nmem-dockerfiles/Dockerfile.rust
           platforms: linux/amd64
           build-args: |
             NMEM_BUILD_SHA_FULL=${{ needs.meta.outputs.source_sha }}
@@ -189,6 +217,8 @@ jobs:
             done
           fi
 
+      - *prepare_docker_recipes
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -200,7 +230,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: nowledge-graph/docker/Dockerfile.rust
+          file: ${{ runner.temp }}/nmem-dockerfiles/Dockerfile.rust
           platforms: linux/arm64
           build-args: |
             NMEM_BUILD_SHA_FULL=${{ needs.meta.outputs.source_sha }}
@@ -247,6 +277,8 @@ jobs:
               git submodule update --init --depth 1 "$sm"
             done
           fi
+      - *prepare_docker_recipes
+
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -264,7 +296,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: nowledge-graph/docker/Dockerfile.rust.cuda
+          file: ${{ runner.temp }}/nmem-dockerfiles/Dockerfile.rust.cuda
           platforms: linux/amd64
           build-args: |
             NMEM_BUILD_SHA_FULL=${{ needs.meta.outputs.source_sha }}
@@ -306,6 +338,8 @@ jobs:
               git submodule update --init --depth 1 "$sm"
             done
           fi
+      - *prepare_docker_recipes
+
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -323,7 +357,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: nowledge-graph/docker/Dockerfile.rust.vulkan
+          file: ${{ runner.temp }}/nmem-dockerfiles/Dockerfile.rust.vulkan
           platforms: linux/amd64
           build-args: |
             NMEM_BUILD_SHA_FULL=${{ needs.meta.outputs.source_sha }}
