@@ -216,6 +216,40 @@ jobs:
         with:
           python-version: "3.12"
 
+      - &restore_desktop_release_lock
+        name: Restore frozen 0.10.79 Desktop lock metadata
+        if: steps.desktop_dependency.outputs.sha != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECOVERY_REPOSITORY: ${{ github.repository }}
+          RECOVERY_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "5a272fd06e3624f27de31f4d815cea9a1dddc232" ]]; then
+            exit 0
+          fi
+          export RECOVERY_PATCH="$RUNNER_TEMP/0.10.79-skein-lock.patch"
+          gh api --header 'Accept: application/vnd.github.raw+json' \
+            "repos/$RECOVERY_REPOSITORY/contents/scripts/recovery/0.10.79-skein-lock.patch?ref=$RECOVERY_SHA" \
+            > "$RECOVERY_PATCH"
+          python - <<'PYTHON'
+          import hashlib
+          import os
+          from pathlib import Path
+          import subprocess
+
+          lock = Path("integrations/skein/nightly-server.Cargo.lock")
+          original = lock.read_text(encoding="utf-8")
+          assert hashlib.sha256(original.encode()).hexdigest() == "0149da2718b478e639818145d932534c21a58a8cfd8ebba9695ad79a220533ae", "unexpected release lock input"
+          lock.write_text(original, encoding="utf-8", newline="\n")
+          patch = os.environ["RECOVERY_PATCH"]
+          subprocess.run(["git", "apply", "--check", patch], check=True)
+          subprocess.run(["git", "apply", patch], check=True)
+          assert hashlib.sha256(lock.read_text(encoding="utf-8").encode()).hexdigest() == "df4b2815e9d34f033fc97184531f068937a52f209a245b4edbe6f4af7ade3b9c", "unexpected release lock output"
+          print("Restored tagged local-package metadata; registry dependencies remain locked.")
+          PYTHON
+
       - name: Verify package.json version matches
         shell: bash
         run: |
@@ -426,6 +460,8 @@ jobs:
 
       - *setup_desktop_python
 
+      - *restore_desktop_release_lock
+
       - name: Install Rosetta 2
         run: softwareupdate --install-rosetta --agree-to-license || true
 
@@ -576,6 +612,8 @@ jobs:
       - *checkout_private_desktop_dependency
 
       - *setup_desktop_python
+
+      - *restore_desktop_release_lock
 
       - uses: pnpm/action-setup@v4
         with:
@@ -773,6 +811,8 @@ jobs:
 
       - *setup_desktop_python
 
+      - *restore_desktop_release_lock
+
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -933,6 +973,8 @@ jobs:
 
       - *setup_desktop_python
 
+      - *restore_desktop_release_lock
+
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -1085,6 +1127,8 @@ jobs:
       - *checkout_private_desktop_dependency
 
       - *setup_desktop_python
+
+      - *restore_desktop_release_lock
 
       - uses: pnpm/action-setup@v4
         with:
@@ -1300,6 +1344,8 @@ jobs:
       - *checkout_private_desktop_dependency
 
       - *setup_desktop_python
+
+      - *restore_desktop_release_lock
 
       - name: Install system deps
         run: |
