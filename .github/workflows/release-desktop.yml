@@ -185,6 +185,29 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - &resolve_private_desktop_dependency
+        name: Resolve private Desktop dependency
+        id: desktop_dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q -- '--init-desktop-https' nowledge-graph/scripts/build-rust-bundle.sh; then
+            read -r mode kind sha dependency_path <<< "$(git ls-tree HEAD skein)"
+            [[ "$mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ ]]
+            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          fi
+
+      - &checkout_private_desktop_dependency
+        name: Checkout private Desktop dependency
+        if: steps.desktop_dependency.outputs.sha != ''
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/skein
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ steps.desktop_dependency.outputs.sha }}
+          path: skein
+          persist-credentials: false
+
       - name: Verify package.json version matches
         shell: bash
         run: |
@@ -390,6 +413,9 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - *resolve_private_desktop_dependency
+      - *checkout_private_desktop_dependency
+
       - name: Install Rosetta 2
         run: softwareupdate --install-rosetta --agree-to-license || true
 
@@ -535,6 +561,9 @@ jobs:
           token: ${{ secrets.MEM_REPO_TOKEN }}
           ref: ${{ env.SOURCE_REF }}
           submodules: false
+
+      - *resolve_private_desktop_dependency
+      - *checkout_private_desktop_dependency
 
       - uses: pnpm/action-setup@v4
         with:
@@ -727,6 +756,9 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - *resolve_private_desktop_dependency
+      - *checkout_private_desktop_dependency
+
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -882,6 +914,9 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - *resolve_private_desktop_dependency
+      - *checkout_private_desktop_dependency
+
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -1029,6 +1064,9 @@ jobs:
           token: ${{ secrets.MEM_REPO_TOKEN }}
           ref: ${{ env.SOURCE_REF }}
           submodules: false
+
+      - *resolve_private_desktop_dependency
+      - *checkout_private_desktop_dependency
 
       - uses: pnpm/action-setup@v4
         with:
@@ -1239,6 +1277,9 @@ jobs:
           token: ${{ secrets.MEM_REPO_TOKEN }}
           ref: ${{ env.SOURCE_REF }}
           submodules: false
+
+      - *resolve_private_desktop_dependency
+      - *checkout_private_desktop_dependency
 
       - name: Install system deps
         run: |
