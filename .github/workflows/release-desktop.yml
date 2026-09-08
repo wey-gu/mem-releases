@@ -600,6 +600,15 @@ jobs:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
     steps:
+      # The inline fragment bootstrap is pinned by its exact bytes in the CSP.
+      # Windows checkout conversion must not rewrite those bytes to CRLF.
+      - &preserve_windows_checkout_lf
+        name: Preserve LF source bytes on Windows
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
       - name: Checkout private source (nowledge-co/mem)
         uses: actions/checkout@v4
         with:
@@ -1115,6 +1124,8 @@ jobs:
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
       IS_DRY_RUN: ${{ needs.meta.outputs.is_dry_run }}
     steps:
+      - *preserve_windows_checkout_lf
+
       - name: Checkout private source (nowledge-co/mem)
         uses: actions/checkout@v4
         with:
