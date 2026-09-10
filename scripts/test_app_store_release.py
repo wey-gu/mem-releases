@@ -33,6 +33,13 @@ class AppStoreReleaseTest(unittest.TestCase):
         self.assertIn("WAITING_FOR_REVIEW", app_store_release.SUBMITTED_STATES)
         self.assertIn("READY_FOR_SALE", app_store_release.SUBMITTED_STATES)
 
+    def test_has_values_requires_every_non_empty_value(self) -> None:
+        attributes = {"name": "Nowledge", "email": ""}
+
+        self.assertTrue(app_store_release._has_values(attributes, ("name",)))
+        self.assertFalse(app_store_release._has_values(attributes, ("name", "email")))
+        self.assertFalse(app_store_release._has_values(attributes, ("missing",)))
+
     def test_submit_existing_fails_closed_on_build_mismatch(self) -> None:
         status = {
             "app": {"id": "app-id"},

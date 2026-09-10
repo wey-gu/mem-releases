@@ -62,6 +62,8 @@ class Client:
         method: str,
         path: str,
         body: dict[str, Any] | None = None,
+        *,
+        allow_not_found: bool = False,
     ) -> dict[str, Any]:
         request = urllib.request.Request(
             BASE + path,
@@ -77,6 +79,8 @@ class Client:
                 raw = response.read()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as error:
+            if allow_not_found and error.code == 404:
+                return {}
             detail = error.read().decode(errors="replace")[:2000]
             raise RuntimeError(f"{method} {path} -> {error.code} {detail}") from error
 
@@ -96,6 +100,10 @@ def _version_state(version: dict[str, Any]) -> str:
     return attributes.get("appStoreState") or attributes.get("appVersionState") or "UNKNOWN"
 
 
+def _has_values(attributes: dict[str, Any], names: tuple[str, ...]) -> bool:
+    return all(attributes.get(name) not in (None, "") for name in names)
+
+
 def inspect(client: Client, version_string: str) -> dict[str, Any]:
     app = _single(
         client.call(
@@ -105,6 +113,79 @@ def inspect(client: Client, version_string: str) -> dict[str, Any]:
         f"app for bundle {BUNDLE_ID}",
     )
     app_id = app["id"]
+    app_attributes = app.get("attributes", {})
+
+    beta_review_detail = client.call(
+        "GET",
+        f"/v1/apps/{app_id}/betaAppReviewDetail",
+        allow_not_found=True,
+    ).get("data")
+    beta_review_attributes = (
+        beta_review_detail.get("attributes", {})
+        if isinstance(beta_review_detail, dict)
+        else {}
+    )
+
+    app_infos = client.call(
+        "GET", _query(f"/v1/apps/{app_id}/appInfos", {"limit": "10"})
+    ).get("data", [])
+    app_info_status = []
+    for app_info in app_infos:
+        app_info_id = app_info["id"]
+        localizations = client.call(
+            "GET",
+            _query(
+                f"/v1/appInfos/{app_info_id}/appInfoLocalizations",
+                {"limit": "200"},
+            ),
+        ).get("data", [])
+        age_rating = client.call(
+            "GET",
+            f"/v1/appInfos/{app_info_id}/ageRatingDeclaration",
+            allow_not_found=True,
+        ).get("data")
+        primary_category = client.call(
+            "GET",
+            f"/v1/appInfos/{app_info_id}/relationships/primaryCategory",
+            allow_not_found=True,
+        ).get("data")
+        app_info_status.append(
+            {
+                "id": app_info_id,
+                "state": app_info.get("attributes", {}).get("state"),
+                "app_store_state": app_info.get("attributes", {}).get(
+                    "appStoreState"
+                ),
+                "has_age_rating_declaration": isinstance(age_rating, dict),
+                "primary_category_id": (
+                    primary_category.get("id")
+                    if isinstance(primary_category, dict)
+                    else None
+                ),
+                "localizations": [
+                    {
+                        "locale": localization.get("attributes", {}).get("locale"),
+                        "name": localization.get("attributes", {}).get("name"),
+                        "subtitle": localization.get("attributes", {}).get("subtitle"),
+                        "privacy_policy_url": localization.get("attributes", {}).get(
+                            "privacyPolicyUrl"
+                        ),
+                    }
+                    for localization in localizations
+                ],
+            }
+        )
+
+    price_schedule = client.call(
+        "GET",
+        f"/v1/apps/{app_id}/appPriceSchedule",
+        allow_not_found=True,
+    ).get("data")
+    availability = client.call(
+        "GET",
+        f"/v1/apps/{app_id}/relationships/appAvailabilityV2",
+        allow_not_found=True,
+    ).get("data")
 
     builds = client.call(
         "GET",
@@ -186,7 +267,38 @@ def inspect(client: Client, version_string: str) -> dict[str, Any]:
     ).get("data", [])
 
     return {
-        "app": {"id": app_id, "bundle_id": BUNDLE_ID},
+        "app": {
+            "id": app_id,
+            "name": app_attributes.get("name"),
+            "bundle_id": BUNDLE_ID,
+            "sku": app_attributes.get("sku"),
+            "primary_locale": app_attributes.get("primaryLocale"),
+            "made_for_kids": app_attributes.get("isOrEverWasMadeForKids"),
+            "content_rights_declaration": app_attributes.get(
+                "contentRightsDeclaration"
+            ),
+        },
+        "store_preparation": {
+            "app_infos": app_info_status,
+            "has_beta_review_contact": _has_values(
+                beta_review_attributes,
+                (
+                    "contactFirstName",
+                    "contactLastName",
+                    "contactPhone",
+                    "contactEmail",
+                ),
+            ),
+            "beta_demo_account_required": beta_review_attributes.get(
+                "demoAccountRequired"
+            ),
+            "has_beta_demo_credentials": _has_values(
+                beta_review_attributes,
+                ("demoAccountName", "demoAccountPassword"),
+            ),
+            "has_price_schedule": isinstance(price_schedule, dict),
+            "has_availability": isinstance(availability, dict),
+        },
         "build": (
             {
                 "id": build["id"],
