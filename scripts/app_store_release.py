@@ -125,14 +125,14 @@ def inspect(client: Client, version_string: str) -> dict[str, Any]:
     ]
     build = valid_builds[0] if valid_builds else None
     beta_review: dict[str, Any] | None = None
-    beta_groups: list[dict[str, Any]] = []
+    beta_group_links: list[dict[str, Any]] = []
     if build is not None:
         review = client.call(
             "GET", f"/v1/builds/{build['id']}/betaAppReviewSubmission"
         ).get("data")
         beta_review = review if isinstance(review, dict) else None
-        beta_groups = client.call(
-            "GET", f"/v1/builds/{build['id']}/betaGroups"
+        beta_group_links = client.call(
+            "GET", f"/v1/builds/{build['id']}/relationships/betaGroups"
         ).get("data", [])
 
     versions = client.call(
@@ -194,15 +194,7 @@ def inspect(client: Client, version_string: str) -> dict[str, Any]:
                     if beta_review
                     else None
                 ),
-                "beta_groups": [
-                    {
-                        "name": group.get("attributes", {}).get("name"),
-                        "is_internal": group.get("attributes", {}).get(
-                            "isInternalGroup"
-                        ),
-                    }
-                    for group in beta_groups
-                ],
+                "beta_group_ids": [group.get("id") for group in beta_group_links],
             }
             if build is not None
             else None
