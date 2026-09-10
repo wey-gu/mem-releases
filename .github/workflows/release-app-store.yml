@@ -1,0 +1,64 @@
+name: release-app-store
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Existing iOS version to inspect or submit (for example, 0.10.80)."
+        required: true
+        type: string
+      action:
+        description: >-
+          Status is read-only. Submit-existing requires prepared App Store
+          metadata and the exact VALID build.
+        required: true
+        type: choice
+        default: status
+        options:
+          - status
+          - submit-existing
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-app-store-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  app-store:
+    name: App Store ${{ inputs.action }}
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install App Store Connect client dependencies
+        run: python -m pip install --disable-pip-version-check pyjwt cryptography
+
+      - name: Stage App Store Connect API key
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$APPLE_API_KEY" ]] || { echo "::error::APPLE_API_KEY is not set"; exit 1; }
+          if [[ -z "$APPLE_API_KEY_BASE64" ]]; then
+            echo "::error::APPLE_API_KEY_BASE64 is not set"
+            exit 1
+          fi
+          KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          echo "$APPLE_API_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+          echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+
+      - name: Inspect or submit App Store version
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: python scripts/app_store_release.py "${{ inputs.action }}" "${{ inputs.version }}"
