@@ -3,6 +3,10 @@
   "copyright": "2026 Nowledge Labs",
   "release_type": "AFTER_APPROVAL",
   "primary_category_id": "PRODUCTIVITY",
+  "price": {
+    "base_territory": "USA",
+    "customer_price": "0.00"
+  },
   "app_info": {
     "locale": "en-US",
     "subtitle": "AI memory across every tool",
