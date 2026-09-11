@@ -13,7 +13,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -636,8 +635,8 @@ def _create_availability(client: Client, app_id: str) -> None:
         raise RuntimeError("App Store Connect returned no territories")
     linkages = []
     included = []
-    for territory in territories:
-        availability_id = str(uuid.uuid4())
+    for index, territory in enumerate(territories):
+        availability_id = f"${{territory-{index}}}"
         linkages.append(
             {"type": "territoryAvailabilities", "id": availability_id}
         )

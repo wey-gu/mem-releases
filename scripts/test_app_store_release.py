@@ -14,6 +14,19 @@ class FakeClient:
         return {}
 
 
+class AvailabilityClient:
+    def __init__(self) -> None:
+        self.body = None
+
+    def call(self, method, path, body=None):
+        if path.startswith("/v1/territories?"):
+            return {"data": [{"id": "USA"}, {"id": "SGP"}]}
+        if method == "POST" and path == "/v2/appAvailabilities":
+            self.body = body
+            return {"data": {"id": "availability-id"}}
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+
 class AppStoreReleaseTest(unittest.TestCase):
     def prepared_status(self, state="PREPARE_FOR_SUBMISSION"):
         return {
@@ -86,6 +99,23 @@ class AppStoreReleaseTest(unittest.TestCase):
         self.assertEqual(metadata["version"], "0.10.80")
         self.assertEqual(len(metadata["screenshots"]), 2)
         self.assertTrue((directory / metadata["screenshots"][0]["file"]).is_file())
+
+    def test_availability_uses_matching_inline_local_ids(self) -> None:
+        client = AvailabilityClient()
+
+        app_store_release._create_availability(client, "app-id")
+
+        relationship = client.body["data"]["relationships"][
+            "territoryAvailabilities"
+        ]["data"]
+        included = client.body["included"]
+        expected_ids = ["${territory-0}", "${territory-1}"]
+        self.assertEqual([item["id"] for item in relationship], expected_ids)
+        self.assertEqual([item["id"] for item in included], expected_ids)
+        self.assertEqual(
+            [item["relationships"]["territory"]["data"]["id"] for item in included],
+            ["USA", "SGP"],
+        )
 
     def test_submit_existing_fails_closed_on_build_mismatch(self) -> None:
         status = {
