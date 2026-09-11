@@ -112,6 +112,17 @@ class AppStoreReleaseTest(unittest.TestCase):
         self.assertFalse(app_store_release._has_values(attributes, ("name", "email")))
         self.assertFalse(app_store_release._has_values(attributes, ("missing",)))
 
+    def test_relationship_id_accepts_null_linkage(self) -> None:
+        resource = {
+            "relationships": {"appStoreVersionForReview": {"data": None}}
+        }
+
+        self.assertIsNone(
+            app_store_release._relationship_id(
+                resource, "appStoreVersionForReview"
+            )
+        )
+
     def test_release_metadata_and_screenshots_are_valid(self) -> None:
         directory, metadata = app_store_release._load_metadata("0.10.80")
 

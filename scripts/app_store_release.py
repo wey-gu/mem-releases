@@ -106,6 +106,11 @@ def _has_values(attributes: dict[str, Any], names: tuple[str, ...]) -> bool:
     return all(attributes.get(name) not in (None, "") for name in names)
 
 
+def _relationship_id(resource: dict[str, Any], name: str) -> str | None:
+    linkage = resource.get("relationships", {}).get(name, {}).get("data")
+    return linkage.get("id") if isinstance(linkage, dict) else None
+
+
 def _all_pages(client: Client, path: str) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     next_path: str | None = path
@@ -505,11 +510,8 @@ def inspect(client: Client, version_string: str) -> dict[str, Any]:
                 "id": submission["id"],
                 "state": submission.get("attributes", {}).get("state"),
                 "submitted_date": submission.get("attributes", {}).get("submittedDate"),
-                "app_store_version_id": (
-                    submission.get("relationships", {})
-                    .get("appStoreVersionForReview", {})
-                    .get("data", {})
-                    .get("id")
+                "app_store_version_id": _relationship_id(
+                    submission, "appStoreVersionForReview"
                 ),
             }
             for submission in submissions
