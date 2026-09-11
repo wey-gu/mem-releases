@@ -1,0 +1,37 @@
+{
+  "version": "0.10.80",
+  "copyright": "2026 Nowledge Labs",
+  "release_type": "AFTER_APPROVAL",
+  "primary_category_id": "PRODUCTIVITY",
+  "app_info": {
+    "locale": "en-US",
+    "subtitle": "AI memory across every tool",
+    "privacy_policy_url": "https://mem.nowledge.co/privacy"
+  },
+  "localizations": [
+    {
+      "locale": "en-US",
+      "description": "Nowledge Mem carries your conversations, decisions, and discoveries across the AI tools you use. Connect to your Mem server, revisit your memory, and continue where you left off from iPhone or iPad.\n\nYour memory stays useful across tools:\n• Ask questions against your shared memory\n• Revisit decisions and saved context\n• Connect to spaces on your devices and trusted networks\n• Keep one durable context layer as AI tools change\n\nThe mobile app is a companion to Nowledge Mem and requires access to a configured Mem server.",
+      "keywords": "AI memory,knowledge management,personal knowledge base,context,productivity,MCP,local-first",
+      "marketing_url": "https://mem.nowledge.co",
+      "promotional_text": "AI tools change. Your memory should compound. Carry conversations, decisions, and discoveries across tools with Nowledge Mem.",
+      "support_url": "https://mem.nowledge.co/docs"
+    }
+  ],
+  "screenshots": [
+    {
+      "locale": "en-US",
+      "display_type": "APP_IPHONE_67",
+      "file": "screenshots/iphone-6.9.png",
+      "width": 1290,
+      "height": 2796
+    },
+    {
+      "locale": "en-US",
+      "display_type": "APP_IPAD_PRO_3GEN_129",
+      "file": "screenshots/ipad-13.png",
+      "width": 2048,
+      "height": 2732
+    }
+  ]
+}

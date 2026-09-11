@@ -9,13 +9,14 @@ on:
         type: string
       action:
         description: >-
-          Status is read-only. Submit-existing requires prepared App Store
-          metadata and the exact VALID build.
+          Status is read-only. Prepare creates versioned App Store metadata
+          around the exact VALID build. Submit-existing sends it to review.
         required: true
         type: choice
         default: status
         options:
           - status
+          - prepare
           - submit-existing
 
 permissions:
