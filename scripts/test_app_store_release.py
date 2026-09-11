@@ -15,6 +15,46 @@ class FakeClient:
 
 
 class AppStoreReleaseTest(unittest.TestCase):
+    def prepared_status(self, state="PREPARE_FOR_SUBMISSION"):
+        return {
+            "app": {"id": "app-id"},
+            "build": {"id": "build-id"},
+            "app_store_version": {
+                "id": "version-id",
+                "version": "0.10.80",
+                "state": state,
+                "linked_build_id": "build-id",
+                "locales": ["en-US"],
+                "has_review_detail": True,
+                "screenshots": [
+                    {
+                        "locale": "en-US",
+                        "display_type": "APP_IPHONE_67",
+                        "files": [{"state": "COMPLETE"}],
+                    },
+                    {
+                        "locale": "en-US",
+                        "display_type": "APP_IPAD_PRO_3GEN_129",
+                        "files": [{"state": "COMPLETE"}],
+                    },
+                ],
+            },
+            "store_preparation": {
+                "app_infos": [
+                    {
+                        "has_age_rating_declaration": True,
+                        "primary_category_id": "PRODUCTIVITY",
+                        "localizations": [
+                            {"privacy_policy_url": "https://mem.nowledge.co/privacy"}
+                        ],
+                    }
+                ],
+                "has_price_schedule": True,
+                "has_availability": True,
+            },
+            "review_submissions": [],
+        }
+
     def test_version_state_prefers_current_field(self) -> None:
         version = {
             "attributes": {
@@ -40,6 +80,13 @@ class AppStoreReleaseTest(unittest.TestCase):
         self.assertFalse(app_store_release._has_values(attributes, ("name", "email")))
         self.assertFalse(app_store_release._has_values(attributes, ("missing",)))
 
+    def test_release_metadata_and_screenshots_are_valid(self) -> None:
+        directory, metadata = app_store_release._load_metadata("0.10.80")
+
+        self.assertEqual(metadata["version"], "0.10.80")
+        self.assertEqual(len(metadata["screenshots"]), 2)
+        self.assertTrue((directory / metadata["screenshots"][0]["file"]).is_file())
+
     def test_submit_existing_fails_closed_on_build_mismatch(self) -> None:
         status = {
             "app": {"id": "app-id"},
@@ -60,19 +107,7 @@ class AppStoreReleaseTest(unittest.TestCase):
 
     def test_submit_existing_is_idempotent_after_submission(self) -> None:
         client = FakeClient()
-        status = {
-            "app": {"id": "app-id"},
-            "build": {"id": "build-id"},
-            "app_store_version": {
-                "id": "version-id",
-                "version": "0.10.80",
-                "state": "WAITING_FOR_REVIEW",
-                "linked_build_id": "build-id",
-                "locales": ["en-US"],
-                "has_review_detail": True,
-            },
-            "review_submissions": [],
-        }
+        status = self.prepared_status("WAITING_FOR_REVIEW")
 
         app_store_release.submit_existing(client, status)
 
@@ -80,19 +115,7 @@ class AppStoreReleaseTest(unittest.TestCase):
 
     def test_submit_existing_posts_the_prepared_version(self) -> None:
         client = FakeClient()
-        status = {
-            "app": {"id": "app-id"},
-            "build": {"id": "build-id"},
-            "app_store_version": {
-                "id": "version-id",
-                "version": "0.10.80",
-                "state": "PREPARE_FOR_SUBMISSION",
-                "linked_build_id": "build-id",
-                "locales": ["en-US"],
-                "has_review_detail": True,
-            },
-            "review_submissions": [],
-        }
+        status = self.prepared_status()
 
         app_store_release.submit_existing(client, status)
 
