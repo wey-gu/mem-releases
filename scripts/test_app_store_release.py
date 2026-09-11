@@ -27,6 +27,24 @@ class AvailabilityClient:
         raise AssertionError(f"unexpected request: {method} {path}")
 
 
+class PricingClient:
+    def __init__(self) -> None:
+        self.body = None
+
+    def call(self, method, path, body=None):
+        if path.startswith("/v1/apps/app-id/appPricePoints?"):
+            return {
+                "data": [
+                    {"id": "free-point", "attributes": {"customerPrice": "0"}},
+                    {"id": "paid-point", "attributes": {"customerPrice": "0.99"}},
+                ]
+            }
+        if method == "POST" and path == "/v1/appPriceSchedules":
+            self.body = body
+            return {"data": {"id": "schedule-id"}}
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+
 class AppStoreReleaseTest(unittest.TestCase):
     def prepared_status(self, state="PREPARE_FOR_SUBMISSION"):
         return {
@@ -63,6 +81,7 @@ class AppStoreReleaseTest(unittest.TestCase):
                     }
                 ],
                 "has_price_schedule": True,
+                "has_price": True,
                 "has_availability": True,
             },
             "review_submissions": [],
@@ -93,10 +112,22 @@ class AppStoreReleaseTest(unittest.TestCase):
         self.assertFalse(app_store_release._has_values(attributes, ("name", "email")))
         self.assertFalse(app_store_release._has_values(attributes, ("missing",)))
 
+    def test_relationship_id_accepts_null_linkage(self) -> None:
+        resource = {
+            "relationships": {"appStoreVersionForReview": {"data": None}}
+        }
+
+        self.assertIsNone(
+            app_store_release._relationship_id(
+                resource, "appStoreVersionForReview"
+            )
+        )
+
     def test_release_metadata_and_screenshots_are_valid(self) -> None:
         directory, metadata = app_store_release._load_metadata("0.10.80")
 
         self.assertEqual(metadata["version"], "0.10.80")
+        self.assertEqual(metadata["price"]["customer_price"], "0.00")
         self.assertEqual(len(metadata["screenshots"]), 2)
         self.assertTrue((directory / metadata["screenshots"][0]["file"]).is_file())
 
@@ -130,6 +161,26 @@ class AppStoreReleaseTest(unittest.TestCase):
             app_store_release._is_reusable_screenshot(
                 screenshot, "ipad-13.png", "expected-checksum"
             )
+        )
+
+    def test_price_schedule_uses_free_base_territory_price_point(self) -> None:
+        client = PricingClient()
+
+        app_store_release._create_price_schedule(
+            client,
+            "app-id",
+            {"base_territory": "USA", "customer_price": "0.00"},
+        )
+
+        relationships = client.body["data"]["relationships"]
+        self.assertEqual(relationships["baseTerritory"]["data"]["id"], "USA")
+        self.assertEqual(
+            relationships["manualPrices"]["data"][0]["id"], "${price-0}"
+        )
+        price = client.body["included"][0]
+        self.assertEqual(price["id"], "${price-0}")
+        self.assertEqual(
+            price["relationships"]["appPricePoint"]["data"]["id"], "free-point"
         )
 
     def test_submit_existing_fails_closed_on_build_mismatch(self) -> None:

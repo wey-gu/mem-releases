@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +106,11 @@ def _has_values(attributes: dict[str, Any], names: tuple[str, ...]) -> bool:
     return all(attributes.get(name) not in (None, "") for name in names)
 
 
+def _relationship_id(resource: dict[str, Any], name: str) -> str | None:
+    linkage = resource.get("relationships", {}).get(name, {}).get("data")
+    return linkage.get("id") if isinstance(linkage, dict) else None
+
+
 def _all_pages(client: Client, path: str) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     next_path: str | None = path
@@ -147,6 +153,16 @@ def _load_metadata(version_string: str) -> tuple[Path, dict[str, Any]]:
         raise RuntimeError("App Store privacy policy URL must use HTTPS")
     if len(subtitle) > 30:
         raise RuntimeError("App Store subtitle exceeds 30 characters")
+
+    price = metadata.get("price", {})
+    if not price.get("base_territory"):
+        raise RuntimeError("App Store price has no base territory")
+    try:
+        customer_price = Decimal(price.get("customer_price", ""))
+    except InvalidOperation as error:
+        raise RuntimeError("App Store customer price is invalid") from error
+    if customer_price < 0:
+        raise RuntimeError("App Store customer price cannot be negative")
 
     localizations = metadata.get("localizations", [])
     if not localizations:
@@ -263,6 +279,15 @@ def inspect(client: Client, version_string: str) -> dict[str, Any]:
         f"/v1/apps/{app_id}/appPriceSchedule",
         allow_not_found=True,
     ).get("data")
+    manual_prices: list[dict[str, Any]] = []
+    if isinstance(price_schedule, dict):
+        manual_prices = _all_pages(
+            client,
+            _query(
+                f"/v1/appPriceSchedules/{price_schedule['id']}/manualPrices",
+                {"limit": "200"},
+            ),
+        )
     availability = client.call(
         "GET",
         f"/v1/apps/{app_id}/relationships/appAvailabilityV2",
@@ -425,6 +450,10 @@ def inspect(client: Client, version_string: str) -> dict[str, Any]:
                 ("demoAccountName", "demoAccountPassword"),
             ),
             "has_price_schedule": isinstance(price_schedule, dict),
+            "has_price": any(
+                price.get("attributes", {}).get("endDate") is None
+                for price in manual_prices
+            ),
             "has_availability": isinstance(availability, dict),
         },
         "build": (
@@ -481,11 +510,8 @@ def inspect(client: Client, version_string: str) -> dict[str, Any]:
                 "id": submission["id"],
                 "state": submission.get("attributes", {}).get("state"),
                 "submitted_date": submission.get("attributes", {}).get("submittedDate"),
-                "app_store_version_id": (
-                    submission.get("relationships", {})
-                    .get("appStoreVersionForReview", {})
-                    .get("data", {})
-                    .get("id")
+                "app_store_version_id": _relationship_id(
+                    submission, "appStoreVersionForReview"
                 ),
             }
             for submission in submissions
@@ -688,6 +714,71 @@ def _create_availability(client: Client, app_id: str) -> None:
     )
 
 
+def _create_price_schedule(
+    client: Client, app_id: str, price: dict[str, str]
+) -> None:
+    base_territory = price["base_territory"]
+    customer_price = Decimal(price["customer_price"])
+    price_points = _all_pages(
+        client,
+        _query(
+            f"/v1/apps/{app_id}/appPricePoints",
+            {
+                "filter[territory]": base_territory,
+                "fields[appPricePoints]": "customerPrice",
+                "limit": "200",
+            },
+        ),
+    )
+    matching_points = [
+        point
+        for point in price_points
+        if Decimal(point.get("attributes", {}).get("customerPrice", "-1"))
+        == customer_price
+    ]
+    price_point = _single(
+        matching_points,
+        f"{base_territory} App Store price point for {customer_price}",
+    )
+    local_id = "${price-0}"
+    client.call(
+        "POST",
+        "/v1/appPriceSchedules",
+        {
+            "data": {
+                "type": "appPriceSchedules",
+                "relationships": {
+                    "app": {"data": {"type": "apps", "id": app_id}},
+                    "baseTerritory": {
+                        "data": {
+                            "type": "territories",
+                            "id": base_territory,
+                        }
+                    },
+                    "manualPrices": {
+                        "data": [{"type": "appPrices", "id": local_id}]
+                    },
+                },
+            },
+            "included": [
+                {
+                    "type": "appPrices",
+                    "id": local_id,
+                    "attributes": {"startDate": None, "endDate": None},
+                    "relationships": {
+                        "appPricePoint": {
+                            "data": {
+                                "type": "appPricePoints",
+                                "id": price_point["id"],
+                            }
+                        }
+                    },
+                }
+            ],
+        },
+    )
+
+
 def prepare(client: Client, status: dict[str, Any], version_string: str) -> None:
     directory, metadata = _load_metadata(version_string)
     build = status["build"]
@@ -751,6 +842,8 @@ def prepare(client: Client, status: dict[str, Any], version_string: str) -> None
         )
     if not status["store_preparation"]["has_availability"]:
         _create_availability(client, app_id)
+    if not status["store_preparation"]["has_price"]:
+        _create_price_schedule(client, app_id, metadata["price"])
 
     version = status["app_store_version"]
     if version is None:
@@ -935,6 +1028,7 @@ def submit_existing(client: Client, status: dict[str, Any]) -> None:
         or not app_info["primary_category_id"]
         or not any(item["privacy_policy_url"] for item in app_localizations)
         or not preparation["has_price_schedule"]
+        or not preparation["has_price"]
         or not preparation["has_availability"]
     ):
         raise RuntimeError(
