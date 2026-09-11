@@ -302,20 +302,24 @@ def inspect(client: Client, version_string: str) -> dict[str, Any]:
             ),
         ).get("data", [])
 
-    versions = client.call(
-        "GET",
+    versions = _all_pages(
+        client,
         _query(
             f"/v1/apps/{app_id}/appStoreVersions",
             {
                 "filter[platform]": "IOS",
-                "filter[versionString]": version_string,
-                "limit": "10",
+                "limit": "200",
             },
         ),
-    ).get("data", [])
+    )
+    matching_versions = [
+        version
+        for version in versions
+        if version.get("attributes", {}).get("versionString") == version_string
+    ]
     store_version = (
-        _single(versions, f"iOS App Store version {version_string}")
-        if versions
+        _single(matching_versions, f"iOS App Store version {version_string}")
+        if matching_versions
         else None
     )
 
@@ -447,6 +451,14 @@ def inspect(client: Client, version_string: str) -> dict[str, Any]:
             if build is not None
             else None
         ),
+        "app_store_versions": [
+            {
+                "id": version["id"],
+                "version": version.get("attributes", {}).get("versionString"),
+                "state": _version_state(version),
+            }
+            for version in versions
+        ],
         "app_store_version": (
             {
                 "id": store_version["id"],
@@ -735,33 +747,56 @@ def prepare(client: Client, status: dict[str, Any], version_string: str) -> None
 
     version = status["app_store_version"]
     if version is None:
-        version = client.call(
-            "POST",
-            "/v1/appStoreVersions",
-            {
-                "data": {
-                    "type": "appStoreVersions",
-                    "attributes": {
-                        "platform": "IOS",
-                        "versionString": version_string,
-                        "copyright": metadata["copyright"],
-                        "releaseType": metadata["release_type"],
-                    },
-                    "relationships": {
-                        "app": {"data": {"type": "apps", "id": app_id}},
-                        "build": {
-                            "data": {"type": "builds", "id": build["id"]}
+        reusable_drafts = [
+            item
+            for item in status["app_store_versions"]
+            if item["state"] == "PREPARE_FOR_SUBMISSION"
+        ]
+        if reusable_drafts:
+            version = _single(reusable_drafts, "reusable App Store version draft")
+        else:
+            version = client.call(
+                "POST",
+                "/v1/appStoreVersions",
+                {
+                    "data": {
+                        "type": "appStoreVersions",
+                        "attributes": {
+                            "platform": "IOS",
+                            "versionString": version_string,
+                            "copyright": metadata["copyright"],
+                            "releaseType": metadata["release_type"],
                         },
-                    },
-                }
-            },
-        )["data"]
-    elif version["linked_build_id"] != build["id"]:
-        client.call(
-            "PATCH",
-            f"/v1/appStoreVersions/{version['id']}/relationships/build",
-            {"data": {"type": "builds", "id": build["id"]}},
+                        "relationships": {
+                            "app": {"data": {"type": "apps", "id": app_id}},
+                        },
+                    }
+                },
+            )["data"]
+
+    version_state = version.get("state") or _version_state(version)
+    if version_state != "PREPARE_FOR_SUBMISSION":
+        raise RuntimeError(
+            f"App Store version cannot be prepared in state {version_state}"
         )
+    client.call(
+        "PATCH",
+        f"/v1/appStoreVersions/{version['id']}",
+        {
+            "data": {
+                "type": "appStoreVersions",
+                "id": version["id"],
+                "attributes": {
+                    "versionString": version_string,
+                    "copyright": metadata["copyright"],
+                    "releaseType": metadata["release_type"],
+                },
+                "relationships": {
+                    "build": {"data": {"type": "builds", "id": build["id"]}}
+                },
+            }
+        },
+    )
 
     version_id = version["id"]
     existing_localizations = client.call(
@@ -816,7 +851,12 @@ def prepare(client: Client, status: dict[str, Any], version_string: str) -> None
                 },
             )
 
-    if not version.get("has_review_detail"):
+    review_detail = client.call(
+        "GET",
+        f"/v1/appStoreVersions/{version_id}/appStoreReviewDetail",
+        allow_not_found=True,
+    ).get("data")
+    if not isinstance(review_detail, dict):
         beta_review = client.call("GET", f"/v1/apps/{app_id}/betaAppReviewDetail")
         beta_attributes = beta_review["data"].get("attributes", {})
         review_fields = (
