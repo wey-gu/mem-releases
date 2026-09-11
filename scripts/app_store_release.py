@@ -531,6 +531,18 @@ def _wait_for_screenshot(client: Client, screenshot_id: str) -> None:
     raise RuntimeError("timed out waiting for App Store screenshot processing")
 
 
+def _is_reusable_screenshot(
+    screenshot: dict[str, Any], file_name: str, checksum: str
+) -> bool:
+    attributes = screenshot.get("attributes", {})
+    reported_checksum = attributes.get("sourceFileChecksum")
+    return (
+        attributes.get("fileName") == file_name
+        and reported_checksum in (None, checksum)
+        and attributes.get("assetDeliveryState", {}).get("state") == "COMPLETE"
+    )
+
+
 def _ensure_screenshot(
     client: Client,
     localization_id: str,
@@ -588,12 +600,7 @@ def _ensure_screenshot(
         reusable = [
             screenshot
             for screenshot in screenshots
-            if screenshot.get("attributes", {}).get("fileName") == path.name
-            and screenshot.get("attributes", {}).get("sourceFileChecksum") == checksum
-            and screenshot.get("attributes", {})
-            .get("assetDeliveryState", {})
-            .get("state")
-            == "COMPLETE"
+            if _is_reusable_screenshot(screenshot, path.name, checksum)
         ]
         if len(reusable) == 1 and len(screenshots) == 1:
             return

@@ -117,6 +117,21 @@ class AppStoreReleaseTest(unittest.TestCase):
             ["USA", "SGP"],
         )
 
+    def test_complete_screenshot_without_reported_checksum_is_reusable(self) -> None:
+        screenshot = {
+            "attributes": {
+                "fileName": "ipad-13.png",
+                "sourceFileChecksum": None,
+                "assetDeliveryState": {"state": "COMPLETE"},
+            }
+        }
+
+        self.assertTrue(
+            app_store_release._is_reusable_screenshot(
+                screenshot, "ipad-13.png", "expected-checksum"
+            )
+        )
+
     def test_submit_existing_fails_closed_on_build_mismatch(self) -> None:
         status = {
             "app": {"id": "app-id"},
