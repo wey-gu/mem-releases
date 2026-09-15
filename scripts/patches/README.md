@@ -5,8 +5,7 @@
 The old writer hashed the entire offered buffer before returning a partial
 compression write, so a caller's `write_all` repeatedly hashed large suffixes.
 The patch consumes the full buffer internally and includes a short-write digest
-regression. Compression remains configured by the App; recovery requires gzip
-level 1 and verifies both the compressed package and raw archive digests.
+regression. Compression remains configured by the App.
 
 `build-tauri-rpm-cli.sh` pins Tauri CLI 2.11.4 by full Git SHA and checks the
 published rpm 0.16.0 crate's SHA-256 before applying the patch. It preserves the
@@ -17,10 +16,9 @@ Remove this backport when the selected Tauri CLI includes the upstream fix
 (rpm-rs 0.23.0 or later), after equivalent package and digest validation. Updating
 the App's Cargo.lock does not change the prebuilt npm CLI's dependencies.
 
-For an interrupted direct GA, run `rpm-test.yml` with the frozen App commit,
-original Desktop run, version, and expected DEB digest. After it succeeds and the
-original Desktop run is terminal without starting publication, dispatch
-`release-desktop.yml` with `reuse_run_id`, `rpm_recovery_run_id`, and the reviewed
-full `rpm_recovery_sha`. The recovery gate requires all other platform builds to
-have succeeded and checks the RPM receipt before reusing the existing publisher.
-The Changelog production gate still applies before package distribution.
+Use `rpm-test.yml` for build-only validation with a frozen App commit, an original
+Desktop run containing successful DEB/AppImage artifacts, the version, and the
+expected DEB digest. It repacks those App binaries without compiling them,
+requires gzip level 1, and verifies payload identity, ABI compatibility, package
+integrity, and the raw archive digest. It uploads a verification receipt with
+the RPM and does not publish packages. The original artifacts must still exist.
