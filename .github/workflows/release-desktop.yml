@@ -1061,12 +1061,22 @@ jobs:
         working-directory: nowledge-graph
         run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu
 
-      - name: Build native .rpm (Tauri rpmbuild)
-        # Tauri's rpm-rs compression is universally slow regardless of
-        # algorithm; tauri.linux.conf.json sets compression: { type: "none" }
-        # to bypass it. See feedback memory + tauri-apps/tauri#13273.
+      - name: Checkout RPM packaging tools
+        uses: actions/checkout@v4
+        with:
+          path: release-tooling
+      - name: Cache the patched packaging CLI build
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/rpm-tool/tauri/target
+          key: rpm-cli-ubuntu22-rust1971-${{ hashFiles('release-tooling/scripts/build-tauri-rpm-cli.sh', 'release-tooling/scripts/patches/rpm-0.16-short-write.patch') }}
+      - name: Build the fixed Tauri packaging CLI
+        run: bash release-tooling/scripts/build-tauri-rpm-cli.sh "$RUNNER_TEMP/rpm-tool"
+      - name: Build compressed RPM with the short-write fix
         working-directory: nowledge-graph
-        run: npm run tauri build -- --bundles rpm
+        # Keep source-configured compression. The old rpm-rs checksum writer
+        # repeatedly hashed large buffers when compression performed short writes.
+        run: '"$RUNNER_TEMP/rpm-tool/tauri/target/release/cargo-tauri" tauri build --bundles rpm'
 
       - name: Locate .rpm
         id: locate

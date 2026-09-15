@@ -1,0 +1,48 @@
+--- a/src/rpm/headers/types.rs
++++ b/src/rpm/headers/types.rs
+@@ -513,7 +513,8 @@
+ impl<W: std::io::Write> std::io::Write for Sha256Writer<W> {
+     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+         self.hasher.update(buf);
+-        self.writer.write(buf)
++        self.writer.write_all(buf)?;
++        Ok(buf.len())
+     }
+ 
+     fn flush(&mut self) -> std::io::Result<()> {
+@@ -773,3 +774,35 @@
+         assert_eq!(records[0].data.as_str(), Some("echo `hello world`"));
+     }
+ }
++
++#[cfg(test)]
++mod short_write_regression {
++    use super::Sha256Writer;
++    use sha2::{Digest, Sha256};
++    use std::io::{self, Write};
++
++    struct ShortWriter(Vec<u8>);
++
++    impl Write for ShortWriter {
++        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
++            let accepted = data.len().min(3);
++            self.0.extend_from_slice(&data[..accepted]);
++            Ok(accepted)
++        }
++
++        fn flush(&mut self) -> io::Result<()> {
++            Ok(())
++        }
++    }
++
++    #[test]
++    fn short_write_hashes_each_byte_once() {
++        let input = b"123456789";
++        let mut output = ShortWriter(Vec::new());
++        let mut writer = Sha256Writer::new(&mut output);
++        writer.write_all(input).unwrap();
++        let digest = writer.into_digest().as_ref().to_vec();
++        assert_eq!(digest.as_slice(), Sha256::digest(input).as_slice());
++        assert_eq!(output.0, input);
++    }
++}
