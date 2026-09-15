@@ -76,7 +76,13 @@ def stage(source, payload, reference_executable, version, source_sha, receipt):
         raise ValueError("The DEB has no bundled Web entry point")
     target = app / "src-tauri/target/release/nowledge-mem"
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() or (app / "rust-backend").exists():
+    staged_backend = app / "rust-backend"
+    existing = (
+        {path.name for path in staged_backend.iterdir()}
+        if staged_backend.exists()
+        else set()
+    )
+    if target.exists() or existing - {".gitkeep"}:
         raise ValueError("Recovery requires an unstaged source checkout")
     binary = executable.read_bytes()
     reference = reference_executable.read_bytes()
@@ -86,7 +92,9 @@ def stage(source, payload, reference_executable, version, source_sha, receipt):
     # Restore only the mutable marker; Tauri changes UNK to RPM while bundling.
     shutil.copy2(executable, target)
     target.write_bytes(prefix + b"UNK" + suffix)
-    shutil.copytree(backend, app / "rust-backend")
+    shutil.copytree(backend, staged_backend, dirs_exist_ok=True)
+    if (staged_backend / ".gitkeep").exists() and not (backend / ".gitkeep").exists():
+        (staged_backend / ".gitkeep").unlink()
     # The binary already embeds the frontend. bundle does not rebuild it.
     (app / "dist").mkdir(exist_ok=True)
     result = {
