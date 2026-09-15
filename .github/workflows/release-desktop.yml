@@ -39,6 +39,18 @@ on:
         required: false
         type: boolean
         default: false
+      reuse_run_id:
+        description: "Recover the successful builds from this terminal GA Desktop run"
+        required: false
+        type: string
+      rpm_recovery_run_id:
+        description: "Successful compressed rpm-test run to use with reuse_run_id"
+        required: false
+        type: string
+      rpm_recovery_sha:
+        description: "Reviewed full workflow SHA of the rpm-test run"
+        required: false
+        type: string
   push:
     # Auto-fire on RC-style tags ONLY (anything with a `-` suffix:
     # `-rcN`, `-betaN`, `-ciN`). Clean-semver GA tags like `v0.8.4`
@@ -83,6 +95,7 @@ jobs:
       run_publish: ${{ steps.resolve.outputs.run_publish }}
       run_latest: ${{ steps.resolve.outputs.run_latest }}
       run_vulkan: ${{ steps.resolve.outputs.run_vulkan }}
+      reuse_builds: ${{ steps.resolve.outputs.reuse_builds }}
     steps:
       - id: resolve
         name: Resolve version + source ref + flags
@@ -96,6 +109,9 @@ jobs:
           PAYLOAD_VERSION: ${{ github.event.client_payload.version }}
           PUSH_REF: ${{ github.ref_name }}
           EVENT_NAME: ${{ github.event_name }}
+          REUSE_RUN: ${{ inputs.reuse_run_id }}
+          RPM_RUN: ${{ inputs.rpm_recovery_run_id }}
+          RPM_SHA: ${{ inputs.rpm_recovery_sha }}
         run: |
           set -euo pipefail
           # VULKAN is the OPTIONAL -vulkan GPU variant gate. It is ONLY ever
@@ -140,6 +156,14 @@ jobs:
           # Normalize VULKAN to a strict true/false ("" from a non-dispatch
           # trigger becomes false). NEVER touches publish/latest/updater.
           if [[ "$VULKAN" == "true" ]]; then VULKAN="true"; else VULKAN="false"; fi
+          REUSE="false"
+          if [[ -n "$REUSE_RUN$RPM_RUN$RPM_SHA" ]]; then
+            [[ "$EVENT_NAME" == workflow_dispatch && "$DRY" == false && "$VULKAN" == false ]]
+            [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            [[ "$REUSE_RUN" =~ ^[0-9]+$ && "$RPM_RUN" =~ ^[0-9]+$ && "$RPM_SHA" =~ ^[0-9a-f]{40}$ ]]
+            REUSE="true"
+          fi
+          echo "reuse_builds=$REUSE"     >> "$GITHUB_OUTPUT"
           echo "version=$VERSION"        >> "$GITHUB_OUTPUT"
           echo "source_ref=$SOURCE_REF"  >> "$GITHUB_OUTPUT"
           echo "is_dry_run=$DRY"         >> "$GITHUB_OUTPUT"
@@ -165,6 +189,7 @@ jobs:
 
   build-macos-arm64:
     needs: meta
+    if: needs.meta.outputs.reuse_builds != 'true'
     runs-on: macos-14
     timeout-minutes: 180
     env:
@@ -434,6 +459,7 @@ jobs:
 
   build-macos-x86_64:
     needs: meta
+    if: needs.meta.outputs.reuse_builds != 'true'
     runs-on: macos-14
     timeout-minutes: 180
     env:
@@ -594,6 +620,7 @@ jobs:
 
   build-windows:
     needs: meta
+    if: needs.meta.outputs.reuse_builds != 'true'
     runs-on: windows-2022
     timeout-minutes: 180
     env:
@@ -801,6 +828,7 @@ jobs:
 
   build-linux-deb-appimage:
     needs: meta
+    if: needs.meta.outputs.reuse_builds != 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     env:
@@ -958,6 +986,7 @@ jobs:
 
   build-linux-rpm:
     needs: meta
+    if: needs.meta.outputs.reuse_builds != 'true'
     # Build every default Linux artifact against one explicit runtime floor.
     # Fedora 40 raised the RPM to GLIBC_2.39/CXXABI_1.3.15, so it could not run
     # on Fedora 39 (GLIBC 2.38) even though the Ubuntu-built AppImage/DEB could.
@@ -1664,6 +1693,100 @@ jobs:
   # Gated behind `release-publish` environment for manual approval.
   # Three independent guards prevent accidental pre-release publication.
   # -----------------------------------------------------------------------
+  reuse-builds:
+    needs: meta
+    if: needs.meta.outputs.reuse_builds == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      ORIGINAL_RUN: ${{ inputs.reuse_run_id }}
+      RPM_RUN: ${{ inputs.rpm_recovery_run_id }}
+      RPM_SHA: ${{ inputs.rpm_recovery_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tooling
+      - uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ needs.meta.outputs.source_ref }}
+          path: source
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.reuse_run_id }}
+          name: macos-arm64
+          path: artifacts/macos-arm64
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.reuse_run_id }}
+          name: macos-x86_64
+          path: artifacts/macos-x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.reuse_run_id }}
+          name: windows-x86_64
+          path: artifacts/windows-x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.reuse_run_id }}
+          name: linux-deb-appimage
+          path: artifacts/linux-deb-appimage
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.rpm_recovery_run_id }}
+          name: linux-rpm-recovery
+          path: artifacts/linux-rpm
+      - name: Verify all original builds and the RPM recovery receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python tooling/scripts/validate_desktop_recovery.py \
+            --repo "$GITHUB_REPOSITORY" --version "$VERSION" \
+            --source-sha "$(git -C source rev-parse HEAD)" \
+            --original-run "$ORIGINAL_RUN" --rpm-run "$RPM_RUN" \
+            --rpm-sha "$RPM_SHA" --artifacts artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: artifacts/macos-arm64/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-x86_64
+          path: artifacts/macos-x86_64/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: artifacts/windows-x86_64/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb-appimage
+          path: artifacts/linux-deb-appimage/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-rpm
+          path: artifacts/linux-rpm/
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     needs:
       - meta
@@ -1672,7 +1795,15 @@ jobs:
       - build-windows
       - build-linux-deb-appimage
       - build-linux-rpm
-    if: needs.meta.outputs.run_publish == 'true'
+      - reuse-builds
+    if: >-
+      ${{ !cancelled() && needs.meta.outputs.run_publish == 'true' &&
+          (needs.reuse-builds.result == 'success' ||
+           (needs.build-macos-arm64.result == 'success' &&
+            needs.build-macos-x86_64.result == 'success' &&
+            needs.build-windows.result == 'success' &&
+            needs.build-linux-deb-appimage.result == 'success' &&
+            needs.build-linux-rpm.result == 'success')) }}
     runs-on: ubuntu-22.04
     environment: release-publish
     timeout-minutes: 30
