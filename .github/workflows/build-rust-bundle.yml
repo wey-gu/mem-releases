@@ -87,19 +87,19 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           targets: ${{ matrix.target }}
 
       # Defensive: on the macos-14 arm64 runner the rustup proxy can route
       # `cargo` to `rustup-init` when the toolchain target matches the host
-      # arch. `rustup default stable` + `rustup show` forces the proxy symlinks
+      # arch. `rustup default 1.98.1` + `rustup show` forces the proxy symlinks
       # into a known state and makes the resolved toolchain visible in the log.
       # (Mirrors the same workaround in release-desktop.yml.)
       - name: Pin default toolchain (workaround for macos-14 arm64 proxy)
         run: |
           set -euo pipefail
-          rustup default stable
+          rustup default 1.98.1
           rustup show
 
       - uses: Swatinem/rust-cache@v2
