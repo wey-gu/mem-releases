@@ -186,6 +186,17 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - &authorize_private_hawdb
+        name: Authorize private HawDB submodule
+        shell: bash
+        env:
+          MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global \
+            url."https://x-access-token:${MEM_REPO_TOKEN}@github.com/nowledge-co/hawdb.git".insteadOf \
+            "https://github.com/nowledge-co/hawdb.git"
+
       - &resolve_private_desktop_dependency
         name: Resolve private Desktop dependency
         id: desktop_dependency
@@ -455,6 +466,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - *authorize_private_hawdb
+
       - *resolve_private_desktop_dependency
       - *checkout_private_desktop_dependency
 
@@ -616,6 +629,8 @@ jobs:
           token: ${{ secrets.MEM_REPO_TOKEN }}
           ref: ${{ env.SOURCE_REF }}
           submodules: false
+
+      - *authorize_private_hawdb
 
       - *resolve_private_desktop_dependency
       - *checkout_private_desktop_dependency
@@ -815,6 +830,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - *authorize_private_hawdb
+
       - *resolve_private_desktop_dependency
       - *checkout_private_desktop_dependency
 
@@ -977,6 +994,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - *authorize_private_hawdb
+
       - *resolve_private_desktop_dependency
       - *checkout_private_desktop_dependency
 
@@ -1133,6 +1152,8 @@ jobs:
           token: ${{ secrets.MEM_REPO_TOKEN }}
           ref: ${{ env.SOURCE_REF }}
           submodules: false
+
+      - *authorize_private_hawdb
 
       - *resolve_private_desktop_dependency
       - *checkout_private_desktop_dependency
@@ -1350,6 +1371,8 @@ jobs:
           token: ${{ secrets.MEM_REPO_TOKEN }}
           ref: ${{ env.SOURCE_REF }}
           submodules: false
+
+      - *authorize_private_hawdb
 
       - *resolve_private_desktop_dependency
       - *checkout_private_desktop_dependency

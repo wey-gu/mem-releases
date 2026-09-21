@@ -87,6 +87,16 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - name: Authorize private HawDB submodule
+        shell: bash
+        env:
+          MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global \
+            url."https://x-access-token:${MEM_REPO_TOKEN}@github.com/nowledge-co/hawdb.git".insteadOf \
+            "https://github.com/nowledge-co/hawdb.git"
+
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           targets: ${{ matrix.target }}
