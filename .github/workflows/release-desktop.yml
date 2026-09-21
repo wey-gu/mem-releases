@@ -69,6 +69,12 @@ permissions:
   packages: read
   actions: write
 
+env:
+  NMEM_BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-nowledge
+  GCP_BAZEL_CACHE_PROJECT_ID: ci-cd-503413
+  GCP_BAZEL_CACHE_SERVICE_ACCOUNT: github-bazel-cache@ci-cd-503413.iam.gserviceaccount.com
+  GCP_BAZEL_CACHE_WORKLOAD_IDENTITY_PROVIDER: projects/789880242959/locations/global/workloadIdentityPools/github-actions/providers/nowledge-mem
+
 jobs:
   # -----------------------------------------------------------------------
   # Resolve version + flags. Also exposes `source_ref` so build jobs check
@@ -418,6 +424,19 @@ jobs:
       - name: Install Rust backend build toolchain (macOS)
         run: brew install cmake ninja protobuf
 
+      - name: Set up Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+
+      - name: Authenticate Bazel remote cache
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.GCP_BAZEL_CACHE_PROJECT_ID }}
+          workload_identity_provider: ${{ env.GCP_BAZEL_CACHE_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_BAZEL_CACHE_SERVICE_ACCOUNT }}
+
       - name: Build (arm64, rust backend, signed, notarized)
         working-directory: nowledge-graph
         run: |
@@ -425,7 +444,7 @@ jobs:
           unset APPLE_CERTIFICATE
           unset APPLE_CERTIFICATE_PASSWORD
           rm -rf python-standalone rust-backend
-          ./scripts/build-rust-bundle.sh --target aarch64-apple-darwin
+          ./scripts/build-rust-bundle.sh --target aarch64-apple-darwin --bazel-public-binaries
           ./scripts/build-macos.sh --arch arm64 --skip-python
 
       - name: Locate + rename DMG
@@ -932,9 +951,22 @@ jobs:
         working-directory: nowledge-graph
         run: pnpm install --frozen-lockfile --prefer-offline
 
+      - name: Set up Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+
+      - name: Authenticate Bazel remote cache
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.GCP_BAZEL_CACHE_PROJECT_ID }}
+          workload_identity_provider: ${{ env.GCP_BAZEL_CACHE_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_BAZEL_CACHE_SERVICE_ACCOUNT }}
+
       - name: Build Rust backend bundle (Linux x86_64)
         working-directory: nowledge-graph
-        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu
+        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --bazel-public-binaries
 
       - name: Build .deb + .AppImage (Tauri native)
         working-directory: nowledge-graph
@@ -1084,9 +1116,22 @@ jobs:
         working-directory: nowledge-graph
         run: pnpm install --frozen-lockfile --prefer-offline
 
+      - name: Set up Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+
+      - name: Authenticate Bazel remote cache
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.GCP_BAZEL_CACHE_PROJECT_ID }}
+          workload_identity_provider: ${{ env.GCP_BAZEL_CACHE_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_BAZEL_CACHE_SERVICE_ACCOUNT }}
+
       - name: Build Rust backend bundle (Linux x86_64)
         working-directory: nowledge-graph
-        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu
+        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --bazel-public-binaries
 
       - name: Build native .rpm (Tauri rpmbuild)
         # Tauri's rpm-rs compression is universally slow regardless of
@@ -1491,9 +1536,22 @@ jobs:
         working-directory: nowledge-graph
         run: pnpm install --frozen-lockfile --prefer-offline
 
+      - name: Set up Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+
+      - name: Authenticate Bazel remote cache
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.GCP_BAZEL_CACHE_PROJECT_ID }}
+          workload_identity_provider: ${{ env.GCP_BAZEL_CACHE_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_BAZEL_CACHE_SERVICE_ACCOUNT }}
+
       - name: Build Rust backend bundle (Linux x86_64, Vulkan)
         working-directory: nowledge-graph
-        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --gpu vulkan
+        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --gpu vulkan --bazel-public-binaries
 
       - name: Build .deb + .AppImage (Tauri native)
         working-directory: nowledge-graph
