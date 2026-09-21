@@ -186,15 +186,19 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - &load_private_hawdb_deploy_key
+        name: Load private HawDB deploy key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SKEIN_REPO_SSH_KEY }}
+
       - &authorize_private_hawdb
-        name: Authorize private HawDB submodule
+        name: Resolve private HawDB submodule over SSH
         shell: bash
-        env:
-          MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
         run: |
           set -euo pipefail
           git config --global \
-            url."https://x-access-token:${MEM_REPO_TOKEN}@github.com/nowledge-co/hawdb.git".insteadOf \
+            url."git@github.com:nowledge-co/hawdb.git".insteadOf \
             "https://github.com/nowledge-co/hawdb.git"
 
       - &resolve_private_desktop_dependency
@@ -466,6 +470,7 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - *load_private_hawdb_deploy_key
       - *authorize_private_hawdb
 
       - *resolve_private_desktop_dependency
@@ -630,6 +635,7 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - *load_private_hawdb_deploy_key
       - *authorize_private_hawdb
 
       - *resolve_private_desktop_dependency
@@ -830,6 +836,7 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - *load_private_hawdb_deploy_key
       - *authorize_private_hawdb
 
       - *resolve_private_desktop_dependency
@@ -994,6 +1001,7 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - *load_private_hawdb_deploy_key
       - *authorize_private_hawdb
 
       - *resolve_private_desktop_dependency
@@ -1153,6 +1161,7 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - *load_private_hawdb_deploy_key
       - *authorize_private_hawdb
 
       - *resolve_private_desktop_dependency
@@ -1372,6 +1381,7 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
+      - *load_private_hawdb_deploy_key
       - *authorize_private_hawdb
 
       - *resolve_private_desktop_dependency
