@@ -208,7 +208,7 @@ jobs:
         run: |
           set -euo pipefail
           if grep -q -- '--init-desktop-https' nowledge-graph/scripts/build-rust-bundle.sh; then
-            read -r mode kind sha dependency_path <<< "$(git ls-tree HEAD skein)"
+            read -r mode kind sha dependency_path <<< "$(git ls-tree HEAD hawdb)"
             [[ "$mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ ]]
             echo "sha=$sha" >> "$GITHUB_OUTPUT"
           fi
@@ -218,10 +218,10 @@ jobs:
         if: steps.desktop_dependency.outputs.sha != ''
         uses: actions/checkout@v4
         with:
-          repository: nowledge-co/skein
+          repository: nowledge-co/hawdb
           ssh-key: ${{ secrets.SKEIN_REPO_SSH_KEY }}
           ref: ${{ steps.desktop_dependency.outputs.sha }}
-          path: skein
+          path: hawdb
           persist-credentials: false
 
       - &setup_desktop_python
