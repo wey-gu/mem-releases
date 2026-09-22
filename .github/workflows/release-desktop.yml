@@ -431,6 +431,7 @@ jobs:
           repository-cache: true
 
       - name: Authenticate Bazel remote cache
+        continue-on-error: true
         uses: google-github-actions/auth@v3
         with:
           project_id: ${{ env.GCP_BAZEL_CACHE_PROJECT_ID }}
@@ -958,6 +959,7 @@ jobs:
           repository-cache: true
 
       - name: Authenticate Bazel remote cache
+        continue-on-error: true
         uses: google-github-actions/auth@v3
         with:
           project_id: ${{ env.GCP_BAZEL_CACHE_PROJECT_ID }}
@@ -1123,6 +1125,7 @@ jobs:
           repository-cache: true
 
       - name: Authenticate Bazel remote cache
+        continue-on-error: true
         uses: google-github-actions/auth@v3
         with:
           project_id: ${{ env.GCP_BAZEL_CACHE_PROJECT_ID }}
@@ -1543,6 +1546,7 @@ jobs:
           repository-cache: true
 
       - name: Authenticate Bazel remote cache
+        continue-on-error: true
         uses: google-github-actions/auth@v3
         with:
           project_id: ${{ env.GCP_BAZEL_CACHE_PROJECT_ID }}
