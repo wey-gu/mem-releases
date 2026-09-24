@@ -72,10 +72,30 @@ Prepare two ordered changes, both based on the release branch:
 2. a release-branch parent commit that advances the website gitlink and adds
    matching engineering history in `nowledge-graph/CHANGELOG.md`.
 
-The production carrier (`wey-gu/nowledge-labs-website`) must contain the same
-public changelog data. Deploy it and cache-bust the API readback. Confirm the
-entry version, `unreleased` state, item count, and representative text before
-creating any package tag.
+### Website ownership and Vercel deployment
+
+`nowledge-co/nowledge-labs-website` is the canonical review repository. Every
+Changelog change must be submitted as a PR there and merged there first. Do
+not use a PR against `wey-gu/nowledge-labs-website` as a substitute for that
+review or merge.
+
+`wey-gu/nowledge-labs-website` is the Vercel deployment carrier. After the
+canonical merge, synchronize its `main` branch from the current deployment
+head by merging canonical `main`, then push that merge to `wey-gu/main` to
+start the manual deployment. Record both SHAs:
+
+```text
+CANONICAL_WEBSITE_SHA=<nowledge-co/main>
+DEPLOY_WEBSITE_SHA=<wey-gu/main after the sync merge>
+```
+
+Never force-push the deployment branch. If the two histories have diverged,
+the synchronization commit must retain the current `wey-gu/main` as one parent
+and canonical `main` as the other; its tree should match the canonical source
+unless the deployment repository has an explicitly reviewed deployment-only
+change. Verify the Vercel deployment and cache-bust the API readback. Confirm
+the entry version, `unreleased` state, item count, and representative text
+before creating any package tag.
 
 ## 4. Freeze release metadata and compile
 
