@@ -407,6 +407,10 @@ jobs:
         working-directory: nowledge-graph
         run: pnpm install --frozen-lockfile --prefer-offline
 
+      - name: Install deterministic DMG layout tool
+        working-directory: nowledge-graph
+        run: python3 -m pip install --disable-pip-version-check --no-input --requirement scripts/requirements-dmg-layout.txt
+
       # Native Rust backend toolchain (llama.cpp / ladybug / bindgen).
       # clang ships with Xcode on the macOS runner; we only need cmake + ninja.
       # protobuf: protoc is required by lancedb's lance-datafusion build-script.
@@ -579,6 +583,10 @@ jobs:
       - name: Install pnpm deps
         working-directory: nowledge-graph
         run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Install deterministic DMG layout tool
+        working-directory: nowledge-graph
+        run: python3 -m pip install --disable-pip-version-check --no-input --requirement scripts/requirements-dmg-layout.txt
 
       # Native Rust backend toolchain (llama.cpp / ladybug / bindgen).
       # clang ships with Xcode on the macOS runner; we only need cmake + ninja.
