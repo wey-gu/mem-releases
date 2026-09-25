@@ -1,0 +1,124 @@
+# Build and publish one GA GPU image from the already-validated RC source.
+# The caller deliberately invokes this workflow once per variant so CUDA and
+# Vulkan have independent scheduling, status, retries, and failure domains.
+
+name: promote-gpu-variant
+
+on:
+  workflow_call:
+    inputs:
+      rc_tag:
+        description: "RC version whose source ref is used for the build."
+        required: true
+        type: string
+      ga_tag:
+        description: "Clean GA semver used for image tags."
+        required: true
+        type: string
+      variant:
+        description: "GPU image variant: cuda or vulkan."
+        required: true
+        type: string
+    secrets:
+      MEM_REPO_TOKEN:
+        required: true
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    name: promote-${{ inputs.variant }}
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: docker.io/nowledgelabs/mem
+      REGISTRY_CACHE_REPO: docker.io/nowledgelabs/mem-buildcache
+      LEGACY_RELEASE_RUST_SUBMODULES: "upstream_forks/ladybug upstream_forks/rig"
+      RC: ${{ inputs.rc_tag }}
+      GA: ${{ inputs.ga_tag }}
+      VARIANT: ${{ inputs.variant }}
+    steps:
+      - name: Validate variant
+        run: |
+          set -euo pipefail
+          case "$VARIANT" in
+            cuda|vulkan) ;;
+            *)
+              echo "::error::Unsupported GPU variant: $VARIANT"
+              exit 1
+              ;;
+          esac
+
+      - name: Checkout source (rc ref)
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: v${{ inputs.rc_tag }}
+          submodules: false
+
+      - name: Resolve source commit
+        id: sha
+        run: echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Init Rust fork submodules (https)
+        run: |
+          git config --global --add safe.directory '*' || true
+          if [[ -x scripts/init-release-rust-submodules.sh ]]; then
+            scripts/init-release-rust-submodules.sh --init-https
+          else
+            echo "::warning::Source ref predates the release submodule helper; using the legacy contract."
+            read -r -a legacy_submodules <<< "$LEGACY_RELEASE_RUST_SUBMODULES"
+            for sm in "${legacy_submodules[@]}"; do
+              git config "submodule.$sm.url" "https://github.com/wey-gu/$(basename "$sm").git"
+              git submodule update --init --depth 1 "$sm"
+            done
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve image tags
+        id: tags
+        run: |
+          set -euo pipefail
+          MINOR="${GA%.*}"
+          echo "value=${IMAGE}:${GA}-${VARIANT},${IMAGE}:${MINOR}-${VARIANT}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push :<ga>-${{ inputs.variant }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: nowledge-graph/docker/Dockerfile.rust.${{ inputs.variant }}
+          platforms: linux/amd64
+          build-args: |
+            NMEM_BUILD_SHA_FULL=${{ steps.sha.outputs.source_sha }}
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.tags.outputs.value }}
+          labels: |
+            org.opencontainers.image.version=${{ env.GA }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:${{ inputs.variant }}-amd64
+          cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:${{ inputs.variant }}-amd64,mode=max
+
+      - name: Verify image manifest
+        run: docker buildx imagetools inspect "${IMAGE}:${GA}-${VARIANT}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### ${VARIANT} image built for ${GA}"
+            echo "- source: nowledge-co/mem at v${RC}"
+            echo "- image: ${IMAGE}:${GA}-${VARIANT} (amd64-only)"
+            echo "- signing: unsigned, matching release-docker GPU jobs"
+          } >> "$GITHUB_STEP_SUMMARY"
