@@ -8,6 +8,8 @@ instead of a moving view of `main`.
 
 - A release has one immutable source boundary: `RELEASE_BASE_SHA`.
 - `main` may continue to accept ordinary work after the boundary is cut.
+- Release metadata is reviewed and merged on `main` before it is copied to the
+  release branch with `git cherry-pick -x`.
 - No ordinary product change is cherry-picked into the release branch.
 - Every release note, binary, tag, and smoke result names the same release
   branch commit.
@@ -42,34 +44,38 @@ git push -u origin "release/<version>"
 
 The branch is the candidate's product boundary. Do not retarget it to a newer
 `main`, merge ordinary PRs into it, or append later fixes because they happen
-to merge while release work is in progress. A necessary release-only repair is
-allowed, but it must be reviewed, recorded, and result in a new RC number.
+to merge while release work is in progress. Release metadata is the one
+exception: it is reviewed on `main` first, then copied with
+`git cherry-pick -x` as described below. A necessary release-only repair is
+allowed, but it must first be reviewed on `main`, copied with `-x`, and result
+in a new RC number.
 
-## 2. Make the version-only change on the release branch
+## 2. Make the version-only change on `main`
 
-Create a version-only commit or PR with base `release/<version>`. It contains
+Create a version-only commit or PR with base `main`. It contains
 only version fields and generated manifests or lockfiles required by the
 version change. It must not contain user-facing prose or a website gitlink
 update.
 
-Record its commit as `RELEASE_VERSION_SHA`. All subsequent release work uses
-the release branch, never the moving `main` branch.
+After it merges, record its exact commit as `RELEASE_MAIN_VERSION_SHA`. Do not
+copy it to the release branch yet; the Changelog and its parent metadata must
+first be reviewed and merged on `main`.
 
-## 3. Write and review release notes against that branch
+## 3. Write, merge, deploy, and verify release notes on `main`
 
 Build the changelog worksheet from the exact range:
 
 ```text
-v<previous-version>..RELEASE_VERSION_SHA
+v<previous-version>..RELEASE_BASE_SHA
 ```
 
 Classify only changes in that range. A merged PR outside the range belongs to
 the next release, even if it has a lower PR number or is user-visible.
 
-Prepare two ordered changes, both based on the release branch:
+Prepare two ordered changes, both based on `main`:
 
 1. a child PR in `nowledge-labs-website` with the `date: "unreleased"` entry;
-2. a release-branch parent commit that advances the website gitlink and adds
+2. a parent PR in `nowledge-co/mem` that advances the website gitlink and adds
    matching engineering history in `nowledge-graph/CHANGELOG.md`.
 
 ### Website ownership and Vercel deployment
@@ -95,20 +101,40 @@ and canonical `main` as the other; its tree should match the canonical source
 unless the deployment repository has an explicitly reviewed deployment-only
 change. Verify the Vercel deployment and cache-bust the API readback. Confirm
 the entry version, `unreleased` state, item count, and representative text
-before creating any package tag.
+before creating any package tag. Once the parent PR merges, record its exact
+merge commit as `RELEASE_MAIN_METADATA_SHA`.
 
-## 4. Freeze release metadata and compile
+## 4. Copy the reviewed release metadata to the release branch
 
-After notes and the parent gitlink are finalized, record the branch head as
-`RELEASE_SHA`. Run source preflights and build the native bundles from exactly
-that SHA. The native-link gate belongs in the pre-release artifact smoke if it
-requires a built bundle.
+Cherry-pick the two reviewed `main` commits onto the branch in dependency
+order. Always use `-x`; the appended source-commit trailer is release
+provenance and must not be removed.
+
+```bash
+git fetch origin main "release/<version>"
+git switch "release/<version>"
+git cherry-pick -x "$RELEASE_MAIN_VERSION_SHA"
+git cherry-pick -x "$RELEASE_MAIN_METADATA_SHA"
+git push origin "release/<version>"
+export RELEASE_SHA="$(git rev-parse HEAD)"
+```
+
+Before compiling, verify that the copied commits contain only the intended
+version and release metadata, and that each `-x` source SHA is reachable from
+`origin/main`. Do not merge `main` into the branch to resolve a conflict. If a
+cherry-pick conflicts, resolve only the release metadata conflict, preserve the
+`-x` trailer, and record the resolution in the release record.
+
+Run source preflights and build the native bundles from exactly `RELEASE_SHA`.
+The native-link gate belongs in the pre-release artifact smoke if it requires a
+built bundle.
 
 If a check fails:
 
-- fix only release infrastructure or a confirmed release blocker on the
-  release branch;
-- re-run the affected checks against the new branch head;
+- fix only release infrastructure or a confirmed release blocker through a
+  reviewed `main` commit, then cherry-pick it with `-x` onto the release
+  branch;
+- re-run the affected checks against the new release-branch head;
 - do not import unrelated `main` changes;
 - use `rc2`, `rc3`, and so on after any already-published RC tag.
 
@@ -132,10 +158,13 @@ and updater/CDN readback before publishing the GA release.
 
 ## 7. Close the history loop
 
-After GA, merge only the release branch's version and release-note metadata
-back to `main`, date the Changelog entry, and update the parent gitlink. Run
-the release-history check to prove the GA tag and the deployed Changelog remain
-reachable from `main`.
+The version and unreleased-note metadata are already merged on `main`; do not
+merge the release branch back. After GA, date the Changelog entry, deploy it,
+and merge its parent gitlink update to `main`. Run the release-history check
+to prove the tagged release branch is patch-equivalent to its recorded `main`
+source commits and that every copied commit has a valid `-x` provenance trailer.
+An ancestor-only check is invalid for this workflow because cherry-pick creates
+new commit IDs by design.
 
 ## Fast-path rule
 
