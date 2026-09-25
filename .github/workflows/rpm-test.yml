@@ -1,104 +1,183 @@
-# Disposable RPM-only test workflow.
-#
-# Iterates on the Linux RPM build in isolation (no macOS/Windows minutes)
-# while we validate the path. Triggers on tag push matching `v*-rpmtest*`
-# (e.g. `v0.8.4-rpmtest1`) — never on real releases or `-ci*` tags.
-#
-# Source code is fetched from the private nowledge-co/mem repo via PAT.
-#
-# DELETE THIS FILE once the RPM build path is validated end-to-end. It
-# exists only to iterate on the RPM job; the canonical job lives in
-# release-desktop.yml.
-
+# Build-only RPM recovery using the upstream short-write fix and gzip level 1.
+# Reuse a qualified DEB payload; do not rebuild App binaries or publish packages.
 name: rpm-test
 
 on:
-  push:
-    tags:
-      - "v*-rpmtest*"
   workflow_dispatch:
     inputs:
       source_ref:
-        description: "Source tag/branch in nowledge-co/mem to build (e.g. dev_0804_post or v0.8.4-rpmtest1)"
+        description: "Full frozen commit SHA in nowledge-co/mem"
+        required: true
+        type: string
+      source_run_id:
+        description: "Desktop workflow run containing a successful Linux DEB artifact"
+        required: true
+        type: string
+      version:
+        description: "GA version contained in that DEB"
+        required: true
+        type: string
+      deb_sha256:
+        description: "Expected SHA-256 of the exact DEB to repack"
         required: true
         type: string
 
 concurrency:
-  group: rpm-test-${{ github.ref }}
-  cancel-in-progress: true
+  group: rpm-repack-${{ inputs.source_run_id }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  build-linux-rpm:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    container:
-      image: fedora:40
+  repack:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
     env:
-      SOURCE_REF: ${{ inputs.source_ref || github.ref_name }}
+      SOURCE_SHA: ${{ inputs.source_ref }}
+      SOURCE_RUN: ${{ inputs.source_run_id }}
+      VERSION: ${{ inputs.version }}
+      DEB_SHA256: ${{ inputs.deb_sha256 }}
     steps:
-      - name: Install system deps (Fedora)
-        run: |
-          dnf install -y \
-            webkit2gtk4.1-devel gtk3-devel librsvg2-devel \
-            libappindicator-gtk3-devel openssl-devel rpm-build \
-            zstd nodejs npm git file findutils which \
-            gcc gcc-c++ make patchelf curl wget tar
-
-      - name: Checkout private source (nowledge-co/mem)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          path: tooling
+      - uses: actions/checkout@v4
         with:
           repository: nowledge-co/mem
           token: ${{ secrets.MEM_REPO_TOKEN }}
-          ref: ${{ env.SOURCE_REF }}
+          ref: ${{ inputs.source_ref }}
+          path: source
           submodules: false
-
-      - name: Install Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.1
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
         with:
-          workspaces: nowledge-graph/src-tauri
-          key: linux-rpm-fedora40
-
-      - name: Install npm deps
-        working-directory: nowledge-graph
-        run: npm ci --no-audit --no-fund
-
-      - name: Download Python standalone (Linux x86_64)
-        working-directory: nowledge-graph
+          python-version: "3.12"
+      - name: Validate the source and original build
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          rm -rf python-standalone
-          ./scripts/download-python-standalone.sh
-
-      - name: Build Python bundle (PyArmor)
-        working-directory: nowledge-graph
-        run: ./scripts/build-python-bundle.sh --pyarmor
-
-      - name: Build native .rpm (Tauri rpmbuild)
-        working-directory: nowledge-graph
-        run: npm run tauri build -- --bundles rpm
-
-      - name: Locate + inspect .rpm
-        id: locate
-        working-directory: nowledge-graph
+          python - <<'PYTHON'
+          import json, os, re, subprocess
+          sha, version = os.environ['SOURCE_SHA'], os.environ['VERSION']
+          assert re.fullmatch(r'[0-9a-f]{40}', sha)
+          assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version)
+          assert re.fullmatch(r'[0-9]+', os.environ['SOURCE_RUN'])
+          assert re.fullmatch(r'[0-9a-f]{64}', os.environ['DEB_SHA256'])
+          assert subprocess.check_output(['git', '-C', 'source', 'rev-parse', 'HEAD'], text=True).strip() == sha
+          refs = subprocess.check_output(['git', '-C', 'source', 'ls-remote', 'origin',
+              f'refs/tags/v{version}', f'refs/tags/v{version}^{{}}'], text=True).splitlines()
+          assert refs
+          peeled = [line.split()[0] for line in refs if line.endswith('^{}')]
+          assert (peeled or [refs[0].split()[0]]) == [sha]
+          repo = os.environ['GITHUB_REPOSITORY']
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', path], text=True))
+          run = api(f'repos/{repo}/actions/runs/{os.environ["SOURCE_RUN"]}')
+          assert run['path'] == '.github/workflows/release-desktop.yml'
+          assert run['head_branch'] == f'v{version}' and run['event'] == 'workflow_dispatch'
+          tag = api(f'repos/{repo}/git/ref/tags/v{version}')
+          assert run['head_sha'] == tag['object']['sha']
+          jobs = api(f'repos/{repo}/actions/runs/{os.environ["SOURCE_RUN"]}/jobs?per_page=100')['jobs']
+          selected = [job for job in jobs if job['name'] == 'build-linux-deb-appimage']
+          assert len(selected) == 1 and selected[0]['conclusion'] == 'success'
+          print(f'Qualified DEB source: {version} {sha}; original run {run["id"]}')
+          PYTHON
+      - name: Download the qualified Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+          name: linux-deb-appimage
+          path: artifacts
+      - name: Install package verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm rpm2cpio cpio binutils file squashfs-tools libssl-dev libdbus-1-dev pkg-config libayatana-appindicator3-dev
+      - name: Stage exact prebuilt payload
         run: |
           set -euo pipefail
-          RPM="$(find src-tauri/target/release/bundle/rpm -name '*.rpm' -print -quit)"
-          [[ -f "$RPM" ]] || { echo "::error::No .rpm produced"; exit 1; }
-          ls -lh "$RPM"
-          rpm -qip "$RPM" || true
-          # Absolute path so upload-artifact (root cwd) can find it.
-          ABS="$(pwd)/$RPM"
-          echo "rpm=$ABS" >> "$GITHUB_OUTPUT"
-
+          mapfile -t debs < <(find artifacts -maxdepth 1 -name '*.deb' -type f)
+          [[ ${#debs[@]} -eq 1 ]]
+          echo "${DEB_SHA256}  ${debs[0]}" | sha256sum --check -
+          [[ "$(dpkg-deb -f "${debs[0]}" Version)" == "$VERSION" ]]
+          [[ "$(dpkg-deb -f "${debs[0]}" Architecture)" == amd64 ]]
+          dpkg-deb -x "${debs[0]}" deb-root
+          mapfile -t appimages < <(find artifacts -maxdepth 1 -name '*.AppImage' -type f)
+          [[ ${#appimages[@]} -eq 1 ]]
+          offset="$(python - "${appimages[0]}" <<'PYTHON'
+          import struct, sys
+          with open(sys.argv[1], 'rb') as stream:
+              header = stream.read(64)
+              assert header[:6] == b'\x7fELF\x02\x01'
+              section_offset = struct.unpack_from('<Q', header, 40)[0]
+              entry_size, entry_count = struct.unpack_from('<HH', header, 58)
+              assert entry_size == 64 and entry_count > 0
+              offset = section_offset + entry_size * entry_count
+              stream.seek(offset)
+              assert stream.read(4) == b'hsqs'
+          print(offset)
+          PYTHON
+          )"
+          unsquashfs -o "$offset" -d appimage-root "${appimages[0]}" usr/bin/nowledge-mem
+          python tooling/scripts/rpm_repack.py stage --source source --payload deb-root \
+            --reference-executable appimage-root/usr/bin/nowledge-mem \
+            --version "$VERSION" --source-sha "$SOURCE_SHA" --receipt receipt.json
+          python - <<'PYTHON'
+          import json, os
+          from pathlib import Path
+          path = Path('receipt.json')
+          receipt = json.loads(path.read_text())
+          receipt.update(source_run=int(os.environ['SOURCE_RUN']),
+              tooling_sha=os.environ['GITHUB_SHA'], deb_sha256=os.environ['DEB_SHA256'])
+          path.write_text(json.dumps(receipt, indent=2) + '\n')
+          PYTHON
+      - name: Initialize Cargo metadata dependencies
+        working-directory: source
+        run: scripts/init-release-rust-submodules.sh --init-https
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - name: Cache the patched packaging CLI build
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/rpm-tool/tauri/target
+          key: rpm-cli-ubuntu22-rust1971-${{ hashFiles('tooling/scripts/build-tauri-rpm-cli.sh', 'tooling/scripts/patches/rpm-0.16-short-write.patch') }}
+      - name: Build the fixed Tauri packaging CLI
+        run: bash tooling/scripts/build-tauri-rpm-cli.sh "$RUNNER_TEMP/rpm-tool"
+      - name: Bundle compressed RPM without recompiling the App
+        working-directory: source/nowledge-graph
+        run: |
+          set -euo pipefail
+          (
+            while sleep 30; do
+              date -u
+              ps -eo etime,pcpu,rss,stat,comm --sort=-pcpu | sed -n '1,9p'
+              free -m
+            done
+          ) &
+          heartbeat_pid=$!
+          trap 'kill "$heartbeat_pid" 2>/dev/null || true' EXIT
+          timeout --kill-after=30s 15m "$RUNNER_TEMP/rpm-tool/tauri/target/release/cargo-tauri" \
+            tauri bundle --ci --bundles rpm
+      - name: Verify payload identity and the Linux runtime contract
+        run: |
+          set -euo pipefail
+          mapfile -t rpms < <(find source/nowledge-graph/src-tauri/target/release/bundle/rpm -name '*.rpm' -type f)
+          [[ ${#rpms[@]} -eq 1 ]]
+          rpm_path="$(realpath "${rpms[0]}")"
+          mkdir rpm-root
+          set +e
+          (cd rpm-root && rpm2cpio "$rpm_path" | cpio -idm --quiet)
+          extract_status=$?
+          set -e
+          [[ $extract_status -le 1 ]]
+          python tooling/scripts/rpm_repack.py verify --source source --payload rpm-root \
+            --rpm "$rpm_path" --receipt receipt.json
+          bash source/nowledge-graph/scripts/verify-linux-package.sh "$rpm_path"
+          mkdir output
+          cp "$rpm_path" receipt.json output/
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-rpm-test
-          path: ${{ steps.locate.outputs.rpm }}
+          name: linux-rpm-recovery
+          path: output/
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 7
