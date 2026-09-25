@@ -1,0 +1,98 @@
+# Upload one completed desktop build artifact to an existing draft RC release.
+# Each platform calls this workflow independently so a slow build does not
+# delay artifacts from platforms that have already completed.
+
+name: upload-prerelease-desktop-artifact
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Pre-release version without the leading v."
+        required: true
+        type: string
+      artifact_name:
+        description: "Workflow artifact name produced by release-desktop."
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  upload:
+    name: upload-${{ inputs.artifact_name }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ inputs.version }}
+      ARTIFACT_NAME: ${{ inputs.artifact_name }}
+    steps:
+      - name: Download platform artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: artifacts
+
+      - name: Validate artifact contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$ARTIFACT_NAME" in
+            macos-arm64|macos-x86_64)
+              patterns=('*.dmg')
+              ;;
+            windows-x86_64)
+              patterns=('*.exe')
+              ;;
+            linux-deb-appimage)
+              patterns=('*.deb' '*.AppImage')
+              ;;
+            linux-rpm)
+              patterns=('*.rpm')
+              ;;
+            *)
+              echo "::error::Unsupported desktop artifact: $ARTIFACT_NAME"
+              exit 1
+              ;;
+          esac
+
+          for pattern in "${patterns[@]}"; do
+            count="$(find artifacts -type f -name "$pattern" | wc -l | tr -d ' ')"
+            if [[ "$count" != "1" ]]; then
+              echo "::error::Expected exactly one $pattern file in $ARTIFACT_NAME; found $count"
+              exit 1
+            fi
+          done
+
+          mapfile -d '' files < <(find artifacts -type f -print0)
+          if [[ "${#files[@]}" != "${#patterns[@]}" ]]; then
+            echo "::error::Unexpected files in $ARTIFACT_NAME"
+            printf 'Found: %s\n' "${files[@]}"
+            exit 1
+          fi
+
+      - name: Upload platform bundles to draft pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          state="$(gh release view "$TAG" -R "$REPO" --json isDraft,isPrerelease --jq '[.isDraft, .isPrerelease] | @tsv')"
+          if [[ "$state" != $'true\ttrue' ]]; then
+            echo "::error::Release $TAG must exist and remain a draft pre-release; got: $state"
+            exit 1
+          fi
+          mapfile -d '' files < <(find artifacts -type f -print0)
+          gh release upload "$TAG" -R "$REPO" --clobber "${files[@]}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### ${ARTIFACT_NAME} uploaded"
+            echo "- GH release: v${VERSION} (draft pre-release)"
+            echo "- publication scope: GH Release only"
+          } >> "$GITHUB_STEP_SUMMARY"

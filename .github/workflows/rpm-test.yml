@@ -135,7 +135,7 @@ jobs:
       - name: Initialize Cargo metadata dependencies
         working-directory: source
         run: scripts/init-release-rust-submodules.sh --init-https
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@1.98.1
       - name: Cache the patched packaging CLI build
         uses: actions/cache@v4
         with:
