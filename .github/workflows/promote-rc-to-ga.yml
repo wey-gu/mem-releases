@@ -4,7 +4,7 @@
 # --------------
 # Given a tested RC (e.g. v0.8.4-rc7) on Docker Hub + the rc GH Release,
 # this workflow publishes the same exact bits under the GA tag
-# (e.g. v0.8.4) across every distribution surface, in lockstep:
+# (e.g. v0.8.4) across the core distribution surfaces:
 #
 #   Docker (CPU):
 #     - re-tags nowledgelabs/mem:<rc> → nowledgelabs/mem:<ga> (and :latest)
@@ -23,12 +23,16 @@
 #       cosign-signed in either path).
 #
 #   Desktop:
-#     - downloads .dmg/.exe/.deb/.AppImage/.rpm from the rc GH Release
+#     - downloads .dmg/.exe/.deb/.AppImage from the rc GH Release
 #     - renames RC suffix out of every filename (Nowledge Mem_0.8.4-rc7_… → _0.8.4_…)
 #     - uploads to Cloudflare R2 under the GA path (app/<ga>/)
 #     - updates the APT repo with the GA-named .deb
 #     - bumps the auto-updater feed to <ga>
 #     - creates a draft GH Release v<ga> with the renamed assets
+#
+#   RPM:
+#     - is independently attached by promote-rpm-to-ga.yml after the RC RPM
+#       build has completed; it never delays the core GA promotion.
 #
 # Why this exists
 # ---------------
@@ -47,8 +51,9 @@
 #        ga_tag = "0.8.4"
 #        push_latest = true
 #      Both docker and desktop promotion run in parallel.
-#   3. After it succeeds, the draft GH Release v<ga> on THIS repo holds the
-#      desktop bundles. Edit notes + publish manually.
+#   3. After it succeeds, the draft GH Release v<ga> holds the core desktop
+#      bundles. Once the RC RPM is available, run promote-rpm-to-ga.yml to
+#      attach it. Edit notes + publish manually after the intended assets land.
 #
 # Notes
 # -----
@@ -90,7 +95,7 @@ on:
         type: boolean
         default: false
       promote_desktop:
-        description: "Promote desktop bundles (DMG/EXE/deb/AppImage/RPM)"
+        description: "Promote core desktop bundles (DMG/EXE/deb/AppImage)"
         type: boolean
         default: true
       push_latest:
@@ -338,8 +343,7 @@ jobs:
           EXE_WIN="$(find . -maxdepth 1 -type f -iname '*.exe' -print -quit)"
           DEB="$(find . -maxdepth 1 -type f -iname '*.deb' -print -quit)"
           APPIMG="$(find . -maxdepth 1 -type f -iname '*.AppImage' -print -quit)"
-          RPM="$(find . -maxdepth 1 -type f -iname '*.rpm' -print -quit)"
-          for kv in DMG_ARM:"$DMG_ARM" DMG_X64:"$DMG_X64" EXE_WIN:"$EXE_WIN" DEB:"$DEB" APPIMG:"$APPIMG" RPM:"$RPM"; do
+          for kv in DMG_ARM:"$DMG_ARM" DMG_X64:"$DMG_X64" EXE_WIN:"$EXE_WIN" DEB:"$DEB" APPIMG:"$APPIMG"; do
             name="${kv%%:*}"; val="${kv#*:}"
             if [[ -z "$val" || ! -f "$val" ]]; then
               echo "::error::Missing artifact after rename: $name"
@@ -352,7 +356,6 @@ jobs:
             echo "exe_win=$PWD/$EXE_WIN"
             echo "deb=$PWD/$DEB"
             echo "appimg=$PWD/$APPIMG"
-            echo "rpm=$PWD/$RPM"
           } >> "$GITHUB_OUTPUT"
 
       - name: Upload to Cloudflare R2 (under app/${{ env.GA }}/)
@@ -364,7 +367,6 @@ jobs:
           node scripts/upload-package.cjs "$GA" win       "${{ steps.rename.outputs.exe_win }}"
           node scripts/upload-package.cjs "$GA" linux     "${{ steps.rename.outputs.deb }}"
           node scripts/upload-package.cjs "$GA" linux     "${{ steps.rename.outputs.appimg }}"
-          node scripts/upload-package.cjs "$GA" linux     "${{ steps.rename.outputs.rpm }}"
 
       - name: Purge Cloudflare edge cache for uploaded keys
         if: ${{ env.CLOUDFLARE_ZONE_ID != '' && env.CLOUDFLARE_API_TOKEN != '' }}
@@ -380,7 +382,6 @@ jobs:
             "https://${host}/app/${GA}/x86_64-pc-windows-msvc.exe"
             "https://${host}/app/${GA}/x86_64-unknown-linux-gnu.deb"
             "https://${host}/app/${GA}/x86_64-unknown-linux-gnu.AppImage"
-            "https://${host}/app/${GA}/x86_64-unknown-linux-gnu.rpm"
           )
           files_json=$(printf '"%s",' "${urls[@]}")
           files_json="[${files_json%,}]"
@@ -461,8 +462,7 @@ jobs:
             "${{ steps.rename.outputs.dmg_x64 }}" \
             "${{ steps.rename.outputs.exe_win }}" \
             "${{ steps.rename.outputs.deb }}" \
-            "${{ steps.rename.outputs.appimg }}" \
-            "${{ steps.rename.outputs.rpm }}"
+            "${{ steps.rename.outputs.appimg }}"
 
       # R2 and APT publish BEFORE the auto-updater feed and the GA release, so a
       # failure in between leaves GA downloadable while the updater still points

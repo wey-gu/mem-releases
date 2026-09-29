@@ -1,0 +1,190 @@
+# Promote the independently-built RPM from an RC release after core GA assets
+# have shipped. This workflow never changes APT or the auto-updater feed.
+name: promote-rpm-to-ga
+
+on:
+  workflow_dispatch:
+    inputs:
+      rc_tag:
+        description: "RC version containing the validated RPM (e.g. 0.10.92-rc1; no leading 'v')"
+        required: true
+        type: string
+      ga_tag:
+        description: "Existing GA version to receive the RPM (e.g. 0.10.92)"
+        required: true
+        type: string
+
+concurrency:
+  group: promote-rpm-${{ inputs.ga_tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      rc_tag: ${{ steps.validate.outputs.rc_tag }}
+      ga_tag: ${{ steps.validate.outputs.ga_tag }}
+    steps:
+      - id: validate
+        name: Validate promotion boundary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC: ${{ inputs.rc_tag }}
+          GA: ${{ inputs.ga_tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$GA" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::GA tag '$GA' must be clean semver."
+            exit 1
+          }
+          [[ "${RC%%-*}" == "$GA" ]] || {
+            echo "::error::RC base '${RC%%-*}' does not match GA '$GA'."
+            exit 1
+          }
+          gh release view "v${GA}" --repo "$REPO" >/dev/null || {
+            echo "::error::GA release v${GA} does not exist; run the core promotion first."
+            exit 1
+          }
+          rpm_count="$(gh release view "v${RC}" --repo "$REPO" --json assets \
+            --jq '[.assets[].name | select(test("\\.rpm$"))] | length')"
+          [[ "$rpm_count" == "1" ]] || {
+            echo "::error::Expected exactly one RPM on RC release v${RC}; found $rpm_count."
+            exit 1
+          }
+          echo "rc_tag=$RC" >> "$GITHUB_OUTPUT"
+          echo "ga_tag=$GA" >> "$GITHUB_OUTPUT"
+
+  promote:
+    needs: validate
+    runs-on: ubuntu-22.04
+    environment: release-publish
+    timeout-minutes: 45
+    env:
+      RC: ${{ needs.validate.outputs.rc_tag }}
+      GA: ${{ needs.validate.outputs.ga_tag }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - name: Clone mem-backbone
+        env:
+          PAT: ${{ secrets.MEM_BACKBONE_PAT }}
+        run: |
+          set -euo pipefail
+          AUTH_B64="$(printf 'x-access-token:%s' "$PAT" | base64 | tr -d '\n')"
+          git -c "http.https://github.com/.extraheader=Authorization: Basic ${AUTH_B64}" \
+            clone --depth=1 https://github.com/nowledge-co/mem-backbone.git mem-backbone
+          git -C mem-backbone config --unset-all http.https://github.com/.extraheader || true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install mem-backbone dependencies
+        working-directory: mem-backbone
+        run: npm ci --no-audit --no-fund
+
+      - name: Download the validated RC RPM
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir rc-artifacts
+          gh release download "v${RC}" --repo "$REPO" --dir rc-artifacts --pattern '*.rpm'
+          mapfile -t rpms < <(find rc-artifacts -maxdepth 1 -type f -name '*.rpm' -print)
+          [[ "${#rpms[@]}" == 1 ]] || {
+            echo "::error::Expected exactly one downloaded RPM; found ${#rpms[@]}."
+            exit 1
+          }
+          rpm="${rpms[0]}"
+          ga_rpm="${rpm//${RC}/${GA}}"
+          [[ "$rpm" != "$ga_rpm" ]] || {
+            echo "::error::RC RPM filename does not contain '$RC': $(basename "$rpm")"
+            exit 1
+          }
+          mv -- "$rpm" "$ga_rpm"
+          echo "rpm=$PWD/$ga_rpm" >> "$GITHUB_ENV"
+          echo "rpm_sha256=$(sha256sum "$ga_rpm" | awk '{print $1}')" >> "$GITHUB_ENV"
+          sha256sum "$ga_rpm"
+
+      - name: Upload RPM to Cloudflare R2
+        working-directory: mem-backbone
+        run: |
+          set -euo pipefail
+          node scripts/upload-package.cjs "$GA" linux "$RPM"
+
+      - name: Purge RPM from the Cloudflare edge cache
+        if: ${{ env.CLOUDFLARE_ZONE_ID != '' && env.CLOUDFLARE_API_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          host="${CUSTOM_DOMAIN:-download-mem.nowledge.co}"
+          host="${host#https://}"
+          host="${host#http://}"
+          host="${host%/}"
+          response="$(curl -fsS -X POST \
+            "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/purge_cache" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "{\"files\":[\"https://${host}/app/${GA}/x86_64-unknown-linux-gnu.rpm\"]}")"
+          echo "$response" | python3 -m json.tool
+          echo "$response" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("success") else 1)'
+
+      - name: Verify RPM delivery
+        run: |
+          set -euo pipefail
+          host="${CUSTOM_DOMAIN:-download-mem.nowledge.co}"
+          host="${host#https://}"
+          host="${host#http://}"
+          host="${host%/}"
+          url="https://${host}/app/${GA}/x86_64-unknown-linux-gnu.rpm"
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --silent --show-error --location "$url" -o delivered.rpm \
+              && [[ "$(sha256sum delivered.rpm | awk '{print $1}')" == "$RPM_SHA256" ]]; then
+              echo "RPM delivery and digest verified on attempt $attempt."
+              exit 0
+            fi
+            rm -f delivered.rpm
+            [[ "$attempt" == 5 ]] || sleep 15
+          done
+          echo "::error::RPM delivery did not verify: $url"
+          exit 1
+
+      - name: Attach RPM to the existing GA release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "v${GA}" --repo "$REPO" >/dev/null || {
+            echo "::error::GA release disappeared before RPM attachment."
+            exit 1
+          }
+          gh release upload "v${GA}" --repo "$REPO" --clobber "$RPM"
+
+      - name: Report partial promotion
+        if: failure()
+        run: |
+          echo "::error::RPM promotion for ${GA} did not complete. The core release remains unchanged."
+          {
+            echo "### RPM promotion incomplete for ${GA}"
+            echo "The core release, APT repository, and auto-updater feed were not changed by this workflow."
+            echo "Check whether app/${GA}/x86_64-unknown-linux-gnu.rpm uploaded before retrying."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summary
+        run: |
+          {
+            echo "### RPM promoted v${RC} to v${GA}"
+            echo "- Source: validated RPM attached to RC release v${RC}"
+            echo "- R2: app/${GA}/x86_64-unknown-linux-gnu.rpm"
+            echo "- APT and auto-updater: unchanged"
+          } >> "$GITHUB_STEP_SUMMARY"
