@@ -14,7 +14,9 @@ instead of a moving view of `main`.
 - Every release note, binary, tag, and smoke result names the same release
   branch commit.
 - The public Changelog is deployed and read back before package distribution.
-- An RC is promoted to GA without rebuilding.
+- Core RC artifacts are promoted to GA without rebuilding. A delayed RPM is
+  promoted separately from its validated RC asset and never changes the APT
+  repository or auto-updater feed.
 
 ## 0. Verify the release capability before the cut
 
@@ -150,11 +152,51 @@ verify the embedded native binary and updater path, run the required
 native-link/artifact smoke, and verify Docker and CLI artifacts where they are
 in scope. RC publication must not move `latest` or the GA updater feed.
 
+The desktop RC uploads its platform artifacts independently. A slow RPM build
+may complete after the macOS, Windows, DEB, and AppImage artifacts; its result
+must still pass the Linux payload and ABI-floor checks before it can be
+promoted. Do not make a failed RPM invisible by treating the RC as complete.
+
 ## 6. Promote the tested RC to GA
 
-Promote the exact RC artifacts with `promote-rc-to-ga.yml`; do not rebuild for
-GA. Validate matching artifact digests, release assets, package registries,
-and updater/CDN readback before publishing the GA release.
+### 6.1 Promote the core release
+
+Once the core RC artifacts have passed their smoke gates, run
+`promote-rc-to-ga.yml`. It promotes Docker, macOS, Windows, DEB, and AppImage
+artifacts without requiring the RPM to exist. It is the only promotion that
+updates APT and, when requested, the auto-updater feed.
+
+```bash
+gh workflow run promote-rc-to-ga.yml -R wey-gu/mem-releases \
+  -f rc_tag=<version>-rcN \
+  -f ga_tag=<version> \
+  -f push_latest=true
+```
+
+Record the workflow run, the resulting GA release draft, the R2/CDN readback,
+and the updater readback. A core release is not evidence that a deferred RPM
+has been delivered.
+
+### 6.2 Promote a deferred RPM
+
+After the RC draft contains its single validated RPM, run
+`promote-rpm-to-ga.yml` with the same RC and GA versions:
+
+```bash
+gh workflow run promote-rpm-to-ga.yml -R wey-gu/mem-releases \
+  -f rc_tag=<version>-rcN \
+  -f ga_tag=<version>
+```
+
+The workflow refuses a mismatched version pair, a missing GA release, or an RC
+release without exactly one RPM. It renames and uploads that existing RC asset,
+downloads the R2 object again, compares its SHA-256, and then attaches it to
+the existing GA GitHub Release. It does not rebuild the RPM, update APT, or
+move the auto-updater feed.
+
+Publish the GitHub Release only after the intended asset set is present. If the
+core release is announced while RPM remains pending, state that RPM availability
+is pending and send a completion update after its promotion verifies.
 
 ## 7. Close the history loop
 
