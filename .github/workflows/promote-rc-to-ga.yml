@@ -28,7 +28,7 @@
 #     - uploads to Cloudflare R2 under the GA path (app/<ga>/)
 #     - updates the APT repo with the GA-named .deb
 #     - bumps the auto-updater feed to <ga>
-#     - creates a draft GH Release v<ga> with the renamed assets
+#     - publishes a GA GH Release v<ga> with reviewed Changelog notes
 #
 #   RPM:
 #     - is independently attached by promote-rpm-to-ga.yml after the RC RPM
@@ -51,9 +51,9 @@
 #        ga_tag = "0.8.4"
 #        push_latest = true
 #      Both docker and desktop promotion run in parallel.
-#   3. After it succeeds, the draft GH Release v<ga> holds the core desktop
+#   3. After it succeeds, the public GH Release v<ga> holds the core desktop
 #      bundles. Once the RC RPM is available, run promote-rpm-to-ga.yml to
-#      attach it. Edit notes + publish manually after the intended assets land.
+#      attach it.
 #
 # Notes
 # -----
@@ -268,6 +268,15 @@ jobs:
       GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
       GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Check public Changelog and release state before distribution
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/ga_release.py prepare "$GA" --notes-file ga-release-notes.md
+          python3 scripts/ga_release.py check "$GA" --repo "${{ github.repository }}"
+
       - name: Clone mem-backbone (private)
         env:
           PAT: ${{ secrets.MEM_BACKBONE_PAT }}
@@ -464,6 +473,11 @@ jobs:
             "${{ steps.rename.outputs.deb }}" \
             "${{ steps.rename.outputs.appimg }}"
 
+      - name: Publish verified GA GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ga_release.py complete "$GA" --repo "${{ github.repository }}" --notes-file ga-release-notes.md --latest "$RUN_LATEST"
+
       # R2 and APT publish BEFORE the auto-updater feed and the GA release, so a
       # failure in between leaves GA downloadable while the updater still points
       # at the previous version and no GA release exists. Nothing about the
@@ -496,7 +510,7 @@ jobs:
           {
             echo "### Desktop promoted v${RC} → v${GA}"
             echo "- R2 prefix:      app/${GA}/"
-            echo "- GH release tag: v${GA} (draft on ${{ github.repository }})"
+            echo "- GH release tag: v${GA} (published on ${{ github.repository }})"
             echo "- Latest feed:    ${RUN_LATEST}"
           } >> "$GITHUB_STEP_SUMMARY"
 

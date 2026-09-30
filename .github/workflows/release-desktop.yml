@@ -5,7 +5,7 @@
 # Private Skein uses its read-only repository deploy key (SKEIN_REPO_SSH_KEY).
 # Builds all desktop bundles (macOS arm64 + x86_64, Windows NSIS, Linux .deb +
 # .AppImage + .rpm), signs + notarises macOS, uploads to Cloudflare R2,
-# updates the APT repo, drafts a GitHub Release here.
+# updates the APT repo, then publishes a verified GitHub Release here.
 #
 # Triggers:
 #   workflow_dispatch  — primary mode. Operator fills in the source tag.
@@ -1822,6 +1822,8 @@ jobs:
       GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
       GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Pre-flight version safety check
         run: |
           set -euo pipefail
@@ -1833,6 +1835,13 @@ jobs:
             echo "::error::Version '$VERSION' is not a clean semver."
             exit 1
           fi
+
+      - name: Check public Changelog and release state before distribution
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/ga_release.py prepare "$VERSION" --notes-file ga-release-notes.md
+          python3 scripts/ga_release.py check "$VERSION" --repo "${{ github.repository }}"
 
       - name: Clone mem-backbone (private)
         env:
@@ -2076,6 +2085,11 @@ jobs:
             "${{ steps.paths.outputs.appimg }}" \
             "${{ steps.paths.outputs.rpm }}"
 
+      - name: Publish verified GA GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ga_release.py complete "$VERSION" --repo "${{ github.repository }}" --notes-file ga-release-notes.md --latest "$RUN_LATEST"
+
       - name: Cleanup workflow artifacts
         if: success()
         env:
@@ -2122,5 +2136,5 @@ jobs:
           echo "### Desktop release $VERSION published"          >> "$GITHUB_STEP_SUMMARY"
           echo "- Source ref: ${SOURCE_REF} (nowledge-co/mem)"   >> "$GITHUB_STEP_SUMMARY"
           echo "- R2 prefix:  app/$VERSION/"                     >> "$GITHUB_STEP_SUMMARY"
-          echo "- GH release: v$VERSION (draft, on this repo)"   >> "$GITHUB_STEP_SUMMARY"
+          echo "- GH release: v$VERSION (published on this repo)" >> "$GITHUB_STEP_SUMMARY"
           echo "- Latest:     ${RUN_LATEST}"                      >> "$GITHUB_STEP_SUMMARY"

@@ -39,6 +39,8 @@ jobs:
       CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Validate inputs
         run: |
           set -euo pipefail
@@ -50,6 +52,13 @@ jobs:
             echo "::error::RC base '${RC%%-*}' does not match GA '$GA'."
             exit 1
           fi
+
+      - name: Check public Changelog and release state before distribution
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/ga_release.py prepare "$GA" --notes-file ga-release-notes.md
+          python3 scripts/ga_release.py check "$GA" --repo "${{ github.repository }}"
 
       - name: Clone mem-backbone (private)
         env:
@@ -199,11 +208,16 @@ jobs:
             "${{ steps.rename.outputs.appimg }}" \
             "${{ steps.rename.outputs.rpm }}"
 
+      - name: Publish verified GA GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ga_release.py complete "$GA" --repo "${{ github.repository }}" --notes-file ga-release-notes.md --latest "$RUN_LATEST"
+
       - name: Summary
         run: |
           {
             echo "### Finished GA ${GA}"
             echo "- Latest feed moved: ${RUN_LATEST}"
             echo "- Delivery verified for: latest, latest redirect, direct downloads, update feed, APT"
-            echo "- GH release tag: v${GA} (draft)"
+            echo "- GH release tag: v${GA} (published)"
           } >> "$GITHUB_STEP_SUMMARY"

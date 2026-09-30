@@ -173,9 +173,12 @@ gh workflow run promote-rc-to-ga.yml -R wey-gu/mem-releases \
   -f push_latest=true
 ```
 
-Record the workflow run, the resulting GA release draft, the R2/CDN readback,
-and the updater readback. A core release is not evidence that a deferred RPM
-has been delivered.
+The protected `release-publish` approval authorizes the workflow to publish
+the GA GitHub Release after the core artifacts and distribution endpoints pass
+verification. It requires the already-deployed public Changelog notes, checks
+the core assets, and reads back the published and latest states. Record the
+workflow run, the public GA Release, the R2/CDN readback, and the updater
+readback. A core release is not evidence that a deferred RPM has been delivered.
 
 ### 6.2 Promote a deferred RPM
 
@@ -194,9 +197,9 @@ downloads the R2 object again, compares its SHA-256, and then attaches it to
 the existing GA GitHub Release. It does not rebuild the RPM, update APT, or
 move the auto-updater feed.
 
-Publish the GitHub Release only after the intended asset set is present. If the
-core release is announced while RPM remains pending, state that RPM availability
-is pending and send a completion update after its promotion verifies.
+If the core release is announced while RPM remains pending, state that RPM
+availability is pending and send a completion update after its promotion
+verifies.
 
 ## 7. Close the history loop
 
@@ -207,6 +210,10 @@ to prove the tagged release branch is patch-equivalent to its recorded `main`
 source commits and that every copied commit has a valid `-x` provenance trailer.
 An ancestor-only check is invalid for this workflow because cherry-pick creates
 new commit IDs by design.
+
+Until that date-only website PR deploys, the page and latest release-notes API
+derive the public GA date from GitHub Releases. The authored date still needs
+the reviewed PR so it remains accurate when GitHub is unavailable.
 
 ## Fast-path rule
 
