@@ -112,8 +112,8 @@ jobs:
             exit 1
           }
           mv -- "$rpm" "$ga_rpm"
-          echo "rpm=$PWD/$ga_rpm" >> "$GITHUB_ENV"
-          echo "rpm_sha256=$(sha256sum "$ga_rpm" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "RPM=$PWD/$ga_rpm" >> "$GITHUB_ENV"
+          echo "RPM_SHA256=$(sha256sum "$ga_rpm" | awk '{print $1}')" >> "$GITHUB_ENV"
           sha256sum "$ga_rpm"
 
       - name: Upload RPM to Cloudflare R2
