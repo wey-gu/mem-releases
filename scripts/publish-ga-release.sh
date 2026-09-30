@@ -55,7 +55,7 @@ else
   gh release edit "$tag" -R "$repo" --target "$target_sha"
 fi
 
-id="$(gh api "repos/$repo/releases/tags/$tag" --jq .id)"
+id="$(gh release view "$tag" -R "$repo" --json databaseId --jq .databaseId)"
 gh api -X PATCH "repos/$repo/releases/$id" -F draft=false >/dev/null
 gh api -X PATCH "repos/$repo/releases/$id" -f "make_latest=$latest" >/dev/null
 gh release view "$tag" -R "$repo" --json isDraft,publishedAt \
