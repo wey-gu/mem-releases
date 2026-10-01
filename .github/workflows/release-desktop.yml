@@ -1,4 +1,4 @@
-name: regenerate-native-bazel-locks
+name: regenerate-frozen-release-bazel-locks
 on:
   workflow_dispatch:
     inputs:
@@ -17,16 +17,29 @@ jobs:
         with:
           repository: nowledge-co/mem
           token: ${{ secrets.MEM_REPO_TOKEN }}
-          ref: 46eeef3f46cc63fdbb6951066794173c799db8f9
+          ref: 25876c3ea2ceaa0af72cc91bfcf386d1b6c06b9f
           path: source
           submodules: false
+      - name: Apply only the reviewed repair to the frozen source
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 25876c3ea2ceaa0af72cc91bfcf386d1b6c06b9f
+          repair=38350fdf0362f7bf18792948868e307353cfa452
+          git fetch --no-recurse-submodules origin "$repair"
+          test "$(git rev-parse FETCH_HEAD)" = "$repair"
+          git diff --binary "$repair^" "$repair" -- . \
+            ':!MODULE.bazel.lock' ':!integrations/hawdb/MODULE.bazel.lock' \
+            > "$RUNNER_TEMP/reviewed-repair.patch"
+          git apply "$RUNNER_TEMP/reviewed-repair.patch"
       - name: Resolve exact private dependency
         id: hawdb
         working-directory: source
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 46eeef3f46cc63fdbb6951066794173c799db8f9
+          test "$(git rev-parse HEAD)" = 25876c3ea2ceaa0af72cc91bfcf386d1b6c06b9f
           sha="$(git rev-parse HEAD:hawdb)"
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
@@ -54,19 +67,23 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bazel-locks"
           cp MODULE.bazel.lock "$RUNNER_TEMP/bazel-locks/root-MODULE.bazel.lock"
           cp integrations/hawdb/MODULE.bazel.lock "$RUNNER_TEMP/bazel-locks/hawdb-MODULE.bazel.lock"
+          cp "$RUNNER_TEMP/reviewed-repair.patch" "$RUNNER_TEMP/bazel-locks/"
           {
-            git rev-parse HEAD
+            echo "frozen_base=$(git rev-parse HEAD)"
+            echo "reviewed_repair=38350fdf0362f7bf18792948868e307353cfa452"
+            echo "hawdb=$(git -C hawdb rev-parse HEAD)"
+            sha256sum "$RUNNER_TEMP/reviewed-repair.patch"
             sha256sum MODULE.bazel integrations/hawdb/MODULE.bazel MODULE.bazel.lock integrations/hawdb/MODULE.bazel.lock
             git status --short
           } > "$RUNNER_TEMP/bazel-locks/provenance.txt"
       - name: Exercise actual Bazel guard and runfiles entrypoint
         working-directory: source
         shell: bash
-        run: bazel test //:hawdb_bazel_lock_test //nowledge-graph:pdfium_staging_test
+        run: bazel test //:hawdb_bazel_lock_test //nowledge-graph:pdfium_staging_test //nowledge-graph:bazel_public_binary_staging_test
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: dependency-lock-5754-merge
+          name: dependency-lock-v093-frozen-repair
           path: ${{ runner.temp }}/bazel-locks/
           if-no-files-found: error
           retention-days: 3
