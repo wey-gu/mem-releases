@@ -846,7 +846,9 @@ jobs:
       - name: Build Rust backend bundle (Windows)
         working-directory: nowledge-graph
         shell: bash
-        run: ./scripts/build-rust-bundle.sh --target x86_64-pc-windows-msvc --bazel-public-binaries --bazel-hawdb-server
+        # Temporary Cargo path until the Bazel Ladybug action declares its
+        # Windows compiler and Ninja inputs (nowledge-co/mem#5748).
+        run: ./scripts/build-rust-bundle.sh --target x86_64-pc-windows-msvc
 
       - name: Build Tauri (NSIS)
         working-directory: nowledge-graph
