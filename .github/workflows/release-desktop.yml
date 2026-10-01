@@ -67,7 +67,6 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bazel-locks"
           cp MODULE.bazel.lock "$RUNNER_TEMP/bazel-locks/root-MODULE.bazel.lock"
           cp integrations/hawdb/MODULE.bazel.lock "$RUNNER_TEMP/bazel-locks/hawdb-MODULE.bazel.lock"
-          cp "$RUNNER_TEMP/reviewed-repair.patch" "$RUNNER_TEMP/bazel-locks/"
           {
             echo "frozen_base=$(git rev-parse HEAD)"
             echo "reviewed_repair=38350fdf0362f7bf18792948868e307353cfa452"
