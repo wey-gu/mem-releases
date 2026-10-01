@@ -843,6 +843,29 @@ jobs:
           Set-Content -Path $scriptPath -Value $scriptContent -NoNewline -Encoding utf8
           Write-Host "Applied Windows PDFium runtime staging compatibility backport."
 
+      - name: Shorten Bazel crate-universe paths on Windows
+        shell: pwsh
+        run: |
+          $modulePath = "MODULE.bazel"
+          $moduleContent = Get-Content -Path $modulePath -Raw
+          $hubNamePattern = '(?m)(\bname\s*=\s*)"nmem_shared_crates"'
+          $repoImportPattern = '(?s)(\buse_repo\(\s*[\w.]+\s*,\s*)"nmem_shared_crates"'
+          if ([regex]::Matches($moduleContent, $hubNamePattern).Count -ne 1) {
+            throw "Expected exactly one nmem_shared_crates crate-universe hub in $modulePath."
+          }
+          if ([regex]::Matches($moduleContent, $repoImportPattern).Count -ne 1) {
+            throw "Expected exactly one nmem_shared_crates use_repo import in $modulePath."
+          }
+
+          $moduleContent = [regex]::Replace($moduleContent, $hubNamePattern, '$1"n"')
+          $moduleContent = [regex]::Replace(
+            $moduleContent,
+            $repoImportPattern,
+            '$1nmem_shared_crates = "n"'
+          )
+          Set-Content -Path $modulePath -Value $moduleContent -NoNewline -Encoding utf8
+          Write-Host "Shortened the crate-universe hub name to avoid Windows MAX_PATH failures."
+
       - name: Build Rust backend bundle (Windows)
         working-directory: nowledge-graph
         shell: bash
