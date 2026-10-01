@@ -1,0 +1,239 @@
+# Manual Windows Bazel build and NSIS packaging validation.
+# Artifacts stay in Actions; this workflow has no release or distribution job.
+---
+name: test-windows-bazel
+'on':
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact nowledge-co/mem SHA or ref to test
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: test-windows-bazel-${{ inputs.source_ref }}
+  cancel-in-progress: false
+env:
+  NMEM_BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-nowledge
+  GCP_BAZEL_CACHE_PROJECT_ID: ci-cd-503413
+  GCP_BAZEL_CACHE_SERVICE_ACCOUNT: github-bazel-cache@ci-cd-503413.iam.gserviceaccount.com
+  GCP_BAZEL_CACHE_WORKLOAD_IDENTITY_PROVIDER: projects/789880242959/locations/global/workloadIdentityPools/github-actions/providers/nowledge-mem
+jobs:
+  build-windows-bazel:
+    runs-on: windows-2022
+    timeout-minutes: 180
+    env:
+      SOURCE_REF: "${{ inputs.source_ref }}"
+    steps:
+      - name: Preserve LF source bytes on Windows
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - name: Checkout private source (nowledge-co/mem)
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: "${{ secrets.MEM_REPO_TOKEN }}"
+          ref: "${{ env.SOURCE_REF }}"
+          submodules: false
+      - name: Record tested source and package version
+        shell: pwsh
+        run: |
+          $sourceSha = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve checked-out source SHA' }
+          $version = (Get-Content 'nowledge-graph/package.json' -Raw | ConvertFrom-Json).version
+          if (-not $version) { throw 'Desktop package version is missing' }
+          "NMEM_BUILD_SHA_FULL=$sourceSha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Testing Windows Bazel source $sourceSha (package $version)"
+      - name: Load private HawDB deploy key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: "${{ secrets.SKEIN_REPO_SSH_KEY }}"
+      - name: Resolve private HawDB submodule over SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global \
+            url."git@github.com:nowledge-co/hawdb.git".insteadOf \
+            "https://github.com/nowledge-co/hawdb.git"
+      - name: Resolve private Desktop dependency
+        id: desktop_dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q -- '--init-desktop-https' nowledge-graph/scripts/build-rust-bundle.sh; then
+            read -r mode kind sha dependency_path <<< "$(git ls-tree HEAD hawdb)"
+            [[ "$mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ ]]
+            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Checkout private Desktop dependency
+        if: steps.desktop_dependency.outputs.sha != ''
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/hawdb
+          ssh-key: "${{ secrets.SKEIN_REPO_SSH_KEY }}"
+          ref: "${{ steps.desktop_dependency.outputs.sha }}"
+          path: hawdb
+          persist-credentials: false
+      - name: Set up Desktop build Python
+        if: steps.desktop_dependency.outputs.sha != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Restore frozen 0.10.79 Desktop lock metadata
+        if: steps.desktop_dependency.outputs.sha != ''
+        shell: bash
+        env:
+          GH_TOKEN: "${{ github.token }}"
+          RECOVERY_REPOSITORY: "${{ github.repository }}"
+          RECOVERY_SHA: "${{ github.sha }}"
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "5a272fd06e3624f27de31f4d815cea9a1dddc232" ]]; then
+            exit 0
+          fi
+          export RECOVERY_PATCH="$RUNNER_TEMP/0.10.79-skein-lock.patch"
+          gh api --header 'Accept: application/vnd.github.raw+json' \
+            "repos/$RECOVERY_REPOSITORY/contents/scripts/recovery/0.10.79-skein-lock.patch?ref=$RECOVERY_SHA" \
+            > "$RECOVERY_PATCH"
+          python - <<'PYTHON'
+          import hashlib
+          import os
+          from pathlib import Path
+          import subprocess
+  
+          lock = Path("integrations/skein/nightly-server.Cargo.lock")
+          original = lock.read_text(encoding="utf-8")
+          assert hashlib.sha256(original.encode()).hexdigest() == "0149da2718b478e639818145d932534c21a58a8cfd8ebba9695ad79a220533ae", "unexpected release lock input"
+          lock.write_text(original, encoding="utf-8", newline="\n")
+          patch = os.environ["RECOVERY_PATCH"]
+          subprocess.run(["git", "apply", "--check", patch], check=True)
+          subprocess.run(["git", "apply", patch], check=True)
+          assert hashlib.sha256(lock.read_text(encoding="utf-8").encode()).hexdigest() == "df4b2815e9d34f033fc97184531f068937a52f209a245b4edbe6f4af7ade3b9c", "unexpected release lock output"
+          print("Restored tagged local-package metadata; registry dependencies remain locked.")
+          PYTHON
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: nowledge-graph/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Initialize Rust path dependencies before cache restore
+        shell: pwsh
+        run: |
+          "XDG_CACHE_HOME=$env:RUNNER_TEMP/nmem-pdfium-cache" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git `
+              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git `
+              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: ilammy/setup-nasm@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          workspaces: |
+            nowledge-graph/src-tauri
+            nmem-rs
+          cache-directories: "${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs"
+          key: windows-x86_64-v4-pdfium
+      - name: Resolve or repair the PDFium runtime cache
+        working-directory: nmem-rs
+        shell: pwsh
+        run: |
+          $pdfiumCache = Join-Path $env:XDG_CACHE_HOME "pdfium-rs"
+          $pdfiumDll = Get-ChildItem -Path $pdfiumCache -Filter "pdfium.dll" `
+              -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($pdfiumDll) {
+            Write-Host "PDFium runtime cache is complete: $($pdfiumDll.FullName)"
+            "PDFIUM_LIB_PATH=$($pdfiumDll.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            exit 0
+          }
+  
+          Write-Host "PDFium runtime cache is incomplete; invalidating liteparse-pdfium-sys build artifacts."
+          cargo clean -p liteparse-pdfium-sys --release --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "cargo clean failed ($LASTEXITCODE)" }
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Point sccache at R2
+        shell: bash
+        env:
+          CF_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
+          R2_KEY: "${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}"
+          R2_SECRET: "${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}"
+        run: |
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
+            echo "SCCACHE_GHA_ENABLED=false"
+            echo "SCCACHE_BUCKET=nowledge-mem-sccache"
+            echo "SCCACHE_REGION=auto"
+            echo "SCCACHE_ENDPOINT=https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+            echo "AWS_ACCESS_KEY_ID=${R2_KEY}"
+            echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET}"
+          } >> "$GITHUB_ENV"
+      - name: Install pnpm deps
+        working-directory: nowledge-graph
+        run: pnpm install --frozen-lockfile --prefer-offline
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b
+        with:
+          version: 26.x
+          repo-token: "${{ github.token }}"
+      - name: Verify Rust backend build toolchain (Windows)
+        shell: pwsh
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "rustup target add failed ($LASTEXITCODE)" }
+          foreach ($tool in @("clang", "cmake", "ninja", "protoc")) {
+            $resolved = (Get-Command $tool -ErrorAction Stop).Source
+            Write-Host "$tool resolved to: $resolved"
+          }
+          $protoc = (Get-Command protoc -ErrorAction Stop).Source
+          "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "protoc resolved to: $protoc"
+      - name: Set up Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+      - name: Authenticate Bazel remote cache
+        continue-on-error: true
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: "${{ env.GCP_BAZEL_CACHE_PROJECT_ID }}"
+          workload_identity_provider: "${{ env.GCP_BAZEL_CACHE_WORKLOAD_IDENTITY_PROVIDER }}"
+          service_account: "${{ env.GCP_BAZEL_CACHE_SERVICE_ACCOUNT }}"
+      - name: Build Rust backend bundle (Windows)
+        working-directory: nowledge-graph
+        shell: bash
+        run: "./scripts/build-rust-bundle.sh --target x86_64-pc-windows-msvc --bazel-public-binaries --bazel-hawdb-server"
+      - name: Build Tauri (NSIS)
+        working-directory: nowledge-graph
+        shell: pwsh
+        run: npm run tauri:build:windows
+      - name: Locate + rename installer
+        id: locate
+        working-directory: nowledge-graph
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *.exe -Recurse | Select-Object -First 1
+          if (-not $exe) { Write-Error "::error::No NSIS installer produced"; exit 1 }
+          $out = Join-Path $env:RUNNER_TEMP "Nowledge Mem_${env:VERSION}_x64-setup.exe"
+          Move-Item -Force $exe.FullName $out
+          "exe=$out" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-bazel-x86_64
+          path: "${{ steps.locate.outputs.exe }}"
+          if-no-files-found: error
+          retention-days: 7

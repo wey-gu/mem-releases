@@ -33,6 +33,26 @@ source repository.
 Do not cut an RC merely to discover a missing credential. An RC tag is
 immutable release evidence, not a disposable CI retry handle.
 
+### Windows release and Bazel validation
+
+The Windows CPU release uses the Cargo PowerShell entry point,
+`scripts/build-rust-bundle.ps1`, previously used by the successful
+`v0.10.91-rc2` Windows job. Unix CPU release jobs continue to use Bazel.
+
+Keep Windows Bazel validation separate while its native compiler and Ninja
+inputs are being repaired (`nowledge-co/mem#5748`). Run only that platform on
+demand with an exact source SHA:
+
+```bash
+gh workflow run test-windows-bazel.yml -R wey-gu/mem-releases \
+  --ref main -f source_ref=<exact-mem-sha>
+```
+
+The workflow builds the Bazel backend and NSIS installer, records the resolved
+source SHA, and retains the installer as the `windows-bazel-x86_64` Actions
+artifact. It runs only on manual dispatch and has no release or distribution
+job. Its result is tracked separately from the core Cargo release.
+
 ## 1. Cut the release branch first
 
 Choose the last intended product commit on `main`, fetch it, and record it:
