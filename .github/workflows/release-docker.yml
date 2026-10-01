@@ -150,8 +150,10 @@ jobs:
           output = Path(os.environ["RUNNER_TEMP"]) / "nmem-dockerfiles"
           output.mkdir(exist_ok=True)
           frozen_source = "5a272fd06e3624f27de31f4d815cea9a1dddc232"
+          space_contract_source = "6f7628283f0e60926ca466c7432d2d583e830b80"
           build = "RUN pnpm run build:web && test -f dist-web/index-web.html\n"
           contract = "COPY nmem-cloud/src/web_static.rs /nmem-cloud/src/web_static.rs\n"
+          space_contract = "COPY contracts/space-encoding.mjs /contracts/space-encoding.mjs\n"
           for name in ("Dockerfile.rust", "Dockerfile.rust.cuda", "Dockerfile.rust.vulkan"):
               recipe = Path("nowledge-graph/docker", name).read_text()
               if source_sha == frozen_source:
@@ -159,6 +161,11 @@ jobs:
                   assert recipe.count(build) == 1 and contract not in recipe, name
                   recipe = recipe.replace(build, contract + build, 1)
                   print(f"{name}: stage the tagged CSP contract for 0.10.79 Web validation")
+              if source_sha == space_contract_source:
+                  assert Path("contracts/space-encoding.mjs").is_file()
+                  assert recipe.count(build) == 1 and space_contract not in recipe, name
+                  recipe = recipe.replace(build, space_contract + build, 1)
+                  print(f"{name}: stage the tagged Space encoding contract for 0.10.94 Web validation")
               (output / name).write_text(recipe)
           PYTHON
 
