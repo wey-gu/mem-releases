@@ -66,7 +66,7 @@ jobs:
         \ tag-push and\n# repository_dispatch triggers always leave it off, so the\
         \ normal\n# automated release path is byte-for-byte unchanged.\nVULKAN=\"\
         false\"\ncase \"$EVENT_NAME\" in\n  workflow_dispatch)\n    VERSION=\"$DISPATCH_TAG\"\
-        \n    SOURCE_REF=\"640c60eb0f0c28b84d4378a3de8a5b92881dd387\"\n    PUBLISH=\"$DISPATCH_PUBLISH\"\
+        \n    SOURCE_REF=\"929e0dba7dee9d267825530eb2f566063cdd76e4\"\n    PUBLISH=\"$DISPATCH_PUBLISH\"\
         \n    LATEST=\"$DISPATCH_LATEST\"\n    VULKAN=\"$DISPATCH_VULKAN\"\n    ;;\n\
         \  push)\n    # tag push on THIS repo \u2014 assume the same tag exists on\
         \ source\n    VERSION=\"${PUSH_REF#v}\"\n    SOURCE_REF=\"$PUSH_REF\"\n  \
@@ -269,7 +269,7 @@ jobs:
       shell: bash
       run: 'set -euo pipefail
 
-        test "$(git rev-parse HEAD)" = 640c60eb0f0c28b84d4378a3de8a5b92881dd387
+        test "$(git rev-parse HEAD)" = 929e0dba7dee9d267825530eb2f566063cdd76e4
 
         git diff --exit-code HEAD --
 
@@ -459,7 +459,7 @@ jobs:
       shell: bash
       run: 'set -euo pipefail
 
-        test "$(git rev-parse HEAD)" = 640c60eb0f0c28b84d4378a3de8a5b92881dd387
+        test "$(git rev-parse HEAD)" = 929e0dba7dee9d267825530eb2f566063cdd76e4
 
         git diff --exit-code HEAD --
 
