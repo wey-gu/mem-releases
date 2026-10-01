@@ -664,6 +664,50 @@ jobs:
           git config --global core.autocrlf false
           git config --global core.eol lf
 
+      # aws-lc-sys uses GetShortPathNameW before invoking MSVC. Bazel's
+      # runfiles prefix makes its jitterentropy source exceed MAX_PATH.
+      - &prepare_windows_short_paths
+        name: Enable and verify native build short paths on the Windows runner
+        shell: pwsh
+        run: |
+          $volume = [System.IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE).TrimEnd('\')
+          $drive = [System.IO.DriveInfo]::new("$volume\")
+          if ($drive.DriveFormat -ne "NTFS") {
+            throw "Native build short paths require NTFS on $volume; found $($drive.DriveFormat)"
+          }
+          fsutil 8dot3name set 2
+          if ($LASTEXITCODE -ne 0) { throw "Cannot enable per-volume short name configuration" }
+          fsutil 8dot3name set $volume 0
+          if ($LASTEXITCODE -ne 0) { throw "Cannot enable short name creation on $volume" }
+          fsutil 8dot3name query $volume
+          if ($LASTEXITCODE -ne 0) { throw "Cannot inspect short name creation on $volume" }
+
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          using System.Text;
+          public static class ReleaseShortPaths {
+              [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+              public static extern uint GetShortPathNameW(string path, StringBuilder buffer, uint size);
+          }
+          '@
+          $probeRoot = Join-Path $env:RUNNER_TEMP "nmem-short-path-probe-$PID"
+          $manifest = Join-Path $probeRoot 'bazel-out\x64_windows-opt\bin\external\rules_rust++crate+nmem_shared_crates__aws-lc-sys-0.44.0\_bs.cargo_runfiles\rules_rust++crate+nmem_shared_crates__aws-lc-sys-0.44.0'
+          $sourceSuffix = 'aws-lc\third_party\jitterentropy\jitterentropy-library\src\jitterentropy-timer.c'
+          $source = Join-Path $manifest $sourceSuffix
+          [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($source)) | Out-Null
+          [System.IO.File]::WriteAllText($source, "int release_short_path_probe(void) { return 0; }")
+          $buffer = [System.Text.StringBuilder]::new(32768)
+          $length = [ReleaseShortPaths]::GetShortPathNameW($manifest, $buffer, $buffer.Capacity)
+          if ($length -eq 0 -or $length -ge $buffer.Capacity) {
+            throw "Short path lookup failed: Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+          }
+          $shortSource = Join-Path $buffer.ToString() $sourceSuffix
+          if ($source.Length -lt 260 -or $shortSource.Length -ge 260 -or -not [System.IO.File]::Exists($shortSource)) {
+            throw "Native short path probe failed: original=$($source.Length), short=$($shortSource.Length)"
+          }
+          Write-Host "Native short path probe passed: original=$($source.Length), short=$($shortSource.Length)"
+
       - name: Checkout private source (nowledge-co/mem)
         uses: actions/checkout@v4
         with:
@@ -1231,6 +1275,8 @@ jobs:
       IS_DRY_RUN: ${{ needs.meta.outputs.is_dry_run }}
     steps:
       - *preserve_windows_checkout_lf
+
+      - *prepare_windows_short_paths
 
       - name: Checkout private source (nowledge-co/mem)
         uses: actions/checkout@v4
