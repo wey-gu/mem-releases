@@ -1,48 +1,46 @@
-name: regenerate-frozen-release-bazel-locks
+name: verify-frozen-release-bazel-locks
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Build-only diagnostic label
+        description: Exact 40-character Mem source SHA to verify; no distribution
         required: true
         type: string
 permissions:
   contents: read
+  id-token: write
+  attestations: write
 jobs:
-  generate:
+  verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
+      - name: Validate immutable source input
+        id: source
+        env:
+          SOURCE_SHA: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
           repository: nowledge-co/mem
           token: ${{ secrets.MEM_REPO_TOKEN }}
-          ref: 25876c3ea2ceaa0af72cc91bfcf386d1b6c06b9f
+          ref: ${{ steps.source.outputs.sha }}
           path: source
           submodules: false
-      - name: Apply only the reviewed repair to the frozen source
-        working-directory: source
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = 25876c3ea2ceaa0af72cc91bfcf386d1b6c06b9f
-          repair=38350fdf0362f7bf18792948868e307353cfa452
-          git fetch --no-recurse-submodules origin "$repair"
-          test "$(git rev-parse FETCH_HEAD)" = "$repair"
-          git diff --binary "$repair^" "$repair" -- . \
-            ':!MODULE.bazel.lock' ':!integrations/hawdb/MODULE.bazel.lock' \
-            > "$RUNNER_TEMP/reviewed-repair.patch"
-          git apply "$RUNNER_TEMP/reviewed-repair.patch"
       - name: Resolve exact private dependency
         id: hawdb
         working-directory: source
         shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 25876c3ea2ceaa0af72cc91bfcf386d1b6c06b9f
-          sha="$(git rev-parse HEAD:hawdb)"
-          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          echo "sha=$(git rev-parse HEAD:hawdb)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
           repository: nowledge-co/hawdb
@@ -55,34 +53,60 @@ jobs:
         shell: bash
         run: scripts/init-release-rust-submodules.sh --init-https
       - uses: bazel-contrib/setup-bazel@0.19.0
-      - name: Generate both locks with default Bazel commands
+      - name: Verify both committed locks with default Bazel
         working-directory: source
         shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
         run: |
           set -euo pipefail
-          test "$(git -C hawdb rev-parse HEAD)" = "$(git rev-parse HEAD:hawdb)"
-          bazel --version
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git -c core.filemode=true diff --exit-code HEAD --ignore-submodules=none
+          mkdir -p "$RUNNER_TEMP/lock-proof"
+          python3 - <<'PYTHON'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          paths = [".bazelversion", "MODULE.bazel", "MODULE.bazel.lock", "integrations/hawdb/MODULE.bazel", "integrations/hawdb/MODULE.bazel.lock", "nmem-rs/Cargo.toml", "nmem-rs/Cargo.lock", "integrations/hawdb/nightly-server.Cargo.lock"]
+          snapshot = {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths}
+          Path(os.environ["RUNNER_TEMP"], "lock-proof", "before.json").write_text(json.dumps(snapshot, sort_keys=True))
+          PYTHON
+          bazel --version > "$RUNNER_TEMP/lock-proof/bazel-version.txt"
           bazel mod deps
           (cd integrations/hawdb && bazel mod deps)
-          mkdir -p "$RUNNER_TEMP/bazel-locks"
-          cp MODULE.bazel.lock "$RUNNER_TEMP/bazel-locks/root-MODULE.bazel.lock"
-          cp integrations/hawdb/MODULE.bazel.lock "$RUNNER_TEMP/bazel-locks/hawdb-MODULE.bazel.lock"
-          {
-            echo "frozen_base=$(git rev-parse HEAD)"
-            echo "reviewed_repair=38350fdf0362f7bf18792948868e307353cfa452"
-            echo "hawdb=$(git -C hawdb rev-parse HEAD)"
-            sha256sum "$RUNNER_TEMP/reviewed-repair.patch"
-            sha256sum MODULE.bazel integrations/hawdb/MODULE.bazel MODULE.bazel.lock integrations/hawdb/MODULE.bazel.lock
-            git status --short
-          } > "$RUNNER_TEMP/bazel-locks/provenance.txt"
-      - name: Exercise actual Bazel guard and runfiles entrypoint
-        working-directory: source
-        shell: bash
-        run: bazel test //:hawdb_bazel_lock_test //nowledge-graph:pdfium_staging_test //nowledge-graph:bazel_public_binary_staging_test
-      - uses: actions/upload-artifact@v4
-        if: always()
+          git -c core.filemode=true diff --exit-code HEAD --ignore-submodules=none
+          python3 - <<'PYTHON'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"], "lock-proof")
+          before = json.loads((root / "before.json").read_text())
+          after = {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in before}
+          assert before == after, "Default Bazel changed committed release inputs"
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
+          submodules = {}
+          for path in ["hawdb", "upstream_forks/ladybug", "upstream_forks/rig"]:
+              expected = git("rev-parse", "HEAD:" + path)
+              assert git("-C", path, "rev-parse", "HEAD") == expected
+              assert git("-C", path, "status", "--porcelain", "--untracked-files=no") == ""
+              submodules[path] = expected
+          receipt = {"schema": 1, "source_repository": "nowledge-co/mem", "source_sha": git("rev-parse", "HEAD"), "source_tree": git("rev-parse", "HEAD^{tree}"), "producer_repository": os.environ["GITHUB_REPOSITORY"], "producer_sha": os.environ["GITHUB_SHA"], "producer_workflow": os.environ["GITHUB_WORKFLOW_REF"], "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"], "bazel_version": (root / "bazel-version.txt").read_text().strip(), "submodules": submodules, "inputs_sha256": after, "default_generation": {"root": "unchanged", "private": "unchanged"}}
+          (root / "receipt.json").write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n")
+          PYTHON
+      - name: Sign the exact-source generation receipt
+        id: attest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
-          name: dependency-lock-v093-frozen-repair
-          path: ${{ runner.temp }}/bazel-locks/
+          subject-path: ${{ runner.temp }}/lock-proof/receipt.json
+      - name: Retain the signed receipt
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: cp "$BUNDLE_PATH" "$RUNNER_TEMP/lock-proof/attestation.jsonl"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-lock-generation-proof
+          path: |
+            ${{ runner.temp }}/lock-proof/receipt.json
+            ${{ runner.temp }}/lock-proof/attestation.jsonl
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 30
