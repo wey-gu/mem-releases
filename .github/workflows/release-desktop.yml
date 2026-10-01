@@ -66,7 +66,7 @@ jobs:
         \ tag-push and\n# repository_dispatch triggers always leave it off, so the\
         \ normal\n# automated release path is byte-for-byte unchanged.\nVULKAN=\"\
         false\"\ncase \"$EVENT_NAME\" in\n  workflow_dispatch)\n    VERSION=\"$DISPATCH_TAG\"\
-        \n    SOURCE_REF=\"929e0dba7dee9d267825530eb2f566063cdd76e4\"\n    PUBLISH=\"$DISPATCH_PUBLISH\"\
+        \n    SOURCE_REF=\"97ba6ccbc5158235b8b94cb2a70102671cdbee1d\"\n    PUBLISH=\"$DISPATCH_PUBLISH\"\
         \n    LATEST=\"$DISPATCH_LATEST\"\n    VULKAN=\"$DISPATCH_VULKAN\"\n    ;;\n\
         \  push)\n    # tag push on THIS repo \u2014 assume the same tag exists on\
         \ source\n    VERSION=\"${PUSH_REF#v}\"\n    SOURCE_REF=\"$PUSH_REF\"\n  \
@@ -269,7 +269,7 @@ jobs:
       shell: bash
       run: 'set -euo pipefail
 
-        test "$(git rev-parse HEAD)" = 929e0dba7dee9d267825530eb2f566063cdd76e4
+        test "$(git rev-parse HEAD)" = 97ba6ccbc5158235b8b94cb2a70102671cdbee1d
 
         git diff --exit-code HEAD --
 
@@ -309,165 +309,3 @@ jobs:
         path: ${{ runner.temp }}/windows-native-errors.txt
         if-no-files-found: error
         retention-days: 7
-  build-macos-x86_64:
-    needs: meta
-    runs-on: macos-15-intel
-    timeout-minutes: 90
-    env:
-      VERSION: ${{ needs.meta.outputs.version }}
-      SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-    steps:
-    - name: Checkout private source (nowledge-co/mem)
-      uses: actions/checkout@v4
-      with:
-        repository: nowledge-co/mem
-        token: ${{ secrets.MEM_REPO_TOKEN }}
-        ref: ${{ env.SOURCE_REF }}
-        submodules: false
-    - name: Load private HawDB deploy key
-      uses: webfactory/ssh-agent@v0.9.0
-      with:
-        ssh-private-key: ${{ secrets.SKEIN_REPO_SSH_KEY }}
-    - name: Resolve private HawDB submodule over SSH
-      shell: bash
-      run: "set -euo pipefail\ngit config --global \\\n  url.\"git@github.com:nowledge-co/hawdb.git\"\
-        .insteadOf \\\n  \"https://github.com/nowledge-co/hawdb.git\"\n"
-    - name: Resolve private Desktop dependency
-      id: desktop_dependency
-      shell: bash
-      run: "set -euo pipefail\nif grep -q -- '--init-desktop-https' nowledge-graph/scripts/build-rust-bundle.sh;\
-        \ then\n  read -r mode kind sha dependency_path <<< \"$(git ls-tree HEAD hawdb)\"\
-        \n  [[ \"$mode\" == 160000 && \"$kind\" == commit && \"$sha\" =~ ^[0-9a-f]{40}$\
-        \ ]]\n  echo \"sha=$sha\" >> \"$GITHUB_OUTPUT\"\nfi\n"
-    - name: Checkout private Desktop dependency
-      if: steps.desktop_dependency.outputs.sha != ''
-      uses: actions/checkout@v4
-      with:
-        repository: nowledge-co/hawdb
-        ssh-key: ${{ secrets.SKEIN_REPO_SSH_KEY }}
-        ref: ${{ steps.desktop_dependency.outputs.sha }}
-        path: hawdb
-        persist-credentials: false
-    - name: Set up Desktop build Python
-      if: steps.desktop_dependency.outputs.sha != ''
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-    - name: Restore frozen 0.10.79 Desktop lock metadata
-      if: steps.desktop_dependency.outputs.sha != ''
-      shell: bash
-      env:
-        GH_TOKEN: ${{ github.token }}
-        RECOVERY_REPOSITORY: ${{ github.repository }}
-        RECOVERY_SHA: ${{ github.sha }}
-      run: "set -euo pipefail\nif [[ \"$(git rev-parse HEAD)\" != \"5a272fd06e3624f27de31f4d815cea9a1dddc232\"\
-        \ ]]; then\n  exit 0\nfi\nexport RECOVERY_PATCH=\"$RUNNER_TEMP/0.10.79-skein-lock.patch\"\
-        \ngh api --header 'Accept: application/vnd.github.raw+json' \\\n  \"repos/$RECOVERY_REPOSITORY/contents/scripts/recovery/0.10.79-skein-lock.patch?ref=$RECOVERY_SHA\"\
-        \ \\\n  > \"$RECOVERY_PATCH\"\npython - <<'PYTHON'\nimport hashlib\nimport\
-        \ os\nfrom pathlib import Path\nimport subprocess\n\nlock = Path(\"integrations/skein/nightly-server.Cargo.lock\"\
-        )\noriginal = lock.read_text(encoding=\"utf-8\")\nassert hashlib.sha256(original.encode()).hexdigest()\
-        \ == \"0149da2718b478e639818145d932534c21a58a8cfd8ebba9695ad79a220533ae\"\
-        , \"unexpected release lock input\"\nlock.write_text(original, encoding=\"\
-        utf-8\", newline=\"\\n\")\npatch = os.environ[\"RECOVERY_PATCH\"]\nsubprocess.run([\"\
-        git\", \"apply\", \"--check\", patch], check=True)\nsubprocess.run([\"git\"\
-        , \"apply\", patch], check=True)\nassert hashlib.sha256(lock.read_text(encoding=\"\
-        utf-8\").encode()).hexdigest() == \"df4b2815e9d34f033fc97184531f068937a52f209a245b4edbe6f4af7ade3b9c\"\
-        , \"unexpected release lock output\"\nprint(\"Restored tagged local-package\
-        \ metadata; registry dependencies remain locked.\")\nPYTHON\n"
-    - name: Install Rosetta 2
-      run: softwareupdate --install-rosetta --agree-to-license || true
-    - uses: pnpm/action-setup@v4
-      with:
-        version: 11.22.0
-    - uses: actions/setup-node@v4
-      with:
-        node-version: '22'
-        cache: pnpm
-        cache-dependency-path: nowledge-graph/pnpm-lock.yaml
-    - uses: dtolnay/rust-toolchain@1.98.1
-      with:
-        targets: x86_64-apple-darwin
-    - name: Initialize Rust path dependencies before cache restore
-      shell: bash
-      run: "set -euo pipefail\necho \"XDG_CACHE_HOME=$RUNNER_TEMP/nmem-pdfium-cache\"\
-        \ >> \"$GITHUB_ENV\"\ngit -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git\
-        \ \\\n    -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git\
-        \ \\\n    submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig\n"
-    - uses: Swatinem/rust-cache@v2
-      with:
-        cache-bin: false
-        workspaces: 'nowledge-graph/src-tauri
-
-          nmem-rs
-
-          '
-        cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
-        key: macos-x86_64-v4-pdfium
-    - name: Setup sccache
-      uses: mozilla-actions/sccache-action@v0.0.9
-    - name: Point sccache at R2
-      shell: bash
-      env:
-        CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
-      run: "{\n  echo \"RUSTC_WRAPPER=sccache\"\n  echo \"CMAKE_C_COMPILER_LAUNCHER=sccache\"\
-        \n  echo \"SCCACHE_IDLE_TIMEOUT=0\"\n  echo \"CMAKE_CXX_COMPILER_LAUNCHER=sccache\"\
-        \n  echo \"SCCACHE_GHA_ENABLED=false\"\n  echo \"SCCACHE_BUCKET=nowledge-mem-sccache\"\
-        \n  echo \"SCCACHE_REGION=auto\"\n  echo \"SCCACHE_ENDPOINT=https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com\"\
-        \n  echo \"AWS_ACCESS_KEY_ID=${R2_KEY}\"\n  echo \"AWS_SECRET_ACCESS_KEY=${R2_SECRET}\"\
-        \n} >> \"$GITHUB_ENV\"\n"
-    - name: Install pnpm deps
-      working-directory: nowledge-graph
-      run: pnpm install --frozen-lockfile --prefer-offline
-    - name: Use Xcode 16+ (ladybug C++20 construct_at needs clang 16+)
-      run: 'newest=$(ls -d /Applications/Xcode_1[6-9]*.app /Applications/Xcode_2*.app
-        2>/dev/null | sort -V | tail -1)
-
-        if [ -n "$newest" ]; then sudo xcode-select -s "$newest"; fi
-
-        echo "DEVELOPER_DIR=$(xcode-select -p)"; cc --version
-
-        '
-    - name: Install Rust backend build toolchain (macOS)
-      run: 'brew install cmake ninja protobuf
-
-        rustup target add x86_64-apple-darwin
-
-        '
-    - name: Set up Bazel
-      uses: bazel-contrib/setup-bazel@0.19.0
-      with:
-        bazelisk-cache: true
-        repository-cache: true
-    - name: Authenticate Bazel remote cache
-      continue-on-error: true
-      uses: google-github-actions/auth@v3
-      with:
-        project_id: ${{ env.GCP_BAZEL_CACHE_PROJECT_ID }}
-        workload_identity_provider: ${{ env.GCP_BAZEL_CACHE_WORKLOAD_IDENTITY_PROVIDER
-          }}
-        service_account: ${{ env.GCP_BAZEL_CACHE_SERVICE_ACCOUNT }}
-    - name: Verify immutable diagnostic source
-      shell: bash
-      run: 'set -euo pipefail
-
-        test "$(git rev-parse HEAD)" = 929e0dba7dee9d267825530eb2f566063cdd76e4
-
-        git diff --exit-code HEAD --
-
-        '
-    - name: Build native Intel backend bundle
-      working-directory: nowledge-graph
-      shell: bash
-      run: './scripts/build-rust-bundle.sh --target x86_64-apple-darwin --bazel-public-binaries
-        --bazel-hawdb-server
-
-        '
