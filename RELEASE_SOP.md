@@ -148,7 +148,11 @@ cherry-pick conflicts, resolve only the release metadata conflict, preserve the
 `-x` trailer, and record the resolution in the release record.
 
 Run source preflights and build the native bundles from exactly `RELEASE_SHA`.
-The native-link gate belongs in the pre-release artifact smoke if it requires a
+`ci/mem-native-link-arm64` is started by the normal merge path; release work
+must only observe that merge-triggered job and must never dispatch or retry it
+solely for a release. A completed failure blocks the release. A successful or
+still-running job does not require a separate release-triggered run. The
+native-link gate belongs in the pre-release artifact smoke if it requires a
 built bundle.
 
 If a check fails:
