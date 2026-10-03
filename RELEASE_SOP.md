@@ -212,7 +212,8 @@ repeat the full promote merely to create the missing draft.
 
 For an older out-of-band GA, desktop R2 discovery may correctly remain on a
 newer version. Only in that case set `allow_newer_desktop_latest=true`; a
-read-only preflight rejects this mode unless the live mac latest is newer.
+read-only preflight rejects this mode unless every selected platform's live
+latest is the same newer version.
 The release still verifies the promoted version's direct downloads, while
 every selected desktop latest/update route must agree on one newer version.
 This mode skips the APT update so it cannot downgrade the stable repository;

@@ -117,24 +117,48 @@ test('older out-of-band GA requires explicit newer-latest mode', async () => {
     allowNewerLatest: true,
     scope: ['latest', 'latest-redirect', 'direct', 'update'],
   }));
+  await assert.rejects(verifyGADelivery(options(fixture(), {
+    allowNewerLatest: true,
+    scope: ['latest', 'latest-redirect', 'direct', 'update'],
+  })), /older-patch mode requires a version newer/);
 });
 
 test('preflight rejects a lower GA before public mutation', async () => {
   await assert.rejects(verifyVersionPolicy({
     expectedVersion: version,
+    platforms: ['mac'],
     fetcher: fixture({ latest: '0.10.95' }),
-  }), /Preflight refuses 0\.10\.94 behind live latest 0\.10\.95/);
+  }), /Preflight refuses 0\.10\.94 behind live mac latest 0\.10\.95/);
 });
 
 test('preflight permits an older patch only with a newer live latest', async () => {
   await verifyVersionPolicy({
     expectedVersion: version,
+    platforms: ['mac'],
     allowNewerLatest: true,
     fetcher: fixture({ latest: '0.10.95' }),
   });
   await assert.rejects(verifyVersionPolicy({
     expectedVersion: version,
+    platforms: ['mac'],
     allowNewerLatest: true,
     fetcher: fixture(),
-  }), /requires live latest newer/);
+  }), /requires mac latest newer/);
+});
+
+test('preflight checks every platform and fails closed on missing latest', async () => {
+  await assert.rejects(verifyVersionPolicy({
+    expectedVersion: version,
+    platforms: ['mac', 'win'],
+    fetcher: fixture({ missing: 'win' }),
+  }), /Preflight latest win: expected 200, got 404/);
+  const mixed = async (url, init) => {
+    const platform = new URL(url).searchParams.get('platform');
+    return fixture({ latest: platform === 'win' ? '0.10.95' : version })(url, init);
+  };
+  await assert.rejects(verifyVersionPolicy({
+    expectedVersion: version,
+    platforms: ['mac', 'win'],
+    fetcher: mixed,
+  }), /Preflight refuses 0\.10\.94 behind live win latest 0\.10\.95/);
 });

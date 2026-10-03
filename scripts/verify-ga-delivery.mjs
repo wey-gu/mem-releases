@@ -53,33 +53,43 @@ function assertArtifactUrl(value, host, version, file, label) {
 
 export async function verifyVersionPolicy({
   expectedVersion,
+  platforms,
   allowNewerLatest = false,
   baseUrl = 'https://backbone-mem.nowledge.co',
   fetcher = fetch,
 }) {
   requireCondition(/^\d+\.\d+\.\d+$/.test(expectedVersion || ''),
     'VERIFY_RELEASE_VERSION must be a clean semver');
-  const response = await fetcher(`${baseUrl.replace(/\/+$/, '')}/latest?platform=mac`, {
-    headers: BROWSER_HEADERS,
-    redirect: 'manual',
-  });
-  if (response.status === 404 && !allowNewerLatest) {
-    console.log(`Preflight: no prior mac GA; publishing ${expectedVersion}`);
-    return;
+  requireCondition(platforms?.length > 0, 'VERIFY_PLATFORMS must list required platforms');
+  let liveLatest = '';
+  for (const platform of platforms) {
+    requireCondition(FILES[platform], `Unknown required platform: ${platform}`);
+    const response = await fetcher(`${baseUrl.replace(/\/+$/, '')}/latest?platform=${platform}`, {
+      headers: BROWSER_HEADERS,
+      redirect: 'manual',
+    });
+    requireCondition(response.status === 200,
+      `Preflight latest ${platform}: expected 200, got ${response.status}`);
+    const body = await response.json();
+    requireCondition(body.platform === platform,
+      `Preflight latest ${platform}: platform mismatch`);
+    requireCondition(typeof body.version === 'string',
+      `Preflight latest ${platform}: missing version`);
+    const order = compareVersions(body.version, expectedVersion);
+    if (allowNewerLatest) {
+      requireCondition(order > 0,
+        `Preflight older-patch mode requires ${platform} latest newer than ${expectedVersion}, got ${body.version}`);
+      if (liveLatest) {
+        requireCondition(body.version === liveLatest,
+          `Preflight older-patch mode requires one live latest, got ${body.version} vs ${liveLatest}`);
+      }
+    } else {
+      requireCondition(order <= 0,
+        `Preflight refuses ${expectedVersion} behind live ${platform} latest ${body.version}; use an explicit older-patch plan`);
+    }
+    liveLatest = body.version;
+    console.log(`Preflight version policy ${platform}: GA=${expectedVersion}, live latest=${body.version}, older-patch=${allowNewerLatest}`);
   }
-  requireCondition(response.status === 200,
-    `Preflight latest mac: expected 200, got ${response.status}`);
-  const body = await response.json();
-  requireCondition(typeof body.version === 'string', 'Preflight latest mac: missing version');
-  const order = compareVersions(body.version, expectedVersion);
-  if (allowNewerLatest) {
-    requireCondition(order > 0,
-      `Preflight older-patch mode requires live latest newer than ${expectedVersion}, got ${body.version}`);
-  } else {
-    requireCondition(order <= 0,
-      `Preflight refuses ${expectedVersion} behind live latest ${body.version}; use an explicit older-patch plan`);
-  }
-  console.log(`Preflight version policy: GA=${expectedVersion}, live latest=${body.version}, older-patch=${allowNewerLatest}`);
 }
 
 export async function verifyGADelivery({
@@ -118,8 +128,8 @@ export async function verifyGADelivery({
     requireCondition(typeof body.version === 'string',
       `/latest ${platform}: missing version`);
     if (allowNewerLatest) {
-      requireCondition(compareVersions(body.version, expectedVersion) >= 0,
-        `/latest ${platform}: ${body.version} is older than ${expectedVersion}`);
+      requireCondition(compareVersions(body.version, expectedVersion) > 0,
+        `/latest ${platform}: older-patch mode requires a version newer than ${expectedVersion}, got ${body.version}`);
     } else {
       requireCondition(body.version === expectedVersion,
         `/latest ${platform}: expected ${expectedVersion}, got ${body.version}`);

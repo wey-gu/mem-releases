@@ -94,6 +94,12 @@ jobs:
       run_publish: ${{ steps.resolve.outputs.run_publish }}
       run_vulkan: ${{ steps.resolve.outputs.run_vulkan }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - id: resolve
         name: Resolve version + source ref + flags
         shell: bash
@@ -152,6 +158,38 @@ jobs:
           echo "run_publish=$PUBLISH"    >> "$GITHUB_OUTPUT"
           echo "run_vulkan=$VULKAN"      >> "$GITHUB_OUTPUT"
           echo "Resolved: version=$VERSION source_ref=$SOURCE_REF dry=$DRY publish=$PUBLISH vulkan=$VULKAN"
+
+      - name: Pre-flight GA policy before build and optional Vulkan jobs
+        if: ${{ steps.resolve.outputs.run_publish == 'true' }}
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          VERIFY_ALLOW_NEWER_LATEST: ${{ inputs.allow_newer_desktop_latest }}
+          VERIFY_PLATFORMS: mac,mac-intel,win,linux,linux-deb,linux-rpm,linux-appimage
+        run: |
+          set -euo pipefail
+          if [[ "$VERIFY_ALLOW_NEWER_LATEST" != "true" && -z "$GPG_PRIVATE_KEY" ]]; then
+            echo "::error::GPG_PRIVATE_KEY is required for direct GA APT publication."
+            exit 1
+          fi
+          VERIFY_RELEASE_VERSION="$VERSION" node scripts/verify-ga-delivery.mjs --preflight
+
+      - name: Refuse published GA before optional Vulkan jobs
+        if: ${{ steps.resolve.outputs.run_publish == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          if draft="$(gh api "repos/${{ github.repository }}/releases/tags/v${VERSION}" --jq .draft 2>release-lookup.err)"; then
+            if [[ "$draft" != "true" ]]; then
+              echo "::error::v${VERSION} is already published; direct GA must not replace its assets."
+              exit 1
+            fi
+          elif ! grep -q 'HTTP 404' release-lookup.err; then
+            cat release-lookup.err >&2
+            exit 1
+          fi
 
   # -----------------------------------------------------------------------
   # NOTE: the former NON-GATING `rust-backend` companion job (strangler
@@ -1824,6 +1862,21 @@ jobs:
             exit 1
           fi
 
+      - name: Refuse to overwrite a published GA Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if draft="$(gh api "repos/${{ github.repository }}/releases/tags/v${VERSION}" --jq .draft 2>release-lookup.err)"; then
+            if [[ "$draft" != "true" ]]; then
+              echo "::error::v${VERSION} is already published; direct GA must not replace its assets."
+              exit 1
+            fi
+          elif ! grep -q 'HTTP 404' release-lookup.err; then
+            cat release-lookup.err >&2
+            exit 1
+          fi
+
       - name: Clone mem-backbone (private)
         env:
           PAT: ${{ secrets.MEM_BACKBONE_PAT }}
@@ -1850,6 +1903,7 @@ jobs:
       - name: Pre-flight desktop version and APT policy
         env:
           VERIFY_ALLOW_NEWER_LATEST: ${{ inputs.allow_newer_desktop_latest }}
+          VERIFY_PLATFORMS: mac,mac-intel,win,linux,linux-deb,linux-rpm,linux-appimage
         run: |
           set -euo pipefail
           if [[ "$VERIFY_ALLOW_NEWER_LATEST" != "true" && -z "$GPG_PRIVATE_KEY" ]]; then

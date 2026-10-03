@@ -32,6 +32,18 @@ class GAPromotionContractTest(unittest.TestCase):
                 self.assertIn("node scripts/verify-ga-delivery.mjs --preflight", publish)
                 self.assertIn('VERIFY_SCOPE="$health_scope" timeout', publish)
                 self.assertIn("health_scope='latest'", publish)
+                self.assertIn('name: Refuse to overwrite a published GA Release', workflow)
+
+        promote = (ROOT / ".github" / "workflows" / "promote-rc-to-ga.yml").read_text()
+        validate = promote.split("\n  validate:\n", 1)[1].split("\n  promote-docker:\n", 1)[0]
+        self.assertIn('Pre-flight desktop policy before any promotion job', validate)
+        self.assertIn('node scripts/verify-ga-delivery.mjs --preflight', validate)
+        self.assertIn('Older desktop GA cannot move Docker :latest', validate)
+
+        direct = (ROOT / ".github" / "workflows" / "release-desktop.yml").read_text()
+        meta = direct.split("\n  meta:\n", 1)[1].split("\n  build-macos-arm64:\n", 1)[0]
+        self.assertIn('Pre-flight GA policy before build and optional Vulkan jobs', meta)
+        self.assertIn('Refuse published GA before optional Vulkan jobs', meta)
 
     def test_partial_recovery_does_not_require_deferred_rpm(self):
         workflow = (

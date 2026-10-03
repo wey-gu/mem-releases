@@ -123,6 +123,12 @@ jobs:
       rc_tag: ${{ steps.v.outputs.rc_tag }}
       ga_tag: ${{ steps.v.outputs.ga_tag }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - id: v
         run: |
           set -euo pipefail
@@ -146,8 +152,44 @@ jobs:
             echo "::error::RC base '$RC_BASE' does not match GA '$GA'."
             exit 1
           fi
+          if [[ "${{ inputs.allow_newer_desktop_latest }}" == "true" && "${{ inputs.push_latest }}" == "true" ]]; then
+            echo "::error::Older desktop GA cannot move Docker :latest; set push_latest=false."
+            exit 1
+          fi
           echo "rc_tag=$RC" >> "$GITHUB_OUTPUT"
           echo "ga_tag=$GA" >> "$GITHUB_OUTPUT"
+
+      - name: Pre-flight desktop policy before any promotion job
+        if: ${{ inputs.promote_desktop }}
+        env:
+          GA: ${{ steps.v.outputs.ga_tag }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          VERIFY_ALLOW_NEWER_LATEST: ${{ inputs.allow_newer_desktop_latest }}
+          VERIFY_PLATFORMS: mac,mac-intel,win,linux,linux-deb,linux-appimage
+        run: |
+          set -euo pipefail
+          if [[ "$VERIFY_ALLOW_NEWER_LATEST" != "true" && -z "$GPG_PRIVATE_KEY" ]]; then
+            echo "::error::GPG_PRIVATE_KEY is required for core GA APT publication."
+            exit 1
+          fi
+          VERIFY_RELEASE_VERSION="$GA" node scripts/verify-ga-delivery.mjs --preflight
+
+      - name: Refuse to overwrite a published GA Release
+        if: ${{ inputs.promote_desktop }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GA: ${{ steps.v.outputs.ga_tag }}
+        run: |
+          set -euo pipefail
+          if draft="$(gh api "repos/${{ github.repository }}/releases/tags/v${GA}" --jq .draft 2>release-lookup.err)"; then
+            if [[ "$draft" != "true" ]]; then
+              echo "::error::v${GA} is already published; promotion must not replace its assets."
+              exit 1
+            fi
+          elif ! grep -q 'HTTP 404' release-lookup.err; then
+            cat release-lookup.err >&2
+            exit 1
+          fi
 
   promote-docker:
     needs: validate
@@ -302,6 +344,7 @@ jobs:
       - name: Pre-flight desktop version and APT policy
         env:
           VERIFY_ALLOW_NEWER_LATEST: ${{ inputs.allow_newer_desktop_latest }}
+          VERIFY_PLATFORMS: mac,mac-intel,win,linux,linux-deb,linux-appimage
         run: |
           set -euo pipefail
           if [[ "$VERIFY_ALLOW_NEWER_LATEST" != "true" && -z "$GPG_PRIVATE_KEY" ]]; then
