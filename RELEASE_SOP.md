@@ -239,10 +239,16 @@ gh workflow run promote-rpm-to-ga.yml -R wey-gu/mem-releases \
 ```
 
 The workflow refuses a mismatched version pair, a missing GA release, or an RC
-release without exactly one RPM. It renames and uploads that existing RC asset,
-downloads the R2 object again, compares its SHA-256, and then attaches it to
-the existing GA GitHub Release. It does not rebuild the RPM, update APT, or
-change the core auto-updater feed.
+release without exactly one RPM. It verifies the downloaded RPM against the RC
+Release SHA-256. Package names that already contain the GA base version (for
+example `Nowledge.Mem-0.10.94-1.x86_64.rpm` on an RC2 Release) are retained;
+names with the RC suffix are renamed to GA. Before any public write it rejects
+a different same-name GA asset. The release-owned R2 step uploads only a
+missing key, skips identical bytes, and refuses different bytes; CDN delivery
+is downloaded and checked by SHA-256. The final Release attachment likewise
+skips an identical RPM and never clobbers an existing one. It may add a missing
+RPM to an already published GA, as this channel is explicitly deferred. It
+does not rebuild the RPM, update APT, or change the core auto-updater feed.
 
 Publish the GitHub Release only after the intended asset set is present. If the
 core release is announced while RPM remains pending, state that RPM availability
