@@ -34,6 +34,11 @@ on:
         required: false
         type: boolean
         default: false
+      allow_newer_desktop_latest:
+        description: "For an older out-of-band GA only: allow desktop latest to remain at a newer GA; exact GA downloads and APT are still required"
+        required: false
+        type: boolean
+        default: false
       build_vulkan:
         description: "ALSO build the OPTIONAL -vulkan GPU variants (Windows + Linux only). Manual downloads only — NEVER added to the auto-updater feed. Off for tag-triggered runs."
         required: false
@@ -1803,6 +1808,10 @@ jobs:
       GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
       GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Pre-flight version safety check
         run: |
           set -euo pipefail
@@ -1977,9 +1986,11 @@ jobs:
           delay=15
           for i in $(seq 1 "$attempts"); do
             echo "::group::Verify download delivery (attempt $i/$attempts)"
-            if VERIFY_RELEASE_VERSION="$VERSION" VERIFY_SCOPE="$scope" \
-                 VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-rpm,linux-appimage" \
-                 node scripts/verify-download-delivery.mjs; then
+            export VERIFY_RELEASE_VERSION="$VERSION" VERIFY_SCOPE="$scope"
+            export VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-rpm,linux-appimage"
+            export VERIFY_ALLOW_NEWER_LATEST="${{ inputs.allow_newer_desktop_latest }}"
+            if timeout -k 10s 90s node scripts/verify-download-delivery.mjs &&
+               timeout -k 10s 90s node ../scripts/verify-ga-delivery.mjs; then
               echo "::endgroup::"
               echo "✅ Download delivery verified on attempt $i."
               exit 0

@@ -8,6 +8,8 @@ on:
       - .github/workflows/release-desktop.yml
       - .github/workflows/ga-promotion-contract.yml
       - scripts/test_ga_promotion_contract.py
+      - scripts/verify-ga-delivery.mjs
+      - scripts/test_verify_ga_delivery.mjs
   push:
     branches: [main]
     paths:
@@ -16,6 +18,8 @@ on:
       - .github/workflows/release-desktop.yml
       - .github/workflows/ga-promotion-contract.yml
       - scripts/test_ga_promotion_contract.py
+      - scripts/verify-ga-delivery.mjs
+      - scripts/test_verify_ga_delivery.mjs
 
 permissions:
   contents: read
@@ -25,5 +29,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Check GA promotion boundary
         run: python3 -m unittest discover -s scripts -p test_ga_promotion_contract.py
+      - name: Check exact GA delivery gate
+        run: node --test scripts/test_verify_ga_delivery.mjs

@@ -19,6 +19,8 @@ class GAPromotionContractTest(unittest.TestCase):
                 self.assertNotIn("wrangler deploy", workflow)
                 self.assertIn(CORE_PLATFORMS, workflow)
                 self.assertIn("VERIFY_SCOPE", workflow)
+                self.assertIn("node ../scripts/verify-ga-delivery.mjs", workflow)
+                self.assertIn("uses: actions/checkout@v4", workflow)
 
     def test_partial_recovery_does_not_require_deferred_rpm(self):
         workflow = (
@@ -45,6 +47,8 @@ class GAPromotionContractTest(unittest.TestCase):
             'VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-rpm,linux-appimage"',
             publish,
         )
+        self.assertIn("node ../scripts/verify-ga-delivery.mjs", publish)
+        self.assertIn("uses: actions/checkout@v4", publish)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,10 @@ on:
         description: "GA version already promoted to R2/APT/Docker (e.g. 0.9.4; clean semver)"
         required: true
         type: string
+      allow_newer_desktop_latest:
+        description: "For an older out-of-band GA only: allow desktop latest to remain at a newer GA"
+        type: boolean
+        default: false
 
 concurrency:
   group: finish-ga-${{ github.event.inputs.ga_tag }}
@@ -34,6 +38,10 @@ jobs:
       CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Validate inputs
         run: |
           set -euo pipefail
@@ -101,9 +109,11 @@ jobs:
           delay=15
           for i in $(seq 1 "$attempts"); do
             echo "::group::Verify download delivery (attempt $i/$attempts)"
-            if VERIFY_RELEASE_VERSION="$GA" VERIFY_SCOPE="latest,latest-redirect,direct,update,apt" \
-                 VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-appimage" \
-                 timeout -k 10s 90s node scripts/verify-download-delivery.mjs; then
+            export VERIFY_RELEASE_VERSION="$GA" VERIFY_SCOPE="latest,latest-redirect,direct,update,apt"
+            export VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-appimage"
+            export VERIFY_ALLOW_NEWER_LATEST="${{ inputs.allow_newer_desktop_latest }}"
+            if timeout -k 10s 90s node scripts/verify-download-delivery.mjs &&
+               timeout -k 10s 90s node ../scripts/verify-ga-delivery.mjs; then
               echo "::endgroup::"
               echo "Download delivery verified on attempt $i."
               exit 0

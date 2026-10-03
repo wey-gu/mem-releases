@@ -188,7 +188,10 @@ updates APT. The production updater currently discovers the latest desktop
 version from R2 objects; uploading a newer GA can expose it before this
 workflow finishes. `push_latest` controls Docker `:latest` only. Finish the
 core artifact smoke before dispatch, and treat any failure after R2 upload as
-a partial public release. Issue #67 owns the explicit all-artifact latest gate.
+a partial public release. The release-owned exact-delivery gate must confirm
+each core platform, direct GA download, updater target, and APT version before
+the draft is created; the separate Backbone probe still checks headers and
+Range support. Issue #67 owns the explicit all-artifact latest gate.
 
 ```bash
 gh workflow run promote-rc-to-ga.yml -R wey-gu/mem-releases \
@@ -206,6 +209,13 @@ If Docker, R2, and APT succeeded but the GA draft is missing, use
 verifies the core platforms and APT before creating the draft; it does not
 deploy the Backbone Worker or promote the separately staged RPM. Do not
 repeat the full promote merely to create the missing draft.
+
+For an older out-of-band GA, desktop R2 discovery may correctly remain on a
+newer version. Only in that case set `allow_newer_desktop_latest=true`; the
+exact-delivery gate still requires the promoted version's direct downloads and
+APT metadata, while every selected desktop latest/update route must agree on
+one newer version. This input does not control Docker `:latest` or prevent an
+APT version change. Inspect the APT consequence before using that path.
 
 ### 6.2 Promote a deferred RPM
 
@@ -251,7 +261,8 @@ including RPM, then updates APT when signing credentials are present and verifie
 routes before creating a draft GitHub Release. The old `latest` input is kept
 only so existing dispatch commands still parse; it no longer gates desktop
 latest. The production updater discovers the newest GA objects in R2 as they
-arrive. Verify all six platforms and APT before announcing GA; a
+arrive. The release-owned exact-delivery gate checks all six platforms and
+the updater; verify APT independently when its update ran. A
 failure after upload is a partial public release even if the draft is absent.
 Do not deploy the Backbone Worker merely to set a release version. The direct
 workflow skips APT when `GPG_PRIVATE_KEY` is absent; treat that as an incomplete
