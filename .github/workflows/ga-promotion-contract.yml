@@ -1,0 +1,27 @@
+name: ga-promotion-contract
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/promote-rc-to-ga.yml
+      - .github/workflows/finish-ga-release.yml
+      - .github/workflows/ga-promotion-contract.yml
+      - scripts/test_ga_promotion_contract.py
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/promote-rc-to-ga.yml
+      - .github/workflows/finish-ga-release.yml
+      - .github/workflows/ga-promotion-contract.yml
+      - scripts/test_ga_promotion_contract.py
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check GA promotion boundary
+        run: python3 -m unittest discover -s scripts -p test_ga_promotion_contract.py

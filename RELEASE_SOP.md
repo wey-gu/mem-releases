@@ -184,7 +184,11 @@ promoted. Do not make a failed RPM invisible by treating the RC as complete.
 Once the core RC artifacts have passed their smoke gates, run
 `promote-rc-to-ga.yml`. It promotes Docker, macOS, Windows, DEB, and AppImage
 artifacts without requiring the RPM to exist. It is the only promotion that
-updates APT and, when requested, the auto-updater feed.
+updates APT. The production updater currently discovers the latest desktop
+version from R2 objects; uploading a newer GA can expose it before this
+workflow finishes. `push_latest` controls Docker `:latest` only. Finish the
+core artifact smoke before dispatch, and treat any failure after R2 upload as
+a partial public release. Issue #67 owns the explicit all-artifact latest gate.
 
 ```bash
 gh workflow run promote-rc-to-ga.yml -R wey-gu/mem-releases \
@@ -196,6 +200,12 @@ gh workflow run promote-rc-to-ga.yml -R wey-gu/mem-releases \
 Record the workflow run, the resulting GA release draft, the R2/CDN readback,
 and the updater readback. A core release is not evidence that a deferred RPM
 has been delivered.
+
+If Docker, R2, and APT succeeded but the GA draft is missing, use
+`finish-ga-release.yml` only after checking the exact partial state. It
+verifies the core platforms and APT before creating the draft; it does not
+deploy the Backbone Worker or promote the separately staged RPM. Do not
+repeat the full promote merely to create the missing draft.
 
 ### 6.2 Promote a deferred RPM
 
@@ -212,7 +222,7 @@ The workflow refuses a mismatched version pair, a missing GA release, or an RC
 release without exactly one RPM. It renames and uploads that existing RC asset,
 downloads the R2 object again, compares its SHA-256, and then attaches it to
 the existing GA GitHub Release. It does not rebuild the RPM, update APT, or
-move the auto-updater feed.
+change the core auto-updater feed.
 
 Publish the GitHub Release only after the intended asset set is present. If the
 core release is announced while RPM remains pending, state that RPM availability

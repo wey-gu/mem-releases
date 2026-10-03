@@ -27,7 +27,7 @@
 #     - renames RC suffix out of every filename (Nowledge Mem_0.8.4-rc7_… → _0.8.4_…)
 #     - uploads to Cloudflare R2 under the GA path (app/<ga>/)
 #     - updates the APT repo with the GA-named .deb
-#     - bumps the auto-updater feed to <ga>
+#     - verifies the auto-updater's dynamic R2 discovery of <ga>
 #     - creates a draft GH Release v<ga> with the renamed assets
 #
 #   RPM:
@@ -57,9 +57,9 @@
 #
 # Notes
 # -----
-#   * push_latest=false is the right choice when promoting an out-of-band
-#     patch (e.g. 0.8.3.1 after 0.8.4 already shipped). It keeps :latest
-#     pointing at the most recent stable instead of regressing it.
+#   * push_latest controls Docker :latest. Desktop latest is discovered from
+#     R2 independently; uploading a numerically newer GA can expose it before
+#     this workflow finishes, even when push_latest=false.
 #   * The release-publish environment gate fires on the desktop job, not
 #     docker — same policy as release-desktop.yml.
 #   * Docs: docs/implementation/RC_TO_GA_PROMOTE_FLOW.md in the parent
@@ -99,7 +99,7 @@ on:
         type: boolean
         default: true
       push_latest:
-        description: "Also move :latest tags and the auto-updater feed to GA"
+        description: "Move Docker :latest tags (desktop latest is discovered from R2)"
         type: boolean
         default: true
 
@@ -256,7 +256,6 @@ jobs:
     env:
       RC: ${{ needs.validate.outputs.rc_tag }}
       GA: ${{ needs.validate.outputs.ga_tag }}
-      RUN_LATEST: ${{ inputs.push_latest }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -285,13 +284,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # wrangler requires Node >= 22, and this job runs it in "Mark as latest
-          # (auto-updater feed)". Pinned at 20 this promote fails AFTER R2 and APT
-          # have already published, which is the same silent half-ship that hit
-          # 0.10.43 (release-desktop) and then 0.10.45 (here). release-desktop's
-          # publish job and finish-ga-release were fixed first; this was the third
-          # wrangler caller and was missed because that sweep was not exhaustive.
-          # Before changing any node pin, check EVERY job that runs wrangler.
+          # Keep the tested Node version for the mem-backbone publish/verify scripts.
           node-version: "22"
 
       - name: Install mem-backbone npm deps
@@ -399,22 +392,6 @@ jobs:
         if: ${{ env.GPG_PRIVATE_KEY != '' }}
         run: node scripts/update-apt-repo.cjs "$GA" "${{ steps.rename.outputs.deb }}"
 
-      - name: Mark as latest (auto-updater feed)
-        if: ${{ env.RUN_LATEST == 'true' }}
-        working-directory: mem-backbone
-        env:
-          WRANGLER_ENV: production
-        run: |
-          set -euo pipefail
-          export PATH="$PWD/node_modules/.bin:$PATH"
-          if ! command -v wrangler >/dev/null 2>&1; then
-            echo "::warning::wrangler not found in node_modules/.bin; installing inline"
-            npm install --no-save --no-audit --no-fund wrangler
-            export PATH="$PWD/node_modules/.bin:$PATH"
-          fi
-          wrangler --version
-          node scripts/update-latest-version.js "$GA" "$WRANGLER_ENV"
-
       - name: Verify download delivery (R2 + APT + Worker)
         working-directory: mem-backbone
         run: |
@@ -432,6 +409,7 @@ jobs:
           for i in $(seq 1 "$attempts"); do
             echo "::group::Verify download delivery (attempt $i/$attempts)"
             if VERIFY_RELEASE_VERSION="$GA" VERIFY_SCOPE="$scope" \
+                 VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-appimage" \
                  timeout -k 10s 90s node scripts/verify-download-delivery.mjs; then
               echo "::endgroup::"
               echo "Download delivery verified on attempt $i."
@@ -464,10 +442,8 @@ jobs:
             "${{ steps.rename.outputs.deb }}" \
             "${{ steps.rename.outputs.appimg }}"
 
-      # R2 and APT publish BEFORE the auto-updater feed and the GA release, so a
-      # failure in between leaves GA downloadable while the updater still points
-      # at the previous version and no GA release exists. Nothing about the
-      # download page looks wrong in that state, so say it out loud.
+      # R2 publication can move the dynamic updater before the GA Release is
+      # created. Report partial publication even if a later step fails.
       - name: Report partial promote
         if: failure()
         run: |
@@ -484,10 +460,9 @@ jobs:
             echo "Still to confirm or finish by hand:"
             echo ""
             echo '```'
-            echo "curl -sIL https://backbone-mem.nowledge.co/download/${GA}/mac | grep -i location"
             echo "gh release view v${GA} --repo ${{ github.repository }}"
-            echo "# auto-updater feed (needs CF creds, in mem-backbone):"
-            echo "node scripts/update-latest-version.js ${GA} production"
+            echo "# verify the dynamic auto-updater feed before recovery:"
+            echo "VERIFY_RELEASE_VERSION=${GA} VERIFY_PLATFORMS=mac,mac-intel,win,linux,linux-deb,linux-appimage VERIFY_SCOPE=latest,latest-redirect,direct,update node scripts/verify-download-delivery.mjs"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -497,7 +472,8 @@ jobs:
             echo "### Desktop promoted v${RC} → v${GA}"
             echo "- R2 prefix:      app/${GA}/"
             echo "- GH release tag: v${GA} (draft on ${{ github.repository }})"
-            echo "- Latest feed:    ${RUN_LATEST}"
+            echo "- Desktop latest: dynamically discovered from R2 (verified)"
+            echo "- Docker :latest: ${{ inputs.push_latest }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   recap:
