@@ -110,6 +110,17 @@ class GAPromotionContractTest(unittest.TestCase):
                     self.assertIn('node scripts/assert-fresh-r2-version.mjs', gate)
                     self.assertIn('gh release list -R', gate)
 
+    def test_deferred_rpm_checks_source_and_ga_assets_before_r2(self):
+        workflow = (ROOT / ".github" / "workflows" /
+                    "promote-rpm-to-ga.yml").read_text()
+        self.assertNotIn("mem-backbone", workflow)
+        self.assertNotIn("--clobber", workflow)
+        self.assertIn('source_digest="$(jq -r', workflow)
+        self.assertIn('node scripts/rpm-ga-policy.mjs', workflow)
+        self.assertLess(workflow.index('reconcile-rpm-release-asset.mjs --check-only'),
+                        workflow.index('name: Reconcile RPM in Cloudflare R2'))
+        self.assertIn('node scripts/reconcile-rpm-release-asset.mjs "v${GA}"', workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
