@@ -30,7 +30,7 @@ on:
         type: boolean
         default: true
       latest:
-        description: "Mark this version as latest in the auto-updater feed."
+        description: "Deprecated compatibility input; desktop latest is discovered from R2 and this value does not gate it."
         required: false
         type: boolean
         default: false
@@ -87,7 +87,6 @@ jobs:
       source_ref: ${{ steps.resolve.outputs.source_ref }}
       is_dry_run: ${{ steps.resolve.outputs.is_dry_run }}
       run_publish: ${{ steps.resolve.outputs.run_publish }}
-      run_latest: ${{ steps.resolve.outputs.run_latest }}
       run_vulkan: ${{ steps.resolve.outputs.run_vulkan }}
     steps:
       - id: resolve
@@ -96,7 +95,6 @@ jobs:
         env:
           DISPATCH_TAG: ${{ inputs.tag }}
           DISPATCH_PUBLISH: ${{ inputs.publish }}
-          DISPATCH_LATEST: ${{ inputs.latest }}
           DISPATCH_VULKAN: ${{ inputs.build_vulkan }}
           PAYLOAD_REF: ${{ github.event.client_payload.ref }}
           PAYLOAD_VERSION: ${{ github.event.client_payload.version }}
@@ -114,7 +112,6 @@ jobs:
               VERSION="$DISPATCH_TAG"
               SOURCE_REF="v${VERSION}"
               PUBLISH="$DISPATCH_PUBLISH"
-              LATEST="$DISPATCH_LATEST"
               VULKAN="$DISPATCH_VULKAN"
               ;;
             push)
@@ -122,13 +119,11 @@ jobs:
               VERSION="${PUSH_REF#v}"
               SOURCE_REF="$PUSH_REF"
               PUBLISH="true"
-              LATEST="false"
               ;;
             repository_dispatch)
               VERSION="$PAYLOAD_VERSION"
               SOURCE_REF="$PAYLOAD_REF"
               PUBLISH="true"
-              LATEST="false"
               ;;
             *)
               echo "::error::Unsupported event: $EVENT_NAME"
@@ -139,20 +134,19 @@ jobs:
           # run. Only a bare semver `X.Y.Z` ever publishes. Same gate as
           # the private repo's workflow.
           if [[ "$VERSION" == *-* ]]; then
-            DRY="true"; PUBLISH="false"; LATEST="false"
+            DRY="true"; PUBLISH="false"
           else
             DRY="false"
           fi
           # Normalize VULKAN to a strict true/false ("" from a non-dispatch
-          # trigger becomes false). NEVER touches publish/latest/updater.
+          # trigger becomes false). NEVER touches publish/updater.
           if [[ "$VULKAN" == "true" ]]; then VULKAN="true"; else VULKAN="false"; fi
           echo "version=$VERSION"        >> "$GITHUB_OUTPUT"
           echo "source_ref=$SOURCE_REF"  >> "$GITHUB_OUTPUT"
           echo "is_dry_run=$DRY"         >> "$GITHUB_OUTPUT"
           echo "run_publish=$PUBLISH"    >> "$GITHUB_OUTPUT"
-          echo "run_latest=$LATEST"      >> "$GITHUB_OUTPUT"
           echo "run_vulkan=$VULKAN"      >> "$GITHUB_OUTPUT"
-          echo "Resolved: version=$VERSION source_ref=$SOURCE_REF dry=$DRY publish=$PUBLISH latest=$LATEST vulkan=$VULKAN"
+          echo "Resolved: version=$VERSION source_ref=$SOURCE_REF dry=$DRY publish=$PUBLISH vulkan=$VULKAN"
 
   # -----------------------------------------------------------------------
   # NOTE: the former NON-GATING `rust-backend` companion job (strangler
@@ -1204,7 +1198,7 @@ jobs:
   #   publish/prerelease jobs `find` artifacts only under the CPU bucket
   #   names (`windows-x86_64`, `linux-deb-appimage`, `linux-rpm`), so a
   #   -vulkan artifact can never be picked up by the R2 upload, the APT
-  #   repo, or the `Mark as latest` updater-feed step. The -vulkan bundles
+  #   repo, or the core updater delivery check. The -vulkan bundles
   #   are attached DIRECTLY to the GH Release as MANUAL DOWNLOADS ONLY.
   #   See docs/implementation/RUST_DESKTOP_GPU_ACCELERATION.md (CI plan §4).
   # =======================================================================
@@ -1798,7 +1792,6 @@ jobs:
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
-      RUN_LATEST: ${{ needs.meta.outputs.run_latest }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -1952,41 +1945,6 @@ jobs:
         if: ${{ env.GPG_PRIVATE_KEY != '' }}
         run: node scripts/update-apt-repo.cjs "$VERSION" "${{ steps.paths.outputs.deb }}"
 
-      - name: Mark as latest (auto-updater feed)
-        if: ${{ needs.meta.outputs.run_latest == 'true' }}
-        working-directory: mem-backbone
-        # `update-latest-version.js` shells out to bare `wrangler deploy`
-        # for the Cloudflare Worker that serves the auto-updater feed.
-        # `wrangler` isn't a global binary on `ubuntu-22.04`, so we prepend
-        # the local `node_modules/.bin` produced by the earlier `npm ci` to
-        # PATH. If mem-backbone's package.json ever drops wrangler from
-        # deps, the fallback `npm install --no-save wrangler` keeps the
-        # step resilient.
-        env:
-          # The mem-backbone script accepts the wrangler env as a 2nd
-          # positional arg (see `scripts/update-latest-version.js`).
-          # `run_latest` is only true for clean-semver GA releases, so
-          # production is always the right choice here. To support a
-          # future staging path, plumb this through a workflow_dispatch
-          # input instead of hardcoding — for example:
-          #   inputs:
-          #     wrangler_env:
-          #       default: production
-          # …and then set WRANGLER_ENV: ${{ inputs.wrangler_env }}.
-          # CLOUDFLARE_API_TOKEN is already exposed at the job-level env
-          # block above; wrangler reads it directly.
-          WRANGLER_ENV: production
-        run: |
-          set -euo pipefail
-          export PATH="$PWD/node_modules/.bin:$PATH"
-          if ! command -v wrangler >/dev/null 2>&1; then
-            echo "::warning::wrangler not found in node_modules/.bin; installing inline"
-            npm install --no-save --no-audit --no-fund wrangler
-            export PATH="$PWD/node_modules/.bin:$PATH"
-          fi
-          wrangler --version
-          node scripts/update-latest-version.js "$VERSION" "$WRANGLER_ENV"
-
       - name: Verify download delivery (R2 + APT + Worker)
         working-directory: mem-backbone
         # The verify script is read-only and idempotent, but it probes
@@ -1996,7 +1954,7 @@ jobs:
         # range support (the HEAD already advertises accept-ranges: bytes —
         # it's pure propagation timing, not a real defect). Seen as a
         # false-negative on 0.8.8 and 0.9.0: every real step (R2 upload, APT,
-        # auto-updater feed flip) succeeded, then this step failed on the
+        # auto-updater discovery) succeeded, then this step failed on the
         # AppImage range probe; re-running minutes later passed unchanged.
         #
         # Rather than loosen the strict 206 assertion (the desktop
@@ -2020,6 +1978,7 @@ jobs:
           for i in $(seq 1 "$attempts"); do
             echo "::group::Verify download delivery (attempt $i/$attempts)"
             if VERIFY_RELEASE_VERSION="$VERSION" VERIFY_SCOPE="$scope" \
+                 VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-rpm,linux-appimage" \
                  node scripts/verify-download-delivery.mjs; then
               echo "::endgroup::"
               echo "✅ Download delivery verified on attempt $i."
@@ -2078,10 +2037,9 @@ jobs:
               >/dev/null 2>&1 && echo "deleted artifact $id" || true
           done
 
-      # A failure anywhere after "Upload to Cloudflare R2" leaves a release that
-      # is already public on the download page and apt, but has no GitHub release
-      # and a stale auto-updater feed. Nothing about that state looks wrong from
-      # the outside, so say it out loud on the run itself.
+      # A failure after "Upload to Cloudflare R2" may leave public artifacts,
+      # APT metadata, or a draft GH Release behind. The updater may already
+      # discover the new R2 objects. Report the possible partial state.
       - name: Report partial publish
         if: failure()
         run: |
@@ -2093,15 +2051,18 @@ jobs:
             echo "step is already live and does not roll back:"
             echo ""
             echo "- R2 / download page (artifacts may already be downloadable)"
-            echo "- APT repo (apt users may already see this version)"
+            echo "- APT repo (if its update step ran)"
+            echo "- GH Release draft (if its creation step ran)"
             echo ""
-            echo "Check what actually landed, then finish by hand:"
+            echo "Check what actually landed before any recovery. The updater"
+            echo "may already discover the GA objects in R2. Verify all six"
+            echo "platforms and, if updated, APT with mem-backbone's read-only delivery script."
+            echo "Do not redeploy the production Backbone Worker to repair this job."
             echo ""
             echo '```'
-            echo "curl -sIL https://backbone-mem.nowledge.co/download/${VERSION}/mac | grep -i location"
+            echo "VERIFY_RELEASE_VERSION=${VERSION} VERIFY_SCOPE=latest,latest-redirect,direct,update VERIFY_PLATFORMS=mac,mac-intel,win,linux,linux-deb,linux-rpm,linux-appimage node scripts/verify-download-delivery.mjs"
+            echo "# If APT was updated, add apt to VERIFY_SCOPE and rerun."
             echo "gh release view v${VERSION} --repo ${{ github.repository }}"
-            echo "# auto-updater feed (needs CF creds, mem-backbone):"
-            echo "node scripts/update-latest-version.js ${VERSION} production"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -2111,4 +2072,4 @@ jobs:
           echo "- Source ref: ${SOURCE_REF} (nowledge-co/mem)"   >> "$GITHUB_STEP_SUMMARY"
           echo "- R2 prefix:  app/$VERSION/"                     >> "$GITHUB_STEP_SUMMARY"
           echo "- GH release: v$VERSION (draft, on this repo)"   >> "$GITHUB_STEP_SUMMARY"
-          echo "- Latest:     ${RUN_LATEST}"                      >> "$GITHUB_STEP_SUMMARY"
+          echo "- Updater:    latest/update delivery verified"    >> "$GITHUB_STEP_SUMMARY"

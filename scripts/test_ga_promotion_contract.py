@@ -28,6 +28,24 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertNotIn('x86_64-unknown-linux-gnu.rpm', workflow)
         self.assertIn('name: Create draft GA GitHub release', workflow)
 
+    def test_direct_ga_keeps_all_artifacts_and_verifies_updater_without_deploy(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "release-desktop.yml"
+        ).read_text()
+        publish = workflow.split("\n  publish:\n", 1)[1]
+        self.assertIn('Deprecated compatibility input', workflow)
+        self.assertNotIn("update-latest-version.js", publish)
+        self.assertNotIn("wrangler deploy", publish)
+        self.assertIn("- build-linux-rpm", publish)
+        self.assertIn('node scripts/upload-package.cjs "$VERSION" linux     "${{ steps.paths.outputs.rpm }}"', publish)
+        self.assertIn('"${{ steps.paths.outputs.rpm }}"', publish)
+        self.assertIn('VERIFY_RELEASE_VERSION="$VERSION" VERIFY_SCOPE="$scope"', publish)
+        self.assertIn("scope='latest,latest-redirect,direct,update'", publish)
+        self.assertIn(
+            'VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-rpm,linux-appimage"',
+            publish,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

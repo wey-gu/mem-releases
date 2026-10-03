@@ -244,3 +244,15 @@ Skipping RC is reserved for an isolated, low-risk change with a previously
 validated release pipeline. A versioned App release, a changed release
 workflow, a renamed private dependency, or any native bundle change always
 uses the RC path.
+
+If an approved fast path uses `release-desktop.yml` directly with a clean
+semver tag, its publish job requires and uploads all six desktop artifacts,
+including RPM, then updates APT when signing credentials are present and verifies the R2 download and updater
+routes before creating a draft GitHub Release. The old `latest` input is kept
+only so existing dispatch commands still parse; it no longer gates desktop
+latest. The production updater discovers the newest GA objects in R2 as they
+arrive. Verify all six platforms and APT before announcing GA; a
+failure after upload is a partial public release even if the draft is absent.
+Do not deploy the Backbone Worker merely to set a release version. The direct
+workflow skips APT when `GPG_PRIVATE_KEY` is absent; treat that as an incomplete
+release for any launch that promises APT, and verify the APT repo independently.
