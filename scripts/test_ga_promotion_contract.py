@@ -22,6 +22,17 @@ class GAPromotionContractTest(unittest.TestCase):
                 self.assertIn("node ../scripts/verify-ga-delivery.mjs", workflow)
                 self.assertIn("uses: actions/checkout@v4", workflow)
 
+    def test_publish_paths_preflight_before_upload_and_limit_duplicate_probes(self):
+        for name in ("promote-rc-to-ga.yml", "release-desktop.yml"):
+            with self.subTest(workflow=name):
+                workflow = (ROOT / ".github" / "workflows" / name).read_text()
+                publish = workflow.split("\n  promote-desktop:\n" if name.startswith("promote") else "\n  publish:\n", 1)[1]
+                self.assertLess(publish.index("Pre-flight desktop version and APT policy"),
+                                publish.index("Upload to Cloudflare R2"))
+                self.assertIn("node scripts/verify-ga-delivery.mjs --preflight", publish)
+                self.assertIn('VERIFY_SCOPE="$health_scope" timeout', publish)
+                self.assertIn("health_scope='latest'", publish)
+
     def test_partial_recovery_does_not_require_deferred_rpm(self):
         workflow = (
             ROOT / ".github" / "workflows" / "finish-ga-release.yml"
@@ -29,6 +40,9 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertNotIn('steps.rename.outputs.rpm', workflow)
         self.assertNotIn('x86_64-unknown-linux-gnu.rpm', workflow)
         self.assertIn('name: Create draft GA GitHub release', workflow)
+        self.assertIn('name: Refuse to modify a published GA Release', workflow)
+        self.assertIn('--json isDraft --jq .isDraft', workflow)
+        self.assertIn('VERIFY_SCOPE="$health_scope" timeout', workflow)
 
     def test_direct_ga_keeps_all_artifacts_and_verifies_updater_without_deploy(self):
         workflow = (

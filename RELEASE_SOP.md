@@ -211,11 +211,13 @@ deploy the Backbone Worker or promote the separately staged RPM. Do not
 repeat the full promote merely to create the missing draft.
 
 For an older out-of-band GA, desktop R2 discovery may correctly remain on a
-newer version. Only in that case set `allow_newer_desktop_latest=true`; the
-exact-delivery gate still requires the promoted version's direct downloads and
-APT metadata, while every selected desktop latest/update route must agree on
-one newer version. This input does not control Docker `:latest` or prevent an
-APT version change. Inspect the APT consequence before using that path.
+newer version. Only in that case set `allow_newer_desktop_latest=true`; a
+read-only preflight rejects this mode unless the live mac latest is newer.
+The release still verifies the promoted version's direct downloads, while
+every selected desktop latest/update route must agree on one newer version.
+This mode skips the APT update so it cannot downgrade the stable repository;
+verify the existing APT candidate separately. `push_latest` controls Docker
+only and must also be set to `false` if Docker latest should stay newer.
 
 ### 6.2 Promote a deferred RPM
 
@@ -257,13 +259,13 @@ uses the RC path.
 
 If an approved fast path uses `release-desktop.yml` directly with a clean
 semver tag, its publish job requires and uploads all six desktop artifacts,
-including RPM, then updates APT when signing credentials are present and verifies the R2 download and updater
+including RPM, then requires APT signing credentials, updates APT, and verifies the R2 download and updater
 routes before creating a draft GitHub Release. The old `latest` input is kept
 only so existing dispatch commands still parse; it no longer gates desktop
 latest. The production updater discovers the newest GA objects in R2 as they
 arrive. The release-owned exact-delivery gate checks all six platforms and
-the updater; verify APT independently when its update ran. A
+the updater and APT. The explicit older-patch mode skips the APT update and
+exact APT check so an older version cannot replace its stable candidate. A
 failure after upload is a partial public release even if the draft is absent.
-Do not deploy the Backbone Worker merely to set a release version. The direct
-workflow skips APT when `GPG_PRIVATE_KEY` is absent; treat that as an incomplete
-release for any launch that promises APT, and verify the APT repo independently.
+Do not deploy the Backbone Worker merely to set a release version. Normal GA
+preflight fails before public mutation if `GPG_PRIVATE_KEY` is absent.

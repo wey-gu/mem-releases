@@ -35,7 +35,7 @@ on:
         type: boolean
         default: false
       allow_newer_desktop_latest:
-        description: "For an older out-of-band GA only: allow desktop latest to remain at a newer GA; exact GA downloads and APT are still required"
+        description: "For an older out-of-band GA only: keep newer desktop latest and skip APT; exact GA downloads are still required"
         required: false
         type: boolean
         default: false
@@ -1847,6 +1847,17 @@ jobs:
         working-directory: mem-backbone
         run: npm ci --no-audit --no-fund
 
+      - name: Pre-flight desktop version and APT policy
+        env:
+          VERIFY_ALLOW_NEWER_LATEST: ${{ inputs.allow_newer_desktop_latest }}
+        run: |
+          set -euo pipefail
+          if [[ "$VERIFY_ALLOW_NEWER_LATEST" != "true" && -z "$GPG_PRIVATE_KEY" ]]; then
+            echo "::error::GPG_PRIVATE_KEY is required for core GA APT publication."
+            exit 1
+          fi
+          VERIFY_RELEASE_VERSION="$VERSION" node scripts/verify-ga-delivery.mjs --preflight
+
       - name: Import GPG signing key
         run: |
           set -euo pipefail
@@ -1951,10 +1962,10 @@ jobs:
 
       - name: Update APT repo
         working-directory: mem-backbone
-        if: ${{ env.GPG_PRIVATE_KEY != '' }}
+        if: ${{ !inputs.allow_newer_desktop_latest }}
         run: node scripts/update-apt-repo.cjs "$VERSION" "${{ steps.paths.outputs.deb }}"
 
-      - name: Verify download delivery (R2 + APT + Worker)
+      - name: Verify download delivery (R2 + optional APT + Worker)
         working-directory: mem-backbone
         # The verify script is read-only and idempotent, but it probes
         # objects that were uploaded to R2 only seconds earlier. The very
@@ -1973,8 +1984,10 @@ jobs:
         run: |
           set -euo pipefail
           scope='latest,latest-redirect,direct,update'
-          if [[ -n "${GPG_PRIVATE_KEY:-}" ]]; then
+          health_scope='latest'
+          if [[ "${{ inputs.allow_newer_desktop_latest }}" != "true" ]]; then
             scope="${scope},apt"
+            health_scope="${health_scope},apt"
           fi
 
           # Let the just-uploaded R2 objects propagate to the edge before the
@@ -1989,7 +2002,7 @@ jobs:
             export VERIFY_RELEASE_VERSION="$VERSION" VERIFY_SCOPE="$scope"
             export VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-rpm,linux-appimage"
             export VERIFY_ALLOW_NEWER_LATEST="${{ inputs.allow_newer_desktop_latest }}"
-            if timeout -k 10s 90s node scripts/verify-download-delivery.mjs &&
+            if VERIFY_SCOPE="$health_scope" timeout -k 10s 90s node scripts/verify-download-delivery.mjs &&
                timeout -k 10s 90s node ../scripts/verify-ga-delivery.mjs; then
               echo "::endgroup::"
               echo "✅ Download delivery verified on attempt $i."

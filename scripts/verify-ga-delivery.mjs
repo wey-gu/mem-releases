@@ -51,6 +51,37 @@ function assertArtifactUrl(value, host, version, file, label) {
     `${label}: expected /app/${version}/${file}, got ${url.pathname}`);
 }
 
+export async function verifyVersionPolicy({
+  expectedVersion,
+  allowNewerLatest = false,
+  baseUrl = 'https://backbone-mem.nowledge.co',
+  fetcher = fetch,
+}) {
+  requireCondition(/^\d+\.\d+\.\d+$/.test(expectedVersion || ''),
+    'VERIFY_RELEASE_VERSION must be a clean semver');
+  const response = await fetcher(`${baseUrl.replace(/\/+$/, '')}/latest?platform=mac`, {
+    headers: BROWSER_HEADERS,
+    redirect: 'manual',
+  });
+  if (response.status === 404 && !allowNewerLatest) {
+    console.log(`Preflight: no prior mac GA; publishing ${expectedVersion}`);
+    return;
+  }
+  requireCondition(response.status === 200,
+    `Preflight latest mac: expected 200, got ${response.status}`);
+  const body = await response.json();
+  requireCondition(typeof body.version === 'string', 'Preflight latest mac: missing version');
+  const order = compareVersions(body.version, expectedVersion);
+  if (allowNewerLatest) {
+    requireCondition(order > 0,
+      `Preflight older-patch mode requires live latest newer than ${expectedVersion}, got ${body.version}`);
+  } else {
+    requireCondition(order <= 0,
+      `Preflight refuses ${expectedVersion} behind live latest ${body.version}; use an explicit older-patch plan`);
+  }
+  console.log(`Preflight version policy: GA=${expectedVersion}, live latest=${body.version}, older-patch=${allowNewerLatest}`);
+}
+
 export async function verifyGADelivery({
   expectedVersion,
   platforms,
@@ -147,14 +178,18 @@ export async function verifyGADelivery({
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  verifyGADelivery({
+  const options = {
     expectedVersion: process.env.VERIFY_RELEASE_VERSION,
     platforms: (process.env.VERIFY_PLATFORMS || '').split(',').map((value) => value.trim()).filter(Boolean),
     scope: (process.env.VERIFY_SCOPE || '').split(',').map((value) => value.trim()).filter(Boolean),
     allowNewerLatest: process.env.VERIFY_ALLOW_NEWER_LATEST === 'true',
     baseUrl: process.env.VERIFY_BASE_URL,
     downloadHost: process.env.EXPECT_CUSTOM_DOMAIN,
-  }).catch((error) => {
+  };
+  const run = process.argv.includes('--preflight')
+    ? verifyVersionPolicy(options)
+    : verifyGADelivery(options);
+  run.catch((error) => {
     console.error(`Exact GA delivery failed: ${error.message}`);
     process.exitCode = 1;
   });
