@@ -277,5 +277,7 @@ For clean GA tags, `publish=false, build_vulkan=true` is build-only: the
 Vulkan bundles remain Actions artifacts and do not create a GH Release draft.
 When `publish=true`, optional Vulkan assets attach only while the Release is
 draft; an existing asset name fails rather than replacing a published
-attachment. Core GA attachment follows the same create-only rule. Inspect a
-partial draft and its assets before any retry.
+attachment. Core GA attachment reconciles each draft asset by SHA-256:
+identical existing bytes are skipped, missing files are uploaded, and
+different bytes stop the run. Inspect a partial draft and its assets before
+any retry.
