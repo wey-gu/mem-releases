@@ -447,15 +447,16 @@ jobs:
       - name: Report partial promote
         if: failure()
         run: |
-          echo "::error::PARTIAL PROMOTE for ${GA}. Some surfaces are already live."
+          echo "::error::FAILED PROMOTE for ${GA}. Check which surfaces are already live."
           {
-            echo "### Partial promote: ${GA}"
+            echo "### Promote failed; inspect partial state: ${GA}"
             echo ""
-            echo "Every surface BEFORE the failing step is already public and does"
-            echo "not roll back:"
+            echo "Check which steps completed. A successful public upload does"
+            echo "not roll back after a later failure:"
             echo ""
-            echo "- R2 / download page (app/${GA}/ artifacts)"
-            echo "- APT repo"
+            echo "- R2 / download page (app/${GA}/ artifacts, if uploaded)"
+            echo "- APT repo (if its update step ran)"
+            echo "- GH Release draft (if its creation step ran)"
             echo ""
             echo "Still to confirm or finish by hand:"
             echo ""
@@ -473,7 +474,6 @@ jobs:
             echo "- R2 prefix:      app/${GA}/"
             echo "- GH release tag: v${GA} (draft on ${{ github.repository }})"
             echo "- Desktop latest: dynamically discovered from R2 (verified)"
-            echo "- Docker :latest: ${{ inputs.push_latest }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   recap:

@@ -2043,12 +2043,12 @@ jobs:
       - name: Report partial publish
         if: failure()
         run: |
-          echo "::error::PARTIAL PUBLISH for ${VERSION}. Some surfaces are already live."
+          echo "::error::FAILED PUBLISH for ${VERSION}. Check which surfaces are already live."
           {
-            echo "### Partial publish: ${VERSION}"
+            echo "### Publish failed; inspect partial state: ${VERSION}"
             echo ""
-            echo "The publish job failed part-way. Every surface BEFORE the failing"
-            echo "step is already live and does not roll back:"
+            echo "The publish job failed. Check which steps completed; successful"
+            echo "public uploads do not roll back after a later failure:"
             echo ""
             echo "- R2 / download page (artifacts may already be downloadable)"
             echo "- APT repo (if its update step ran)"
