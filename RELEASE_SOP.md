@@ -273,6 +273,9 @@ preflight fails before public mutation if `GPG_PRIVATE_KEY` is absent.
 While RPM promotion is deferred, direct GA's all-platform older-patch preflight
 also fails closed because the live RPM latest can differ from the six core
 platforms. Use the RC promotion flow for an approved older out-of-band patch.
-Optional `build_vulkan=true` attaches missing manual-download assets only;
-rerunning it with an existing asset name fails rather than replacing a
-published attachment.
+For clean GA tags, `publish=false, build_vulkan=true` is build-only: the
+Vulkan bundles remain Actions artifacts and do not create a GH Release draft.
+When `publish=true`, optional Vulkan assets attach only while the Release is
+draft; an existing asset name fails rather than replacing a published
+attachment. Core GA attachment follows the same create-only rule. Inspect a
+partial draft and its assets before any retry.

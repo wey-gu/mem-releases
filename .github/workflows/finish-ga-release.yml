@@ -204,7 +204,7 @@ jobs:
             echo "::error::v${GA} is published; refusing to replace its assets."
             exit 1
           fi
-          gh release upload "$TAG" -R "$REPO" --clobber \
+          gh release upload "$TAG" -R "$REPO" \
             "${{ steps.rename.outputs.dmg_arm }}" \
             "${{ steps.rename.outputs.dmg_x64 }}" \
             "${{ steps.rename.outputs.exe_win }}" \

@@ -88,6 +88,22 @@ class GAPromotionContractTest(unittest.TestCase):
                 )[0]
                 self.assertIn('gh release upload "$TAG" -R "$REPO"', section)
                 self.assertNotIn("--clobber", section)
+                self.assertIn("if: ${{ needs.meta.outputs.is_dry_run == 'true' || needs.meta.outputs.run_publish == 'true' }}", section)
+                attach = section.split("Attach -vulkan", 1)[1]
+                self.assertLess(attach.index('--json isDraft --jq .isDraft'),
+                                attach.index('gh release upload "$TAG"'))
+
+    def test_core_ga_attachment_requires_draft_and_never_clobbers(self):
+        for name in ("promote-rc-to-ga.yml", "finish-ga-release.yml",
+                     "release-desktop.yml"):
+            with self.subTest(workflow=name):
+                workflow = (ROOT / ".github" / "workflows" / name).read_text()
+                attach = workflow.rsplit("- name: Create ", 1)[1].split(
+                    'gh release upload "$TAG"', 1
+                )[0]
+                self.assertIn('--json isDraft --jq .isDraft', attach)
+                upload = workflow.rsplit('gh release upload "$TAG"', 1)[1]
+                self.assertFalse(upload.lstrip().startswith(' -R "$REPO" --clobber'))
 
 
 if __name__ == "__main__":
