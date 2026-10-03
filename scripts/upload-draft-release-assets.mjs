@@ -32,7 +32,7 @@ function existingAsset(release, name) {
 }
 
 export async function reconcileDraftAssets({ tag, repo, files, gh = runGh,
-  digestFile = sha256File }) {
+  digestFile = sha256File, checkOnly = false }) {
   if (!tag || !repo || files.length === 0) throw new Error('tag, repo and files required');
   const names = files.map((file) => basename(file));
   if (new Set(names).size !== names.length) throw new Error('duplicate local asset names');
@@ -48,6 +48,7 @@ export async function reconcileDraftAssets({ tag, repo, files, gh = runGh,
       console.log(`${name}: identical asset already present; skipping`);
       continue;
     }
+    if (checkOnly) continue;
     try {
       // No --clobber: a concurrent upload may win, but cannot be deleted here.
       gh(['release', 'upload', tag, '-R', repo, file]);
@@ -65,8 +66,11 @@ export async function reconcileDraftAssets({ tag, repo, files, gh = runGh,
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [tag, repo, ...files] = process.argv.slice(2);
-  reconcileDraftAssets({ tag, repo, files }).catch((error) => {
+  const args = process.argv.slice(2);
+  const checkOnly = args[0] === '--check-only';
+  if (checkOnly) args.shift();
+  const [tag, repo, ...files] = args;
+  reconcileDraftAssets({ tag, repo, files, checkOnly }).catch((error) => {
     console.error(error);
     process.exitCode = 1;
   });

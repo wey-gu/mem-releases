@@ -276,8 +276,11 @@ platforms. Use the RC promotion flow for an approved older out-of-band patch.
 For clean GA tags, `publish=false, build_vulkan=true` is build-only: the
 Vulkan bundles remain Actions artifacts and do not create a GH Release draft.
 When `publish=true`, optional Vulkan assets attach only while the Release is
-draft; an existing asset name fails rather than replacing a published
-attachment. Core GA attachment reconciles each draft asset by SHA-256:
+draft and reconcile partial attachments by SHA-256. Core GA attachment uses
+the same rule:
 identical existing bytes are skipped, missing files are uploaded, and
 different bytes stop the run. Inspect a partial draft and its assets before
-any retry.
+any retry. Normal RC promotion and direct GA require their R2 version prefix
+to be empty before the first upload; a partial R2 publication must use an
+explicit recovery path rather than overwrite the same version in a normal
+rerun.

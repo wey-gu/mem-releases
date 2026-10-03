@@ -12,6 +12,8 @@ on:
       - scripts/test_verify_ga_delivery.mjs
       - scripts/upload-draft-release-assets.mjs
       - scripts/test_upload_draft_release_assets.mjs
+      - scripts/assert-fresh-r2-version.mjs
+      - scripts/test_assert_fresh_r2_version.mjs
   push:
     branches: [main]
     paths:
@@ -24,6 +26,8 @@ on:
       - scripts/test_verify_ga_delivery.mjs
       - scripts/upload-draft-release-assets.mjs
       - scripts/test_upload_draft_release_assets.mjs
+      - scripts/assert-fresh-r2-version.mjs
+      - scripts/test_assert_fresh_r2_version.mjs
 
 permissions:
   contents: read
@@ -42,3 +46,5 @@ jobs:
         run: node --test scripts/test_verify_ga_delivery.mjs
       - name: Check draft Release asset reconciliation
         run: node --test scripts/test_upload_draft_release_assets.mjs
+      - name: Check fresh R2 version gate
+        run: node --test scripts/test_assert_fresh_r2_version.mjs

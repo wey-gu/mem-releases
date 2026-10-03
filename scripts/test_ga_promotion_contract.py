@@ -86,12 +86,11 @@ class GAPromotionContractTest(unittest.TestCase):
                 section = workflow.split(f"\n  {job}:\n", 1)[1].split(
                     f"\n  {next_job}:\n", 1
                 )[0]
-                self.assertIn('gh release upload "$TAG" -R "$REPO"', section)
-                self.assertNotIn("--clobber", section)
+                self.assertIn('node release-tools/scripts/upload-draft-release-assets.mjs "$TAG" "$REPO"', section)
+                self.assertIn('path: release-tools', section)
+                self.assertNotIn('gh release upload "$TAG"', section)
                 self.assertIn("if: ${{ needs.meta.outputs.is_dry_run == 'true' || needs.meta.outputs.run_publish == 'true' }}", section)
-                attach = section.split("Attach -vulkan", 1)[1]
-                self.assertLess(attach.index('--json isDraft --jq .isDraft'),
-                                attach.index('gh release upload "$TAG"'))
+                self.assertIn('|| gh release view "$TAG" -R "$REPO" >/dev/null', section)
 
     def test_core_ga_attachment_uses_draft_reconciliation(self):
         for name in ("promote-rc-to-ga.yml", "finish-ga-release.yml",
@@ -102,6 +101,12 @@ class GAPromotionContractTest(unittest.TestCase):
                               workflow)
                 self.assertIn('|| gh release view "$TAG" -R "$REPO" >/dev/null',
                               workflow)
+                if name != "finish-ga-release.yml":
+                    publish = workflow.split("\n  promote-desktop:\n" if name.startswith("promote") else "\n  publish:\n", 1)[1]
+                    self.assertLess(publish.index('node scripts/assert-fresh-r2-version.mjs'),
+                                    publish.index('node scripts/upload-draft-release-assets.mjs --check-only'))
+                    self.assertLess(publish.index('node scripts/upload-draft-release-assets.mjs --check-only'),
+                                    publish.index('name: Upload to Cloudflare R2'))
 
 
 if __name__ == "__main__":

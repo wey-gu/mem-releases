@@ -1437,10 +1437,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - uses: actions/checkout@v4
+        with:
+          path: release-tools
+          persist-credentials: false
+
       # Attach DIRECTLY to the GH Release as a manual download. This is the
       # ONLY distribution path for -vulkan: it never touches R2, APT, or the
-      # auto-updater feed. Uploads are create-only: a rerun with the same
-      # asset name must fail rather than delete a published download.
+      # auto-updater feed. Draft assets are reconciled by SHA-256; a rerun
+      # skips identical bytes and refuses different bytes.
       # A competing job may create the draft after our first view. A failed
       # create is followed by another view before proceeding. We
       # MATCH the release flavor those jobs use so we never accidentally
@@ -1465,11 +1470,8 @@ jobs:
               --notes "Desktop bundles for ${VERSION}." \
               || gh release view "$TAG" -R "$REPO" >/dev/null
           fi
-          if [[ "$(gh release view "$TAG" -R "$REPO" --json isDraft --jq .isDraft)" != "true" ]]; then
-            echo "::error::${TAG} is published; refusing to attach Vulkan assets."
-            exit 1
-          fi
-          gh release upload "$TAG" -R "$REPO" "${{ steps.locate.outputs.exe }}"
+          node release-tools/scripts/upload-draft-release-assets.mjs "$TAG" "$REPO" \
+            "${{ steps.locate.outputs.exe }}"
 
   build-linux-vulkan:
     needs: meta
@@ -1689,6 +1691,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - uses: actions/checkout@v4
+        with:
+          path: release-tools
+          persist-credentials: false
+
       # Attach DIRECTLY to the GH Release as manual downloads only (never R2 /
       # APT / auto-updater). See the Windows -vulkan job for the rationale.
       # NOTE for the lead: the AppImage self-contains libvulkan.so.1 (bundled
@@ -1715,11 +1722,7 @@ jobs:
               --notes "Desktop bundles for ${VERSION}." \
               || gh release view "$TAG" -R "$REPO" >/dev/null
           fi
-          if [[ "$(gh release view "$TAG" -R "$REPO" --json isDraft --jq .isDraft)" != "true" ]]; then
-            echo "::error::${TAG} is published; refusing to attach Vulkan assets."
-            exit 1
-          fi
-          gh release upload "$TAG" -R "$REPO" \
+          node release-tools/scripts/upload-draft-release-assets.mjs "$TAG" "$REPO" \
             "${{ steps.locate.outputs.deb }}" \
             "${{ steps.locate.outputs.appimage }}"
 
@@ -1976,6 +1979,30 @@ jobs:
             echo "appimg=${ROOT}/${APPIMG}"
             echo "rpm=${ROOT}/${RPM}"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Refuse an existing R2 GA version before public upload
+        run: node scripts/assert-fresh-r2-version.mjs "$VERSION" all
+
+      - name: Check draft asset identity before public upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$REPO" \
+              --title "Nowledge Mem ${VERSION}" --draft \
+              --notes "Desktop bundles for ${VERSION}. Source: nowledge-co/mem @ ${SOURCE_REF}." \
+              || gh release view "$TAG" -R "$REPO" >/dev/null
+          fi
+          node scripts/upload-draft-release-assets.mjs --check-only "$TAG" "$REPO" \
+            "${{ steps.paths.outputs.dmg_arm }}" \
+            "${{ steps.paths.outputs.dmg_x64 }}" \
+            "${{ steps.paths.outputs.exe_win }}" \
+            "${{ steps.paths.outputs.deb }}" \
+            "${{ steps.paths.outputs.appimg }}" \
+            "${{ steps.paths.outputs.rpm }}"
 
       - name: Upload to Cloudflare R2
         working-directory: mem-backbone
