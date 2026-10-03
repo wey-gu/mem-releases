@@ -270,3 +270,9 @@ exact APT check so an older version cannot replace its stable candidate. A
 failure after upload is a partial public release even if the draft is absent.
 Do not deploy the Backbone Worker merely to set a release version. Normal GA
 preflight fails before public mutation if `GPG_PRIVATE_KEY` is absent.
+While RPM promotion is deferred, direct GA's all-platform older-patch preflight
+also fails closed because the live RPM latest can differ from the six core
+platforms. Use the RC promotion flow for an approved older out-of-band patch.
+Optional `build_vulkan=true` attaches missing manual-download assets only;
+rerunning it with an existing asset name fails rather than replacing a
+published attachment.

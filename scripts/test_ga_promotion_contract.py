@@ -76,6 +76,19 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn("node ../scripts/verify-ga-delivery.mjs", publish)
         self.assertIn("uses: actions/checkout@v4", publish)
 
+    def test_optional_vulkan_attachments_never_replace_existing_assets(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "release-desktop.yml"
+        ).read_text()
+        for job, next_job in (("build-windows-vulkan", "build-linux-vulkan"),
+                              ("build-linux-vulkan", "prerelease-prepare")):
+            with self.subTest(job=job):
+                section = workflow.split(f"\n  {job}:\n", 1)[1].split(
+                    f"\n  {next_job}:\n", 1
+                )[0]
+                self.assertIn('gh release upload "$TAG" -R "$REPO"', section)
+                self.assertNotIn("--clobber", section)
+
 
 if __name__ == "__main__":
     unittest.main()

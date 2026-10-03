@@ -1439,7 +1439,8 @@ jobs:
 
       # Attach DIRECTLY to the GH Release as a manual download. This is the
       # ONLY distribution path for -vulkan: it never touches R2, APT, or the
-      # auto-updater feed. `--clobber` makes a rerun idempotent, and
+      # auto-updater feed. Uploads are create-only: a rerun with the same
+      # asset name must fail rather than delete a published download.
       # `view || create` tolerates this job racing ahead of the
       # publish / pre-release preparation jobs by creating the tag if needed. We
       # MATCH the release flavor those jobs use so we never accidentally
@@ -1460,7 +1461,7 @@ jobs:
             "${FLAGS[@]}" \
             --title "Nowledge Mem ${VERSION}" \
             --notes "Desktop bundles for ${VERSION}."
-          gh release upload "$TAG" -R "$REPO" --clobber "${{ steps.locate.outputs.exe }}"
+          gh release upload "$TAG" -R "$REPO" "${{ steps.locate.outputs.exe }}"
 
   build-linux-vulkan:
     needs: meta
@@ -1702,7 +1703,7 @@ jobs:
             "${FLAGS[@]}" \
             --title "Nowledge Mem ${VERSION}" \
             --notes "Desktop bundles for ${VERSION}."
-          gh release upload "$TAG" -R "$REPO" --clobber \
+          gh release upload "$TAG" -R "$REPO" \
             "${{ steps.locate.outputs.deb }}" \
             "${{ steps.locate.outputs.appimage }}"
 
