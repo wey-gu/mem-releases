@@ -14,6 +14,8 @@ on:
       - scripts/test_upload_draft_release_assets.mjs
       - scripts/assert-fresh-r2-version.mjs
       - scripts/test_assert_fresh_r2_version.mjs
+      - package.json
+      - package-lock.json
   push:
     branches: [main]
     paths:
@@ -28,6 +30,8 @@ on:
       - scripts/test_upload_draft_release_assets.mjs
       - scripts/assert-fresh-r2-version.mjs
       - scripts/test_assert_fresh_r2_version.mjs
+      - package.json
+      - package-lock.json
 
 permissions:
   contents: read
@@ -40,6 +44,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Check GA promotion boundary
         run: python3 -m unittest discover -s scripts -p test_ga_promotion_contract.py
       - name: Check exact GA delivery gate

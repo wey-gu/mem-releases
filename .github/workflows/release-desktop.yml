@@ -174,22 +174,36 @@ jobs:
           fi
           VERIFY_RELEASE_VERSION="$VERSION" node scripts/verify-ga-delivery.mjs --preflight
 
-      - name: Refuse published GA before optional Vulkan jobs
+      - name: Refuse an existing GA Release before build and Vulkan jobs
         if: ${{ steps.resolve.outputs.run_publish == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.resolve.outputs.version }}
         run: |
           set -euo pipefail
-          if draft="$(gh api "repos/${{ github.repository }}/releases/tags/v${VERSION}" --jq .draft 2>release-lookup.err)"; then
-            if [[ "$draft" != "true" ]]; then
-              echo "::error::v${VERSION} is already published; direct GA must not replace its assets."
-              exit 1
-            fi
-          elif ! grep -q 'HTTP 404' release-lookup.err; then
-            cat release-lookup.err >&2
+          releases="$(gh release list -R "${{ github.repository }}" --limit 1000 --json tagName)"
+          if [[ "$(jq length <<<"$releases")" -ge 1000 ]]; then
+            echo "::error::GA Release inventory is truncated; refusing direct GA."
             exit 1
           fi
+          if jq -e --arg tag "v${VERSION}" '.[] | select(.tagName == $tag)' <<<"$releases" >/dev/null; then
+            echo "::error::v${VERSION} already has a Release; use explicit recovery rather than a rebuild."
+            exit 1
+          fi
+
+      - name: Install release-owned R2 preflight dependency
+        if: ${{ steps.resolve.outputs.run_publish == 'true' }}
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Refuse existing R2 GA objects before build and Vulkan jobs
+        if: ${{ steps.resolve.outputs.run_publish == 'true' }}
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: node scripts/assert-fresh-r2-version.mjs "$VERSION" all
 
   # -----------------------------------------------------------------------
   # NOTE: the former NON-GATING `rust-backend` companion job (strangler
@@ -1980,30 +1994,6 @@ jobs:
             echo "rpm=${ROOT}/${RPM}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Refuse an existing R2 GA version before public upload
-        run: node scripts/assert-fresh-r2-version.mjs "$VERSION" all
-
-      - name: Check draft asset identity before public upload
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          TAG="v${VERSION}"
-          if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
-            gh release create "$TAG" -R "$REPO" \
-              --title "Nowledge Mem ${VERSION}" --draft \
-              --notes "Desktop bundles for ${VERSION}. Source: nowledge-co/mem @ ${SOURCE_REF}." \
-              || gh release view "$TAG" -R "$REPO" >/dev/null
-          fi
-          node scripts/upload-draft-release-assets.mjs --check-only "$TAG" "$REPO" \
-            "${{ steps.paths.outputs.dmg_arm }}" \
-            "${{ steps.paths.outputs.dmg_x64 }}" \
-            "${{ steps.paths.outputs.exe_win }}" \
-            "${{ steps.paths.outputs.deb }}" \
-            "${{ steps.paths.outputs.appimg }}" \
-            "${{ steps.paths.outputs.rpm }}"
-
       - name: Upload to Cloudflare R2
         working-directory: mem-backbone
         run: |
@@ -2015,11 +2005,8 @@ jobs:
           node scripts/upload-package.cjs "$VERSION" linux     "${{ steps.paths.outputs.appimg }}"
           node scripts/upload-package.cjs "$VERSION" linux     "${{ steps.paths.outputs.rpm }}"
 
-      # Why this step exists: if the publish job runs more than once for
-      # the same version (e.g. a downstream step failed and we re-ran),
-      # the second upload overwrites R2 but CDN edges that cached the
-      # first upload keep serving the OLD bytes for the cache-control's
-      # max-age (1 year). Even the cache-control fix landing in
+      # Why this step exists: CDN edges may retain an earlier response for
+      # a versioned key. The cache-control fix landing in
       # mem-backbone (drop `immutable`) only makes new edges revalidate
       # on ETag — already-warmed edges still hold their copy until they
       # naturally evict. Purging eliminates that race entirely.

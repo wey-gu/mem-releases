@@ -209,6 +209,13 @@ If Docker, R2, and APT succeeded but the GA draft is missing, use
 verifies the core platforms and APT before creating the draft; it does not
 deploy the Backbone Worker or promote the separately staged RPM. Do not
 repeat the full promote merely to create the missing draft.
+If any core R2 object or the APT candidate is missing or wrong, withhold that
+GA: `finish-ga-release` will reject it, and normal promote refuses the occupied
+R2 keys. Record the exact keys, the updater response, and the failed run;
+prepare a higher-version RC from the corrected source, smoke its published
+artifacts, then promote that version. Do not reuse the incomplete GA tag or
+publish its draft. A release operator must decide how to clean up the
+incomplete version's R2 keys and CDN cache after the replacement is verified.
 
 For an older out-of-band GA, desktop R2 discovery may correctly remain on a
 newer version. Only in that case set `allow_newer_desktop_latest=true`; a
@@ -280,7 +287,8 @@ draft and reconcile partial attachments by SHA-256. Core GA attachment uses
 the same rule:
 identical existing bytes are skipped, missing files are uploaded, and
 different bytes stop the run. Inspect a partial draft and its assets before
-any retry. Normal RC promotion and direct GA require their R2 version prefix
-to be empty before the first upload; a partial R2 publication must use an
-explicit recovery path rather than overwrite the same version in a normal
-rerun.
+any retry. Normal RC promotion and direct GA require their target R2 keys and
+GA Release tag to be unused before any parallel publication job starts. If a
+direct GA partially wrote R2, withhold its draft and cut a higher-version RC
+after inspection; `finish-ga-release` is for a validated RC promotion, not a
+direct rebuild.

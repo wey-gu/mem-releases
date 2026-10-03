@@ -68,15 +68,6 @@ test('duplicate local asset names are refused', async () => {
     ['/tmp/one.dmg', '/other/one.dmg'])), /duplicate local asset names/);
 });
 
-test('preflight checks existing draft digests without uploading missing assets', async () => {
-  const { state, gh } = fixture({ assets: [{ name: 'one.dmg', digest: 'sha256:one' }] });
-  await reconcileDraftAssets({ ...options(gh), checkOnly: true });
-  assert.deepEqual(state.uploads, []);
-  state.assets[0].digest = 'sha256:different';
-  await assert.rejects(reconcileDraftAssets({ ...options(gh), checkOnly: true }),
-    /SHA-256 differs/);
-});
-
 test('uploaded asset is read back and checked by digest', async () => {
   const { gh } = fixture({ uploadDigest: 'sha256:wrong' });
   await assert.rejects(reconcileDraftAssets(options(gh, ['/tmp/one.dmg'])),

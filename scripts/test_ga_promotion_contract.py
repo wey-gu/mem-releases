@@ -32,18 +32,21 @@ class GAPromotionContractTest(unittest.TestCase):
                 self.assertIn("node scripts/verify-ga-delivery.mjs --preflight", publish)
                 self.assertIn('VERIFY_SCOPE="$health_scope" timeout', publish)
                 self.assertIn("health_scope='latest'", publish)
-                self.assertIn('name: Refuse to overwrite a published GA Release', workflow)
+                self.assertIn('name: Refuse an existing GA Release', workflow)
 
         promote = (ROOT / ".github" / "workflows" / "promote-rc-to-ga.yml").read_text()
         validate = promote.split("\n  validate:\n", 1)[1].split("\n  promote-docker:\n", 1)[0]
         self.assertIn('Pre-flight desktop policy before any promotion job', validate)
         self.assertIn('node scripts/verify-ga-delivery.mjs --preflight', validate)
         self.assertIn('Older desktop GA cannot move Docker :latest', validate)
+        self.assertIn('node scripts/assert-fresh-r2-version.mjs "$GA" core', validate)
+        self.assertIn('gh release list -R', validate)
 
         direct = (ROOT / ".github" / "workflows" / "release-desktop.yml").read_text()
         meta = direct.split("\n  meta:\n", 1)[1].split("\n  build-macos-arm64:\n", 1)[0]
         self.assertIn('Pre-flight GA policy before build and optional Vulkan jobs', meta)
-        self.assertIn('Refuse published GA before optional Vulkan jobs', meta)
+        self.assertIn('Refuse an existing GA Release before build and Vulkan jobs', meta)
+        self.assertIn('node scripts/assert-fresh-r2-version.mjs "$VERSION" all', meta)
 
     def test_partial_recovery_does_not_require_deferred_rpm(self):
         workflow = (
@@ -102,11 +105,10 @@ class GAPromotionContractTest(unittest.TestCase):
                 self.assertIn('|| gh release view "$TAG" -R "$REPO" >/dev/null',
                               workflow)
                 if name != "finish-ga-release.yml":
-                    publish = workflow.split("\n  promote-desktop:\n" if name.startswith("promote") else "\n  publish:\n", 1)[1]
-                    self.assertLess(publish.index('node scripts/assert-fresh-r2-version.mjs'),
-                                    publish.index('node scripts/upload-draft-release-assets.mjs --check-only'))
-                    self.assertLess(publish.index('node scripts/upload-draft-release-assets.mjs --check-only'),
-                                    publish.index('name: Upload to Cloudflare R2'))
+                    gate = workflow.split("\n  validate:\n" if name.startswith("promote") else "\n  meta:\n", 1)[1]
+                    gate = gate.split("\n  promote-docker:\n" if name.startswith("promote") else "\n  build-macos-arm64:\n", 1)[0]
+                    self.assertIn('node scripts/assert-fresh-r2-version.mjs', gate)
+                    self.assertIn('gh release list -R', gate)
 
 
 if __name__ == "__main__":

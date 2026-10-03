@@ -1,7 +1,5 @@
 // Normal GA promotion must not overwrite a version already partly public in R2.
 // A partial publication needs the explicit recovery path and operator readback.
-import { createRequire } from 'node:module';
-import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const CORE_FILES = [
@@ -35,8 +33,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const [version, mode] = process.argv.slice(2);
   try {
     if (!['core', 'all'].includes(mode)) throw new Error('Usage: assert-fresh-r2-version.mjs VERSION core|all');
-    const require = createRequire(resolve('mem-backbone/package.json'));
-    const { S3Client, HeadObjectCommand } = require('@aws-sdk/client-s3');
+    const { S3Client, HeadObjectCommand } = await import('@aws-sdk/client-s3');
     const bucket = process.env.R2_BUCKET_NAME;
     if (!bucket || !process.env.CLOUDFLARE_ACCOUNT_ID || !process.env.R2_ACCESS_KEY_ID
       || !process.env.R2_SECRET_ACCESS_KEY) throw new Error('R2 credentials and bucket are required');
