@@ -26,9 +26,11 @@ separate, ordered changes:
    with `git cherry-pick -x`, in dependency order. Never merge `main` into the
    release branch or pick unrelated product commits.
 5. Record the resulting release-branch head as `RELEASE_SHA`. Run every source
-   preflight and native-link check against `RELEASE_SHA`; create RC and GA tags
-   only from that commit. A tag does not need to be a Git ancestor of `main`;
-   it must have auditable `-x` provenance to the reviewed `main` metadata.
+   preflight against `RELEASE_SHA`. Observe the merge-triggered
+   `ci/mem-native-link-arm64` result and stop only if it has failed; do not
+   manually trigger it for a release. Create RC and GA tags only from the
+   resulting commit. A tag does not need to be a Git ancestor of `main`; it
+   must have auditable `-x` provenance to the reviewed `main` metadata.
 6. After GA, date the Changelog entry and merge its website and parent gitlink
    updates to `main`. Run the release-history check for patch-equivalence and
    `-x` provenance, rather than an ancestor-only check.
