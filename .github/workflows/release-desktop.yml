@@ -222,7 +222,7 @@ jobs:
 
   build-macos-arm64:
     needs: meta
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 180
     env:
       VERSION: ${{ needs.meta.outputs.version }}
@@ -346,12 +346,12 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
-      # Defensive: on the macos-14 arm64 runner the rustup proxy ends up
+      # Defensive: on an arm64 macOS runner the rustup proxy ends up
       # routing `cargo` to `rustup-init` when the toolchain target matches
       # the host arch (seen 2026-05-14 — `cargo metadata` printed
       # rustup-init's help text). Pin the default to the source-declared Rust
       # version and print the resolved toolchain so failures are diagnosable.
-      - name: Pin default toolchain (workaround for macos-14 arm64 proxy)
+      - name: Pin default toolchain (workaround for arm64 rustup proxy)
         run: |
           set -euo pipefail
           rustup default 1.98.1
