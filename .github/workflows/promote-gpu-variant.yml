@@ -61,6 +61,11 @@ jobs:
           ref: v${{ inputs.rc_tag }}
           submodules: false
 
+      - name: Checkout release tooling
+        uses: actions/checkout@v4
+        with:
+          path: release-tools
+
       - name: Resolve source commit
         id: sha
         run: echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -78,6 +83,16 @@ jobs:
               git submodule update --init --depth 1 "$sm"
             done
           fi
+
+      - name: Prepare exact-source Docker recipes
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_SHA="${{ steps.sha.outputs.source_sha }}"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          python3 release-tools/scripts/prepare_docker_recipes.py \
+            --source-sha "$SOURCE_SHA" \
+            --output "$RUNNER_TEMP/nmem-dockerfiles"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -97,7 +112,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: nowledge-graph/docker/Dockerfile.rust.${{ inputs.variant }}
+          file: ${{ runner.temp }}/nmem-dockerfiles/Dockerfile.rust.${{ inputs.variant }}
           platforms: linux/amd64
           build-args: |
             NMEM_BUILD_SHA_FULL=${{ steps.sha.outputs.source_sha }}
