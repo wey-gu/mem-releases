@@ -18,6 +18,7 @@ function harness({ draft = true, stale = false, newer = false, sourceDate = date
       if (body.make_latest === 'true') latest = { ...release };
       return release;
     }
+    if (path.endsWith('/environments/release-publish')) return { can_admins_bypass: false, protection_rules: [{ type: 'required_reviewers', prevent_self_review: true, reviewers: [{ type: 'User' }] }] };
     if (path.endsWith('/releases/latest')) return { ...latest };
     if (path.includes('/contents/')) return { sha: 'blob', content: Buffer.from(`## [${version}] - ${sourceDate}\n\nExisting items\n`).toString('base64') };
     return { ...release };
@@ -28,7 +29,7 @@ function harness({ draft = true, stale = false, newer = false, sourceDate = date
     return new Response(JSON.stringify({ found: true, version: selected, date: selected === version ? stale || release.draft ? 'unreleased' : date : '2026-10-05', title: 'GA notes', release_notes: '- Changed' }),
       { headers: { 'x-changelog-publication-source': 'github-releases' } });
   };
-  return { api, fetcher, changes, release, publish: true, attempts: 1, delay: 0, sleep: async () => {} };
+  return { api, fetcher, changes, release, publish: true, writeToken: 'test-only', attempts: 1, delay: 0, sleep: async () => {} };
 }
 
 test('publishes once, derives UTC date, verifies both routes and engineering record', async () => {
@@ -88,8 +89,8 @@ test('publication with a lost response is read back without a second publish', a
 });
 
 test('engineering metadata is required even when website publication is correct', async () => {
-  const h = harness({ sourceDate: 'unreleased' });
-  await assert.rejects(finalize(version, { ...h, writeToken: '' }), /Engineering date is pending/);
+  const h = harness({ draft: false, sourceDate: 'unreleased' });
+  await assert.rejects(finalize(version, { ...h, publish: false, writeToken: '' }), /Engineering date is pending/);
 });
 
 test('reuse an existing date-only engineering PR without changing it', async () => {
@@ -187,4 +188,21 @@ test('an existing metadata branch with unrelated files is left untouched', async
   };
   await assert.rejects(finalize(version, { ...h, writeToken: 'test-only' }), /contains unrelated files/);
   assert.equal(h.changes.filter(x => x.path.includes('repos/nowledge-co/mem')).length, 0);
+});
+
+test('missing approval protection stops before any production mutation', async () => {
+  const h = harness();
+  const api = h.api;
+  h.api = async (...args) => args[1].endsWith('/environments/release-publish')
+    ? { protection_rules: [], can_admins_bypass: true } : api(...args);
+  await assert.rejects(preflight(version, h), /must require reviewers/);
+  await assert.rejects(finalize(version, h), /must require reviewers/);
+  assert.equal(h.changes.length, 0);
+});
+
+test('missing metadata credential stops before distribution or draft publication', async () => {
+  const h = harness();
+  await assert.rejects(preflight(version, { ...h, writeToken: '' }), /required before distribution/);
+  await assert.rejects(finalize(version, { ...h, writeToken: '' }), /required before publishing/);
+  assert.equal(h.changes.length, 0);
 });

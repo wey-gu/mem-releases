@@ -70,8 +70,18 @@ async function notes(version, fetcher, query = `version=${version}`, expectedDat
   return result;
 }
 
-export async function preflight(version, { api = ghApi, fetcher = fetch, allowNewer = false } = {}) {
+async function requireProtectedPublication(api) {
+  const environment = await api('GET', `repos/${REPO}/environments/release-publish`);
+  const approval = environment.protection_rules?.find(rule => rule.type === 'required_reviewers');
+  if (!approval?.reviewers?.length || approval.prevent_self_review !== true || environment.can_admins_bypass !== false) {
+    throw new Error('release-publish must require reviewers, prevent self-review, and disable admin bypass before production mutation');
+  }
+}
+
+export async function preflight(version, { api = ghApi, fetcher = fetch, allowNewer = false, writeToken = process.env.MEM_METADATA_TOKEN } = {}) {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Expected a clean GA version');
+  await requireProtectedPublication(api);
+  if (!writeToken) throw new Error('MEM_METADATA_TOKEN is required before distribution so engineering archival can be prepared');
   const latest = await latestRelease(api);
   if (latest && compareVersions(latest.tag_name, version) > 0 && !allowNewer) {
     throw new Error('A newer GA is already latest; refusing an older publication');
@@ -136,6 +146,8 @@ export async function finalize(version, {
   checkEngineering = true,
 } = {}) {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Expected a clean GA version');
+  await requireProtectedPublication(api);
+  if (publish && !writeToken) throw new Error('MEM_METADATA_TOKEN is required before publishing a draft');
   const path = `repos/${REPO}/releases/tags/v${version}`;
   let release = await api('GET', path);
   const latest = await latestRelease(api);
@@ -192,6 +204,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const [mode, version, allowNewer = 'false'] = process.argv.slice(2);
   try {
     if (!['preflight', 'publish', 'finalize'].includes(mode)) throw new Error('Usage: finalize-ga-release.mjs preflight|publish|finalize VERSION [allow-newer-latest]');
+    if (mode !== 'preflight' && (process.env.GITHUB_ACTIONS !== 'true' || process.env.GITHUB_REPOSITORY !== REPO)) throw new Error('Run the approved release-publish workflow for production mutations');
     if (!['true', 'false'].includes(allowNewer)) throw new Error('allow-newer-latest must be true or false');
     const result = mode === 'preflight'
       ? await preflight(version, { allowNewer: allowNewer === 'true' })

@@ -277,11 +277,12 @@ deploy the resolver through the approved canonical/carrier path and verify the
 preflight rejects an old deployment or unavailable release lookup.
 
 The finalizer also requires the exact engineering date on `nowledge-co/mem`
-`main`. `MEM_REPO_TOKEN` remains read-only. An optional separately scoped
+`main`. `MEM_REPO_TOKEN` remains read-only. A separately scoped
 `MEM_METADATA_TOKEN` (Contents and Pull requests write; Issues write for labels)
-can prepare a date-only PR, reuse an existing correction, and request `wey-gu`
-and `hawkingrei`. It never merges. Without this token, merge the engineering
-correction through the normal bot/review process. The run stays incomplete
+must be configured before distribution to prepare a date-only PR, reuse an existing correction, and request `wey-gu`
+and `hawkingrei`. It never merges. For an already-public release, recovery may omit this token after the engineering
+correction has merged through the normal bot/review process. New publication
+preflight rejects a missing token before any distribution. The run stays incomplete
 until `main` has the correct date; it reports the pending PR or missing token.
 
 If publication succeeded but website cache or engineering archival is pending,
@@ -297,8 +298,11 @@ All desktop publication/finalization jobs share a non-cancelling concurrency
 group. A newer GA prevents an older task from moving latest backward; explicit
 older-release mode preserves the newer latest. Website readback retries are
 bounded to six minutes. A failed finalizer means a partial public release,
-not permission to upload the same artifacts again. The `release-publish`
-environment does not prove approval unless its protection rules enforce it.
+not permission to upload the same artifacts again. The `release-publish` environment must enforce required reviewers, prevent
+self-review, and disable admin bypass. Both preflight and finalization read
+these settings and reject missing protection; the jobs wait for GitHub
+environment approval. CLI mutations run only within this repository's workflows.
+These release approvals do not replace the separate website staging/GO proof.
 
 Run the release-history check
 to prove the tagged release branch is patch-equivalent to its recorded `main`

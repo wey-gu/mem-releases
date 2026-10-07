@@ -28,7 +28,7 @@
 #     - uploads to Cloudflare R2 under the GA path (app/<ga>/)
 #     - updates the APT repo with the GA-named .deb
 #     - verifies the auto-updater's dynamic R2 discovery of <ga>
-#     - creates a draft GH Release v<ga> with the renamed assets
+#     - reconciles a draft, then finalizes GA publication and metadata
 #
 #   RPM:
 #     - is independently attached by promote-rpm-to-ga.yml after the RC RPM
@@ -51,9 +51,9 @@
 #        ga_tag = "0.8.4"
 #        push_latest = true
 #      Both docker and desktop promotion run in parallel.
-#   3. After it succeeds, the draft GH Release v<ga> holds the core desktop
-#      bundles. Once the RC RPM is available, run promote-rpm-to-ga.yml to
-#      attach it. Edit notes + publish manually after the intended assets land.
+#   3. The shared finalizer publishes only after delivery checks and reads back
+#      website/GitHub metadata. Merge its engineering date PR through the bot,
+#      then use finalize-ga-release.yml for published-only recovery.
 #
 # Notes
 # -----
@@ -112,6 +112,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read # Read release-publish protection before production mutation.
   contents: write
   packages: read
   id-token: write   # reserved for future signed attestations
@@ -162,6 +163,7 @@ jobs:
       - name: Require deployed changelog before any promotion job
         env:
           GH_TOKEN: ${{ github.token }}
+          MEM_METADATA_TOKEN: ${{ secrets.MEM_METADATA_TOKEN }}
           GA: ${{ steps.v.outputs.ga_tag }}
           ALLOW_NEWER: ${{ inputs.allow_newer_desktop_latest }}
         run: node scripts/finalize-ga-release.mjs preflight "$GA" "$ALLOW_NEWER"
@@ -344,6 +346,7 @@ jobs:
       - name: Check GA website metadata before distribution
         env:
           GH_TOKEN: ${{ github.token }}
+          MEM_METADATA_TOKEN: ${{ secrets.MEM_METADATA_TOKEN }}
           ALLOW_NEWER: ${{ inputs.allow_newer_desktop_latest || false }}
         run: node scripts/finalize-ga-release.mjs preflight "$GA" "$ALLOW_NEWER"
 
