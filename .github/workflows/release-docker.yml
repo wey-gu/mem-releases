@@ -48,6 +48,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: read
   id-token: write   # required by cosign keyless OIDC signing
   packages: read
@@ -61,6 +62,7 @@ jobs:
   meta:
     runs-on: ubuntu-latest
     outputs:
+      is_ga: ${{ steps.v.outputs.is_ga }}
       version: ${{ steps.v.outputs.version }}
       source_ref: ${{ steps.v.outputs.source_ref }}
       source_sha: ${{ steps.sha.outputs.source_sha }}
@@ -86,9 +88,26 @@ jobs:
           if [[ "$VERSION" == *-* || "$VERSION" == *.dev* ]]; then
             PUSH_LATEST="false"
           fi
+          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then IS_GA=true; else IS_GA=false; fi
+          echo "is_ga=$IS_GA" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION"        >> "$GITHUB_OUTPUT"
           echo "source_ref=$SOURCE_REF"  >> "$GITHUB_OUTPUT"
           echo "push_latest=$PUSH_LATEST" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          path: release-tools
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check GA metadata without production writes
+        if: ${{ steps.v.outputs.is_ga == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: node release-tools/scripts/finalize-ga-release.mjs preflight-readonly "$VERSION"
 
       # Resolve the source commit once, so both arch builds bake the same
       # build-provenance sha into nmem-server (the build context has no .git).
@@ -104,8 +123,28 @@ jobs:
       - id: sha
         run: echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  build-amd64:
+  ga-admission:
     needs: meta
+    if: ${{ needs.meta.outputs.is_ga == 'true' }}
+    environment: release-publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Qualify GA metadata before any image mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM_METADATA_TOKEN: ${{ secrets.MEM_METADATA_TOKEN }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: node scripts/finalize-ga-release.mjs preflight "$VERSION"
+
+  build-amd64:
+    needs: [meta, ga-admission]
+    if: ${{ !cancelled() && needs.meta.result == 'success' && (needs.meta.outputs.is_ga != 'true' || needs.ga-admission.result == 'success') }}
     runs-on: ubuntu-latest
     outputs:
       digest: ${{ steps.build.outputs.digest }}
@@ -115,7 +154,7 @@ jobs:
         with:
           repository: nowledge-co/mem
           token: ${{ secrets.MEM_REPO_TOKEN }}
-          ref: ${{ needs.meta.outputs.source_ref }}
+          ref: ${{ needs.meta.outputs.source_sha }}
           submodules: false
 
       - &checkout_release_tooling
@@ -177,7 +216,8 @@ jobs:
           cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:amd64,mode=max
 
   build-arm64:
-    needs: meta
+    needs: [meta, ga-admission]
+    if: ${{ !cancelled() && needs.meta.result == 'success' && (needs.meta.outputs.is_ga != 'true' || needs.ga-admission.result == 'success') }}
     runs-on: ubuntu-24.04-arm
     outputs:
       digest: ${{ steps.build.outputs.digest }}
@@ -187,7 +227,7 @@ jobs:
         with:
           repository: nowledge-co/mem
           token: ${{ secrets.MEM_REPO_TOKEN }}
-          ref: ${{ needs.meta.outputs.source_ref }}
+          ref: ${{ needs.meta.outputs.source_sha }}
           submodules: false
 
       - *checkout_release_tooling
@@ -241,11 +281,11 @@ jobs:
   # binary's runtime auto-detects the GPU and falls back to CPU, so the image is
   # usable without --gpus, just slower.
   build-cuda:
-    needs: meta
+    needs: [meta, ga-admission]
     # Build the ~3GB GPU image only on GA (push_latest=true → non-prerelease tag)
     # or a manual dispatch — NOT on every rc. rc-stage GPU verification is done
     # locally on a GPU host; the published `:cuda` tag is reserved for GA/on-demand.
-    if: ${{ needs.meta.outputs.push_latest == 'true' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ !cancelled() && needs.meta.result == 'success' && (needs.meta.outputs.is_ga != 'true' || needs.ga-admission.result == 'success') && (needs.meta.outputs.push_latest == 'true' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
@@ -253,7 +293,7 @@ jobs:
         with:
           repository: nowledge-co/mem
           token: ${{ secrets.MEM_REPO_TOKEN }}
-          ref: ${{ needs.meta.outputs.source_ref }}
+          ref: ${{ needs.meta.outputs.source_sha }}
           submodules: false
 
       - *checkout_release_tooling
@@ -304,11 +344,11 @@ jobs:
           cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:cuda-amd64,mode=max
 
   build-vulkan:
-    needs: meta
+    needs: [meta, ga-admission]
     # Vulkan GPU image (AMD/Intel via Mesa, NVIDIA via the Vulkan ICD). Same gate
     # as :cuda — GA or manual dispatch only, NOT every rc. Independent of the CPU
     # publish/manifest job (separate :<ver>-vulkan tag, never folded into :latest).
-    if: ${{ needs.meta.outputs.push_latest == 'true' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ !cancelled() && needs.meta.result == 'success' && (needs.meta.outputs.is_ga != 'true' || needs.ga-admission.result == 'success') && (needs.meta.outputs.push_latest == 'true' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
@@ -316,7 +356,7 @@ jobs:
         with:
           repository: nowledge-co/mem
           token: ${{ secrets.MEM_REPO_TOKEN }}
-          ref: ${{ needs.meta.outputs.source_ref }}
+          ref: ${{ needs.meta.outputs.source_sha }}
           submodules: false
 
       - *checkout_release_tooling
@@ -367,7 +407,8 @@ jobs:
           cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:vulkan-amd64,mode=max
 
   publish:
-    needs: [meta, build-amd64, build-arm64]
+    needs: [meta, ga-admission, build-amd64, build-arm64]
+    if: ${{ !cancelled() && needs.meta.result == 'success' && (needs.meta.outputs.is_ga != 'true' || needs.ga-admission.result == 'success') && needs.build-amd64.result == 'success' && needs.build-arm64.result == 'success' }}
     runs-on: ubuntu-latest
     outputs:
       digest: ${{ steps.manifest.outputs.digest }}
@@ -423,7 +464,9 @@ jobs:
           cosign sign --yes "${IMAGE}@${DIGEST}"
 
   verify:
+    name: verify-${{ matrix.arch }}
     needs: [meta, publish]
+    if: ${{ !cancelled() && needs.meta.result == 'success' && needs.publish.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -437,14 +480,15 @@ jobs:
       - name: Pull and smoke-test
         env:
           TAG: ${{ needs.meta.outputs.version }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
         run: |
           set -euo pipefail
-          docker pull "${IMAGE}:${TAG}"
+          docker pull "${IMAGE}@${DIGEST}"
           # CI owns this disposable container and does not expose it beyond
           # localhost. Disable LAN auth so the verifier can inspect the
           # protected readiness/build-details endpoint without parsing the
           # auto-generated key from container logs.
-          CID=$(docker run -d -p 127.0.0.1:14242:14242 -e NMEM_LAN_AUTH=disabled "${IMAGE}:${TAG}")
+          CID=$(docker run -d -p 127.0.0.1:14242:14242 -e NMEM_LAN_AUTH=disabled "${IMAGE}@${DIGEST}")
           trap "docker logs $CID || true; docker rm -f $CID || true" EXIT
 
           for i in $(seq 1 60); do
@@ -484,15 +528,44 @@ jobs:
       - name: Verify cosign signature
         env:
           TAG: ${{ needs.meta.outputs.version }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
         run: |
           set -euo pipefail
-          cosign verify "${IMAGE}:${TAG}" \
+          cosign verify "${IMAGE}@${DIGEST}" \
             --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/release-docker.yml@.*" \
             --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
             | head -50
 
+  cpu-receipt:
+    needs: [meta, publish, verify, build-amd64, build-arm64]
+    if: ${{ !cancelled() && needs.meta.result == 'success' && needs.publish.result == 'success' && needs.verify.result == 'success' && needs.build-amd64.result == 'success' && needs.build-arm64.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: docker/setup-buildx-action@v3
+      - name: Record verified CPU source and immutable digests
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          SOURCE_SHA: ${{ needs.meta.outputs.source_sha }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          AMD64: ${{ needs.build-amd64.outputs.digest }}
+          ARM64: ${{ needs.build-arm64.outputs.digest }}
+        run: node scripts/cpu-delivery-receipt.mjs "$VERSION" mem "$SOURCE_SHA" "$DIGEST" "$AMD64" "$ARM64"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cpu-delivery-${{ needs.meta.outputs.version }}-mem-attempt-${{ github.run_attempt }}
+          path: receipt.json
+          retention-days: 90
+          if-no-files-found: error
+
   scan:
     needs: [meta, publish]
+    if: ${{ !cancelled() && needs.meta.result == 'success' && needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: aquasecurity/trivy-action@v0.36.0

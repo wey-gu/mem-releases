@@ -3,6 +3,7 @@
 import { spawnSync } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { requireCpuDelivery } from './cpu-delivery-receipt.mjs';
 
 const SITE = 'https://mem.nowledge.co';
 const REPO = 'wey-gu/mem-releases';
@@ -173,6 +174,7 @@ export async function finalize(version, {
   attempts = 13, delay = 30000, allowNewer = false, publish = false,
   readToken = process.env.MEM_REPO_TOKEN, writeToken = process.env.MEM_METADATA_TOKEN,
   checkEngineering = true,
+  cpuRuns, sourceVersion, deliveryVersion, receiptReader, manifestReader,
 } = {}) {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Expected a clean GA version');
   await requireProtectedPublication(api);
@@ -189,6 +191,7 @@ export async function finalize(version, {
       throw new Error('The draft GA is missing a required core artifact');
     }
     await notes(version, fetcher);
+    await requireCpuDelivery(version, { api, cpuRuns, sourceVersion, deliveryVersion, receiptReader, manifestReader, readToken });
     await requireMetadataWrite(version, api, writeToken);
     try { await api('PATCH', `repos/${REPO}/releases/${release.id}`, { draft: false, make_latest: 'false' }); }
     catch (error) {
@@ -233,10 +236,10 @@ export async function finalize(version, {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [mode, version, allowNewer = 'false'] = process.argv.slice(2);
   try {
-    if (!['preflight', 'preflight-readonly', 'publish', 'finalize'].includes(mode)) throw new Error('Usage: finalize-ga-release.mjs preflight|preflight-readonly|publish|finalize VERSION [allow-newer-latest]');
-    if (mode !== 'preflight-readonly' && (process.env.GITHUB_ACTIONS !== 'true' || process.env.GITHUB_REPOSITORY !== REPO)) throw new Error('Run the approved release-publish workflow for production mutations');
+    if (!['preflight', 'preflight-readonly', 'cpu-delivery', 'publish', 'finalize'].includes(mode)) throw new Error('Usage: finalize-ga-release.mjs preflight|preflight-readonly|cpu-delivery|publish|finalize VERSION [allow-newer-latest]');
+    if (!['preflight-readonly', 'cpu-delivery'].includes(mode) && (process.env.GITHUB_ACTIONS !== 'true' || process.env.GITHUB_REPOSITORY !== REPO)) throw new Error('Run the approved release-publish workflow for production mutations');
     if (!['true', 'false'].includes(allowNewer)) throw new Error('allow-newer-latest must be true or false');
-    const result = mode.startsWith('preflight')
+    const result = mode === 'cpu-delivery' ? await requireCpuDelivery(version) : mode.startsWith('preflight')
       ? await preflight(version, { allowNewer: allowNewer === 'true', qualifyWriter: mode !== 'preflight-readonly' })
       : await finalize(version, { allowNewer: allowNewer === 'true', publish: mode === 'publish' });
     if (result) {

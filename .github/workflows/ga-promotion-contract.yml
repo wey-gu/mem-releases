@@ -6,6 +6,8 @@ on:
       - .github/workflows/promote-rc-to-ga.yml
       - .github/workflows/finish-ga-release.yml
       - .github/workflows/release-desktop.yml
+      - .github/workflows/release-docker.yml
+      - .github/workflows/release-docker-updater.yml
       - .github/workflows/promote-rpm-to-ga.yml
       - .github/workflows/ga-promotion-contract.yml
       - scripts/test_ga_promotion_contract.py
@@ -24,6 +26,9 @@ on:
       - .github/workflows/finalize-ga-release.yml
       - scripts/finalize-ga-release.mjs
       - scripts/test_finalize_ga_release.mjs
+      - scripts/cpu-delivery-receipt.mjs
+      - scripts/test_cpu_delivery_receipt.mjs
+      - scripts/cpu-delivery-test-harness.mjs
       - package.json
       - package-lock.json
   push:
@@ -32,6 +37,8 @@ on:
       - .github/workflows/promote-rc-to-ga.yml
       - .github/workflows/finish-ga-release.yml
       - .github/workflows/release-desktop.yml
+      - .github/workflows/release-docker.yml
+      - .github/workflows/release-docker-updater.yml
       - .github/workflows/promote-rpm-to-ga.yml
       - .github/workflows/ga-promotion-contract.yml
       - scripts/test_ga_promotion_contract.py
@@ -50,6 +57,9 @@ on:
       - .github/workflows/finalize-ga-release.yml
       - scripts/finalize-ga-release.mjs
       - scripts/test_finalize_ga_release.mjs
+      - scripts/cpu-delivery-receipt.mjs
+      - scripts/test_cpu_delivery_receipt.mjs
+      - scripts/cpu-delivery-test-harness.mjs
       - package.json
       - package-lock.json
 
@@ -76,4 +86,4 @@ jobs:
       - name: Check deferred RPM promotion
         run: node --test scripts/test_rpm_ga_policy.mjs scripts/test_reconcile_rpm_release_asset.mjs scripts/test_reconcile_rpm_r2.mjs
       - name: Check GA publication date finalization
-        run: node --test scripts/test_finalize_ga_release.mjs
+        run: node --test scripts/test_finalize_ga_release.mjs scripts/test_cpu_delivery_receipt.mjs

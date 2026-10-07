@@ -31,7 +31,9 @@ separate, ordered changes:
    manually trigger it for a release. Create RC and GA tags only from the
    resulting commit. A tag does not need to be a Git ancestor of `main`; it
    must have auditable `-x` provenance to the reviewed `main` metadata.
-6. Require the shared GA finalizer to verify the actual UTC `published_at`,
+6. Supply the two exact CPU workflow run IDs. Require terminal successful
+   CPU receipts, matching source SHAs and target digests before public GA.
+   Require the shared GA finalizer to verify the actual UTC `published_at`,
    website explicit/default readbacks, and engineering date on `main`. The
    deployed website resolves dates from public GA Releases; no per-GA website
    date or parent gitlink update is needed. Run the release-history check for

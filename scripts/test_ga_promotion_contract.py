@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import unittest
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,6 +12,60 @@ CORE_PLATFORMS = (
 
 
 class GAPromotionContractTest(unittest.TestCase):
+    def test_cpu_gate_precedes_every_desktop_distribution_and_first_public_release(self):
+        for name, job in (("promote-rc-to-ga.yml", "promote-desktop"),
+                          ("release-desktop.yml", "publish"),
+                          ("finish-ga-release.yml", "finish")):
+            with self.subTest(workflow=name):
+                workflow = (ROOT / ".github/workflows" / name).read_text()
+                section = workflow.split(f"\n  {job}:\n", 1)[1]
+                self.assertLess(section.index("finalize-ga-release.mjs cpu-delivery"),
+                                section.index("finalize-ga-release.mjs preflight"))
+                self.assertIn("CPU_MEM_RUN_ID: ${{ inputs.cpu_mem_run_id }}", section)
+                self.assertIn("CPU_UPDATER_RUN_ID: ${{ inputs.cpu_updater_run_id }}", section)
+        promote = (ROOT / ".github/workflows/promote-rc-to-ga.yml").read_text()
+        validate = promote.split("\n  validate:\n")[1].split("\n  promote-docker:\n")[0]
+        self.assertIn("finalize-ga-release.mjs cpu-delivery", validate)
+        self.assertIn("CPU_DELIVERY_VERSION: ${{ steps.v.outputs.rc_tag }}", validate)
+        desktop = promote.split("\n  promote-desktop:\n")[1]
+        self.assertIn("needs: [validate, promote-docker]", desktop)
+        self.assertIn("needs.promote-docker.result == 'success'", desktop)
+
+    def test_direct_docker_ga_is_protected_and_rc_remains_independent(self):
+        for name in ("release-docker.yml", "release-docker-updater.yml"):
+            with self.subTest(workflow=name):
+                workflow = (ROOT / ".github/workflows" / name).read_text()
+                admission = workflow.split("\n  ga-admission:\n")[1].split("\n  build-amd64:\n")[0]
+                self.assertIn("needs.meta.outputs.is_ga == 'true'", admission)
+                self.assertIn("environment: release-publish", admission)
+                self.assertIn("finalize-ga-release.mjs preflight", admission)
+                self.assertIn("MEM_METADATA_TOKEN:", admission)
+                for job in ("build-amd64", "build-arm64", "publish"):
+                    section = re.split(r"\n  [a-z][\w-]*:\n", workflow.split(f"\n  {job}:\n")[1])[0]
+                    self.assertIn("ga-admission", section)
+                    self.assertIn("needs.meta.outputs.is_ga != 'true' || needs.ga-admission.result == 'success'", section)
+                if name == "release-docker.yml":
+                    for job in ("build-cuda", "build-vulkan"):
+                        section = re.split(r"\n  [a-z][\w-]*:\n", workflow.split(f"\n  {job}:\n")[1])[0]
+                        self.assertIn("ga-admission", section)
+                        self.assertIn("needs.ga-admission.result == 'success'", section)
+
+    def test_cpu_receipt_requires_both_immutable_verified_arches_and_not_gpu(self):
+        for name in ("release-docker.yml", "release-docker-updater.yml"):
+            with self.subTest(workflow=name):
+                workflow = (ROOT / ".github/workflows" / name).read_text()
+                receipt = workflow.split("\n  cpu-receipt:\n")[1].split("\n  scan:\n")[0]
+                self.assertIn("needs: [meta, publish, verify, build-amd64, build-arm64]", receipt)
+                self.assertIn("needs.verify.result == 'success'", receipt)
+                self.assertNotIn("build-cuda", receipt)
+                self.assertNotIn("build-vulkan", receipt)
+                self.assertNotIn("rpm", receipt)
+                self.assertIn("attempt-${{ github.run_attempt }}", receipt)
+                self.assertIn("name: verify-${{ matrix.arch }}", workflow)
+                self.assertIn('docker pull "${IMAGE}@${DIGEST}"', workflow)
+                self.assertIn('cosign verify "${IMAGE}@${DIGEST}"', workflow)
+                self.assertIn("ref: ${{ needs.meta.outputs.source_sha }}", workflow)
+
     def test_all_ga_producers_use_shared_finalization_after_delivery_and_assets(self):
         for name, job in (("promote-rc-to-ga.yml", "promote-desktop"),
                           ("release-desktop.yml", "publish"),

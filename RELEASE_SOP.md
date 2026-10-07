@@ -201,8 +201,21 @@ Range support. Issue #67 owns the explicit all-artifact latest gate.
 gh workflow run promote-rc-to-ga.yml -R wey-gu/mem-releases \
   -f rc_tag=<version>-rcN \
   -f ga_tag=<version> \
+  -f cpu_mem_run_id=<release-docker-run> \
+  -f cpu_updater_run_id=<release-docker-updater-run> \
   -f push_latest=true
 ```
+
+The two CPU workflows record an immutable `cpu-delivery-<version>-<role>-attempt-<N>`
+Actions artifact only after both architecture smoke/signature jobs succeed.
+Supply their exact run IDs. Validation checks each current run attempt, official
+workflow, source repository/ref/SHA and both architecture digests. Mem and
+community RC/GA source tags must resolve to the same respective commits.
+The RC manifest is checked before promotion; the GA manifest must match the
+receipt before desktop distribution and again before `draft:false`. Failed,
+pending, missing or expired receipts stop publication. Desktop promotion waits
+for the requested CPU promotion job; GPU, scan and deferred RPM remain separate.
+A retry cannot use a successful receipt from an earlier failed run attempt.
 
 Record the workflow run, the resulting GA Release and finalization state, the R2/CDN readback,
 and the updater readback. A core release is not evidence that a deferred RPM
@@ -210,7 +223,8 @@ has been delivered.
 
 If Docker, R2, and APT succeeded but the GA draft is missing, use
 `finish-ga-release.yml` only after checking the exact partial state. It
-verifies the core platforms and APT before creating the draft; it does not
+requires the exact successful RC CPU run IDs and verifies the core
+platforms and APT before creating the draft; it does not
 deploy the Backbone Worker or promote the separately staged RPM. Do not
 repeat the full promote merely to create the missing draft.
 If any core R2 object or the APT candidate is missing or wrong, withhold that
@@ -263,7 +277,7 @@ is pending and send a completion update after its promotion verifies.
 The version and unreleased-note metadata are already merged on `main`; do not
 merge the release branch back. Direct GA, RC desktop promotion, and
 `finish-ga-release` call `scripts/finalize-ga-release.mjs publish` only after
-their existing delivery verification and draft-asset reconciliation succeed.
+their CPU receipt gate, existing delivery verification and draft-asset reconciliation succeed.
 The common finalizer publishes the draft, reads its actual `published_at`, and
 uses its UTC calendar date. It verifies both the explicit version and default
 website APIs before a separate `make_latest` PATCH and GitHub latest readback.
@@ -274,7 +288,11 @@ deployment, or parent website gitlink update is needed. Keep the pre-distributio
 notes deployment and production staging/GO gates. Before adopting this flow,
 deploy the resolver through the approved canonical/carrier path and verify the
 `X-Changelog-Publication-Source: github-releases` response header. Distribution
-preflight rejects an old deployment or unavailable release lookup.
+preflight rejects an old deployment or an unavailable lookup observed by the
+executing route. Next Data Cache, ISR and CDN may retain a prior successful
+response during revalidation. Do not promise a five-minute freshness bound or
+universal outage-to-503 behavior until exact-SHA staging proves warm-cache
+publication and failure behavior. Finalizer readback remains authoritative.
 
 The finalizer also requires the exact engineering date on `nowledge-co/mem`
 `main`. `MEM_REPO_TOKEN` remains read-only. A separately scoped
@@ -320,7 +338,14 @@ workflow, a renamed private dependency, or any native bundle change always
 uses the RC path.
 
 If an approved fast path uses `release-desktop.yml` directly with a clean
-semver tag, its publish job requires and uploads all six desktop artifacts,
+semver tag, first run both CPU image workflows and pass their exact
+`cpu_mem_run_id` and `cpu_updater_run_id` to desktop. Both direct CPU workflows
+qualify common website/metadata prerequisites in the protected `ga-admission`
+job before any GA image build/push, including minor/latest and GPU tags. RC
+runs bypass GA admission and retain their existing build/verify path. Their
+receipts bind smoke/signature verification to the immutable manifest digest,
+not a mutable tag. Direct desktop build-only runs need no CPU run IDs;
+publication rejects missing IDs before R2. Its publish job requires and uploads all six desktop artifacts,
 including RPM, then requires APT signing credentials, updates APT, and verifies the R2 download and updater
 routes before creating a draft GitHub Release. The old `latest` input is kept
 only so existing dispatch commands still parse; it no longer gates desktop

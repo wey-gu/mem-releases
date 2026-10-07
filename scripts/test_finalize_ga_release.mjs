@@ -3,6 +3,7 @@ import test from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { finalize, preflight, dateEngineeringChangelog, gaDate } from './finalize-ga-release.mjs';
+import { cpuHarness } from './cpu-delivery-test-harness.mjs';
 
 const version = '0.10.96';
 const date = '2026-10-06';
@@ -14,6 +15,7 @@ function harness({ draft = true, stale = false, newer = false, sourceDate = date
     assets: core.map(suffix => ({ name: `Nowledge.Mem_${version}_${suffix}`, size: 1 })) };
   let latest = { id: 2, tag_name: newer ? 'v0.10.97' : 'v0.10.95', draft: false, prerelease: false, published_at: '2026-10-05T15:00:00Z' };
   const api = async (method, path, body) => {
+    if (path.includes('/actions/runs/') || path.includes('/git/ref/tags/')) return cpuHarness().api(method, path, body);
     if (method === 'POST' && path.endsWith('/pulls') && body.head === body.base) throw Object.assign(new Error('No commits between main and main'), { httpStatus: 422 });
     if (path.includes('/git/ref/heads/')) return { object: { sha: 'metadata-head' } };
     if (path.includes('/compare/')) return { files: [] };
@@ -34,7 +36,19 @@ function harness({ draft = true, stale = false, newer = false, sourceDate = date
     return new Response(JSON.stringify({ found: true, version: selected, date: selected === version ? stale || release.draft ? 'unreleased' : date : '2026-10-05', title: 'GA notes', release_notes: '- Changed' }),
       { headers: { 'x-changelog-publication-source': 'github-releases' } });
   };
-  return { api, fetcher, changes, release, publish: true, writeToken: 'test-only', attempts: 1, delay: 0, sleep: async () => {} };
+  return { ...cpuHarness(), api, fetcher, changes, release, publish: true, writeToken: 'test-only', attempts: 1, delay: 0, sleep: async () => {} };
+}
+
+for (const state of ['failure', 'pending']) {
+  test(`desktop success plus CPU ${state} makes zero public Release PATCHes`, async () => {
+    const h = harness();
+    const cpu = cpuHarness({ state });
+    const api = h.api;
+    h.api = (...args) => args[1].includes('/actions/runs/') || args[1].includes('/git/ref/tags/') ? cpu.api(...args) : api(...args);
+    await assert.rejects(finalize(version, h), /CPU.*terminal success/);
+    assert.equal(h.release.draft, true);
+    assert.equal(h.changes.filter(change => change.path.includes('/releases/')).length, 0);
+  });
 }
 
 test('publishes once, derives UTC date, verifies both routes and engineering record', async () => {
@@ -289,4 +303,18 @@ test('local mutation CLI modes reject before any GitHub tool or API call', () =>
     assert.match(result.stderr, /Run the approved release-publish workflow/);
     assert.doesNotMatch(result.stderr, /GitHub GET/);
   }
+});
+
+
+test('successful mem plus failed updater still makes zero public Release PATCHes', async () => {
+  const h = harness();
+  const original = h.api;
+  h.api = async (...args) => {
+    const result = await original(...args);
+    if (args[1].includes('/runs/22/') && args[1].includes('/jobs?')) result.jobs.find(job => job.name === 'verify-arm64').conclusion = 'failure';
+    return result;
+  };
+  await assert.rejects(finalize(version, h), /CPU.*terminal success/);
+  assert.equal(h.release.draft, true);
+  assert.equal(h.changes.filter(change => change.path.includes('/releases/')).length, 0);
 });
