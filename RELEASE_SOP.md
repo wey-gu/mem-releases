@@ -282,7 +282,9 @@ The finalizer also requires the exact engineering date on `nowledge-co/mem`
 must be configured before distribution to prepare a date-only PR, reuse an existing correction, and request `wey-gu`
 and `hawkingrei`. It never merges. For an already-public release, recovery may omit this token after the engineering
 correction has merged through the normal bot/review process. New publication
-preflight rejects a missing token before any distribution. The run stays incomplete
+preflight rejects a missing token before any distribution. Direct build meta
+uses read-only MEM_REPO_TOKEN and performs no source write; actual writer
+qualification occurs in the protected publish job before R2 distribution. The run stays incomplete
 until `main` has the correct date; it reports the pending PR or missing token.
 
 If publication succeeded but website cache or engineering archival is pending,
@@ -296,8 +298,8 @@ gh workflow run finalize-ga-release.yml -R wey-gu/mem-releases \
 It refuses drafts and performs no build, upload, tag move, or website deployment.
 All desktop publication/finalization jobs share a non-cancelling concurrency
 group. A newer GA prevents an older task from moving latest backward; explicit
-older-release mode preserves the newer latest. Website readback retries are
-bounded to six minutes. A failed finalizer means a partial public release,
+older-release mode preserves the newer latest. Website readback uses at most 13 attempts with 30-second intervals and
+separate network timeouts; metadata recovery has a 10-minute job timeout. A failed finalizer means a partial public release,
 not permission to upload the same artifacts again. The `release-publish` environment must enforce required reviewers, prevent
 self-review, and disable admin bypass. Both preflight and finalization read
 these settings and reject missing protection; the jobs wait for GitHub

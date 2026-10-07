@@ -163,10 +163,10 @@ jobs:
         if: ${{ steps.resolve.outputs.run_publish == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          MEM_METADATA_TOKEN: ${{ secrets.MEM_METADATA_TOKEN }}
+          MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
           VERSION: ${{ steps.resolve.outputs.version }}
           ALLOW_NEWER: ${{ inputs.allow_newer_desktop_latest || false }}
-        run: node scripts/finalize-ga-release.mjs preflight "$VERSION" "$ALLOW_NEWER"
+        run: node scripts/finalize-ga-release.mjs preflight-readonly "$VERSION" "$ALLOW_NEWER"
 
       - name: Pre-flight GA policy before build and optional Vulkan jobs
         if: ${{ steps.resolve.outputs.run_publish == 'true' }}

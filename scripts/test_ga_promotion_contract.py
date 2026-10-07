@@ -31,7 +31,7 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn("environment: release-publish", validate)
         direct = (ROOT / ".github" / "workflows" / "release-desktop.yml").read_text()
         meta = direct.split("\n  meta:\n", 1)[1].split("\n  build-macos-arm64:\n", 1)[0]
-        self.assertIn("finalize-ga-release.mjs preflight", meta)
+        self.assertIn("finalize-ga-release.mjs preflight-readonly", meta)
         recap = promote.split("\n  recap:\n", 1)[1]
         self.assertIn("needs.promote-desktop.result == 'skipped'", recap)
         self.assertIn("finalize-ga-release.mjs finalize", recap)

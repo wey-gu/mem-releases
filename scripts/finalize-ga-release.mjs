@@ -111,16 +111,20 @@ async function requireMetadataWrite(version, api, token) {
   throw new Error('Unexpected metadata permission probe response; inspect GitHub before distribution');
 }
 
-export async function preflight(version, { api = ghApi, fetcher = fetch, allowNewer = false, writeToken = process.env.MEM_METADATA_TOKEN } = {}) {
+export async function preflight(version, { api = ghApi, fetcher = fetch, allowNewer = false, writeToken = process.env.MEM_METADATA_TOKEN, readToken = process.env.MEM_REPO_TOKEN, qualifyWriter = true } = {}) {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Expected a clean GA version');
   await requireProtectedPublication(api);
-  if (!writeToken) throw new Error('MEM_METADATA_TOKEN is required before distribution so engineering archival can be prepared');
+  if (qualifyWriter && !writeToken) throw new Error('MEM_METADATA_TOKEN is required before distribution so engineering archival can be prepared');
   const latest = await latestRelease(api);
   if (latest && compareVersions(latest.tag_name, version) > 0 && !allowNewer) {
     throw new Error('A newer GA is already latest; refusing an older publication');
   }
   await notes(version, fetcher);
-  await requireMetadataWrite(version, api, writeToken);
+  if (qualifyWriter) await requireMetadataWrite(version, api, writeToken);
+  else {
+    const source = await api('GET', `repos/${MEM}/contents/${ENGINEERING}?ref=main`, undefined, readToken);
+    dateEngineeringChangelog(Buffer.from(source.content, 'base64').toString('utf8'), version, 'unreleased');
+  }
 }
 
 async function engineeringMetadata(version, date, api, readToken, writeToken) {
@@ -229,11 +233,11 @@ export async function finalize(version, {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [mode, version, allowNewer = 'false'] = process.argv.slice(2);
   try {
-    if (!['preflight', 'publish', 'finalize'].includes(mode)) throw new Error('Usage: finalize-ga-release.mjs preflight|publish|finalize VERSION [allow-newer-latest]');
-    if (mode !== 'preflight' && (process.env.GITHUB_ACTIONS !== 'true' || process.env.GITHUB_REPOSITORY !== REPO)) throw new Error('Run the approved release-publish workflow for production mutations');
+    if (!['preflight', 'preflight-readonly', 'publish', 'finalize'].includes(mode)) throw new Error('Usage: finalize-ga-release.mjs preflight|preflight-readonly|publish|finalize VERSION [allow-newer-latest]');
+    if (!mode.startsWith('preflight') && (process.env.GITHUB_ACTIONS !== 'true' || process.env.GITHUB_REPOSITORY !== REPO)) throw new Error('Run the approved release-publish workflow for production mutations');
     if (!['true', 'false'].includes(allowNewer)) throw new Error('allow-newer-latest must be true or false');
-    const result = mode === 'preflight'
-      ? await preflight(version, { allowNewer: allowNewer === 'true' })
+    const result = mode.startsWith('preflight')
+      ? await preflight(version, { allowNewer: allowNewer === 'true', qualifyWriter: mode !== 'preflight-readonly' })
       : await finalize(version, { allowNewer: allowNewer === 'true', publish: mode === 'publish' });
     if (result) {
       console.log(JSON.stringify(result));

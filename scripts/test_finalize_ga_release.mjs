@@ -244,3 +244,36 @@ test('metadata qualification checks same-SHA non-forced Contents update and impo
   assert.equal(pr[3], 'test-only');
   assert.equal(h.changes.filter(x => x.path.endsWith('/pulls')).length, 0);
 });
+
+test('direct build read-only preflight does not prepare branches before approval', async () => {
+  const h = harness();
+  const api = h.api;
+  h.api = async (method, path, ...rest) => {
+    assert.equal(method, 'GET');
+    if (path.includes('/contents/')) assert.equal(rest[1], 'readonly-test');
+    assert.ok(!path.includes('/git/ref') && !path.includes('/compare/') && !path.includes('/pulls'));
+    return api(method, path, ...rest);
+  };
+  await preflight(version, { ...h, qualifyWriter: false, writeToken: '', readToken: 'readonly-test' });
+  assert.equal(h.changes.length, 0);
+});
+
+test('approved writer preflight prepares a missing branch once without editing files', async () => {
+  const h = harness();
+  const api = h.api;
+  const creates = [];
+  let prepared = false;
+  h.api = async (method, path, body, token) => {
+    if (method === 'GET' && path.endsWith(`/git/ref/heads/release/finalize-${version}`) && !prepared) throw Object.assign(new Error('missing'), { notFound: true });
+    if (method === 'POST' && path.endsWith('/git/refs')) {
+      prepared = true;
+      creates.push(body);
+      return { object: { sha: body.sha } };
+    }
+    return api(method, path, body, token);
+  };
+  await preflight(version, h);
+  await preflight(version, h);
+  assert.deepEqual(creates, [{ ref: `refs/heads/release/finalize-${version}`, sha: 'metadata-head' }]);
+  assert.equal(h.changes.filter(x => x.method === 'PUT' || x.path.includes('/releases/')).length, 0);
+});
