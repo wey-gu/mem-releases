@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { finalize, preflight, dateEngineeringChangelog, gaDate } from './finalize-ga-release.mjs';
 
 const version = '0.10.96';
@@ -276,4 +278,15 @@ test('approved writer preflight prepares a missing branch once without editing f
   await preflight(version, h);
   assert.deepEqual(creates, [{ ref: `refs/heads/release/finalize-${version}`, sha: 'metadata-head' }]);
   assert.equal(h.changes.filter(x => x.method === 'PUT' || x.path.includes('/releases/')).length, 0);
+});
+
+test('local mutation CLI modes reject before any GitHub tool or API call', () => {
+  for (const mode of ['preflight', 'publish', 'finalize']) {
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('./finalize-ga-release.mjs', import.meta.url)), mode, version], {
+      encoding: 'utf8', env: { ...process.env, PATH: '', GITHUB_ACTIONS: 'false', GITHUB_REPOSITORY: '', MEM_METADATA_TOKEN: '', GH_TOKEN: 'inert-test-token' },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Run the approved release-publish workflow/);
+    assert.doesNotMatch(result.stderr, /GitHub GET/);
+  }
 });

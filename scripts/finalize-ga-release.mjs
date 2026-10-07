@@ -234,7 +234,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const [mode, version, allowNewer = 'false'] = process.argv.slice(2);
   try {
     if (!['preflight', 'preflight-readonly', 'publish', 'finalize'].includes(mode)) throw new Error('Usage: finalize-ga-release.mjs preflight|preflight-readonly|publish|finalize VERSION [allow-newer-latest]');
-    if (!mode.startsWith('preflight') && (process.env.GITHUB_ACTIONS !== 'true' || process.env.GITHUB_REPOSITORY !== REPO)) throw new Error('Run the approved release-publish workflow for production mutations');
+    if (mode !== 'preflight-readonly' && (process.env.GITHUB_ACTIONS !== 'true' || process.env.GITHUB_REPOSITORY !== REPO)) throw new Error('Run the approved release-publish workflow for production mutations');
     if (!['true', 'false'].includes(allowNewer)) throw new Error('allow-newer-latest must be true or false');
     const result = mode.startsWith('preflight')
       ? await preflight(version, { allowNewer: allowNewer === 'true', qualifyWriter: mode !== 'preflight-readonly' })
