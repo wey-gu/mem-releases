@@ -12,6 +12,9 @@ function harness({ draft = true, stale = false, newer = false, sourceDate = date
     assets: core.map(suffix => ({ name: `Nowledge.Mem_${version}_${suffix}`, size: 1 })) };
   let latest = { id: 2, tag_name: newer ? 'v0.10.97' : 'v0.10.95', draft: false, prerelease: false, published_at: '2026-10-05T15:00:00Z' };
   const api = async (method, path, body) => {
+    if (method === 'POST' && path.endsWith('/pulls') && body.head === body.base) throw Object.assign(new Error('No commits between main and main'), { httpStatus: 422 });
+    if (path.includes('/git/ref/heads/')) return { object: { sha: 'metadata-head' } };
+    if (path.includes('/compare/')) return { files: [] };
     if (method !== 'GET') {
       changes.push({ method, path, body });
       if (body.draft === false) { release.draft = false; release.published_at = '2026-10-06T15:14:21Z'; }
@@ -37,16 +40,16 @@ test('publishes once, derives UTC date, verifies both routes and engineering rec
   const result = await finalize(version, h);
   assert.equal(result.date, date);
   assert.equal(result.state, 'complete');
-  assert.deepEqual(h.changes.map(x => x.body), [{ draft: false, make_latest: 'false' }, { make_latest: 'true' }]);
+  assert.deepEqual(h.changes.filter(x => x.path.includes('/releases/')).map(x => x.body), [{ draft: false, make_latest: 'false' }, { make_latest: 'true' }]);
   await finalize(version, h);
-  assert.equal(h.changes.length, 2);
+  assert.equal(h.changes.filter(x => x.path.includes('/releases/')).length, 2);
 });
 
 test('a stale website cannot produce a complete finalization after publication', async () => {
   const h = harness({ stale: true });
   await assert.rejects(finalize(version, h), /website metadata is pending/);
   assert.equal(h.release.draft, false);
-  assert.equal(h.changes.length, 1); // Publication can be partial; latest has not moved.
+  assert.equal(h.changes.filter(x => x.path.includes('/releases/')).length, 1); // Publication can be partial; latest has not moved.
 });
 
 test('preflight requires the deployed publication resolver before artifact distribution', async () => {
@@ -94,7 +97,7 @@ test('engineering metadata is required even when website publication is correct'
 });
 
 test('reuse an existing date-only engineering PR without changing it', async () => {
-  const h = harness({ sourceDate: 'unreleased' });
+  const h = harness({ draft: false, sourceDate: 'unreleased' });
   const api = h.api;
   h.api = async (...args) => {
     if (args[1].includes('/pulls?')) return [{ number: 6110, title: 'finalize 0.10.96 GA date', html_url: 'https://github.com/nowledge-co/mem/pull/6110' }];
@@ -158,6 +161,9 @@ test('new metadata PR uses compare-and-swap, both reviewers and a single dated h
   const writes = [];
   h.api = async (method, path, body, token) => {
     if (!path.includes('repos/nowledge-co/mem')) return api(method, path, body, token);
+    if (method === 'POST' && path.endsWith('/pulls') && body.head === body.base) throw Object.assign(new Error('No commits between main and main'), { httpStatus: 422 });
+    if (path.includes('/git/ref/heads/')) return { object: { sha: 'metadata-head' } };
+    if (path.includes('/compare/')) return { files: [] };
     if (method !== 'GET') {
       writes.push({ method, path, body, token });
       if (path.endsWith('/pulls')) return { number: 6200, html_url: 'https://github.com/nowledge-co/mem/pull/6200', requested_reviewers: [] };
@@ -205,4 +211,36 @@ test('missing metadata credential stops before distribution or draft publication
   await assert.rejects(preflight(version, { ...h, writeToken: '' }), /required before distribution/);
   await assert.rejects(finalize(version, { ...h, writeToken: '' }), /required before publishing/);
   assert.equal(h.changes.length, 0);
+});
+
+for (const [label, denied] of [
+  ['expired metadata token', (method, path) => method === 'GET' && path.includes('/contents/')],
+  ['metadata Contents read-only token', (method, path) => method === 'PATCH' && path.includes('/git/refs/')],
+  ['metadata Pull requests read-only token', (method, path) => method === 'POST' && path.endsWith('/pulls')],
+]) {
+  test(`${label} is rejected before distribution and draft publication`, async () => {
+    const h = harness();
+    const api = h.api;
+    h.api = async (method, path, ...rest) => {
+      if (denied(method, path)) throw Object.assign(new Error('metadata access denied'), { httpStatus: 403 });
+      return api(method, path, ...rest);
+    };
+    await assert.rejects(preflight(version, h), /metadata access denied/);
+    await assert.rejects(finalize(version, h), /metadata access denied/);
+    assert.equal(h.release.draft, true);
+    assert.equal(h.changes.filter(x => x.path.includes('/releases/')).length, 0);
+  });
+}
+
+test('metadata qualification checks same-SHA non-forced Contents update and impossible PR', async () => {
+  const h = harness();
+  const api = h.api;
+  const probes = [];
+  h.api = async (...args) => { probes.push(args); return api(...args); };
+  await preflight(version, h);
+  assert.deepEqual(h.changes[0].body, { sha: 'metadata-head', force: false });
+  const pr = probes.find(x => x[0] === 'POST' && x[1].endsWith('/pulls'));
+  assert.equal(pr[2].head, pr[2].base);
+  assert.equal(pr[3], 'test-only');
+  assert.equal(h.changes.filter(x => x.path.endsWith('/pulls')).length, 0);
 });

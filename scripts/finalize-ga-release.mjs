@@ -43,7 +43,8 @@ export function ghApi(method, path, body, token) {
   });
   if (result.status !== 0) {
     const error = new Error(`GitHub ${method} ${path.split('?')[0]} failed`);
-    error.notFound = result.stderr?.includes('HTTP 404') ?? false;
+    error.httpStatus = Number(result.stderr?.match(/HTTP (\d{3})/)?.[1]);
+    error.notFound = error.httpStatus === 404;
     throw error;
   }
   return result.stdout.trim() ? JSON.parse(result.stdout) : null;
@@ -78,6 +79,38 @@ async function requireProtectedPublication(api) {
   }
 }
 
+async function metadataBranch(version, api, token) {
+  const branch = `release/finalize-${version}`;
+  let head;
+  try { head = await api('GET', `repos/${MEM}/git/ref/heads/${branch}`, undefined, token); }
+  catch (error) {
+    if (!error.notFound) throw error;
+    const base = await api('GET', `repos/${MEM}/git/ref/heads/main`, undefined, token);
+    head = await api('POST', `repos/${MEM}/git/refs`, { ref: `refs/heads/${branch}`, sha: base.object.sha }, token);
+  }
+  const comparison = await api('GET', `repos/${MEM}/compare/main...${branch}`, undefined, token);
+  if (comparison.files?.some(file => file.filename !== ENGINEERING)) throw new Error('Existing metadata branch contains unrelated files; inspect it instead of taking ownership');
+  return { branch, head };
+}
+
+async function requireMetadataWrite(version, api, token) {
+  if (!token) throw new Error('MEM_METADATA_TOKEN is required before distribution so engineering archival can be prepared');
+  const source = await api('GET', `repos/${MEM}/contents/${ENGINEERING}?ref=main`, undefined, token);
+  dateEngineeringChangelog(Buffer.from(source.content, 'base64').toString('utf8'), version, 'unreleased');
+  const { branch, head } = await metadataBranch(version, api, token);
+  // A same-SHA, non-forced update verifies Contents write without changing files/history.
+  await api('PATCH', `repos/${MEM}/git/refs/heads/${branch}`, { sha: head.object.sha, force: false }, token);
+  // Identical base/head cannot create a PR. GitHub's authenticated 422 validation
+  // response qualifies Pull requests write; 401/403/transport failures stop here.
+  try {
+    await api('POST', `repos/${MEM}/pulls`, { head: 'main', base: 'main', title: 'GA metadata permission preflight', draft: true }, token);
+  } catch (error) {
+    if (error.httpStatus === 422) return;
+    throw error;
+  }
+  throw new Error('Unexpected metadata permission probe response; inspect GitHub before distribution');
+}
+
 export async function preflight(version, { api = ghApi, fetcher = fetch, allowNewer = false, writeToken = process.env.MEM_METADATA_TOKEN } = {}) {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Expected a clean GA version');
   await requireProtectedPublication(api);
@@ -87,6 +120,7 @@ export async function preflight(version, { api = ghApi, fetcher = fetch, allowNe
     throw new Error('A newer GA is already latest; refusing an older publication');
   }
   await notes(version, fetcher);
+  await requireMetadataWrite(version, api, writeToken);
 }
 
 async function engineeringMetadata(version, date, api, readToken, writeToken) {
@@ -108,20 +142,11 @@ async function engineeringMetadata(version, date, api, readToken, writeToken) {
     if (files.length === 1 && files[0].filename === ENGINEERING &&
         files[0].patch?.includes(`+## [${version}] - ${date}`)) return pr.html_url;
   }
-  const branch = `release/finalize-${version}`;
-  let head;
-  try { head = await api('GET', `repos/${MEM}/git/ref/heads/${branch}`, undefined, writeToken); }
-  catch (error) {
-    if (!error.notFound) throw error;
-    const base = await api('GET', `repos/${MEM}/git/ref/heads/main`, undefined, writeToken);
-    head = await api('POST', `repos/${MEM}/git/refs`, { ref: `refs/heads/${branch}`, sha: base.object.sha }, writeToken);
-  }
+  const { branch } = await metadataBranch(version, api, writeToken);
   // Compare-and-swap prevents overwriting a concurrent edit or rewriting history.
   const existing = await api('GET', `repos/${MEM}/contents/${ENGINEERING}?ref=${branch}`, undefined, writeToken);
   const branchContent = Buffer.from(existing.content, 'base64').toString('utf8');
   if (branchContent !== content && branchContent !== updated) throw new Error('Existing metadata branch diverged from main; inspect it instead of overwriting');
-  const comparison = await api('GET', `repos/${MEM}/compare/main...${branch}`, undefined, writeToken);
-  if (comparison.files?.some(file => file.filename !== ENGINEERING)) throw new Error('Existing metadata branch contains unrelated files; inspect it instead of taking ownership');
   const branchUpdated = dateEngineeringChangelog(branchContent, version, date);
   if (branchContent !== branchUpdated) await api('PUT', `repos/${MEM}/contents/${ENGINEERING}`, {
     branch, sha: existing.sha, message: `docs(release): finalize ${version} GA UTC date`,
@@ -160,6 +185,7 @@ export async function finalize(version, {
       throw new Error('The draft GA is missing a required core artifact');
     }
     await notes(version, fetcher);
+    await requireMetadataWrite(version, api, writeToken);
     try { await api('PATCH', `repos/${REPO}/releases/${release.id}`, { draft: false, make_latest: 'false' }); }
     catch (error) {
       // Publication may have succeeded before the response was lost. Read once; never resend blindly.
