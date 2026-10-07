@@ -28,6 +28,7 @@ class GAPromotionContractTest(unittest.TestCase):
         promote = (ROOT / ".github" / "workflows" / "promote-rc-to-ga.yml").read_text()
         validate = promote.split("\n  validate:\n", 1)[1].split("\n  promote-docker:\n", 1)[0]
         self.assertIn("finalize-ga-release.mjs preflight", validate)
+        self.assertIn("environment: release-publish", validate)
         direct = (ROOT / ".github" / "workflows" / "release-desktop.yml").read_text()
         meta = direct.split("\n  meta:\n", 1)[1].split("\n  build-macos-arm64:\n", 1)[0]
         self.assertIn("finalize-ga-release.mjs preflight", meta)

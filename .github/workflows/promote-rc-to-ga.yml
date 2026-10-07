@@ -119,6 +119,7 @@ permissions:
 
 jobs:
   validate:
+    environment: release-publish
     runs-on: ubuntu-latest
     outputs:
       rc_tag: ${{ steps.v.outputs.rc_tag }}
