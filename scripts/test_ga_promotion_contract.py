@@ -26,7 +26,7 @@ class GAPromotionContractTest(unittest.TestCase):
         promote = (ROOT / ".github/workflows/promote-rc-to-ga.yml").read_text()
         validate = promote.split("\n  validate:\n")[1].split("\n  promote-docker:\n")[0]
         self.assertIn("finalize-ga-release.mjs cpu-delivery", validate)
-        self.assertIn("CPU_DELIVERY_VERSION: ${{ steps.v.outputs.rc_tag }}", validate)
+        self.assertIn("CPU_DELIVERY_VERSION: ${{ inputs.promote_docker && steps.v.outputs.rc_tag || steps.v.outputs.ga_tag }}", validate)
         desktop = promote.split("\n  promote-desktop:\n")[1]
         self.assertIn("needs: [validate, promote-docker]", desktop)
         self.assertIn("needs.promote-docker.result == 'success'", desktop)

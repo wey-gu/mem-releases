@@ -318,3 +318,20 @@ test('successful mem plus failed updater still makes zero public Release PATCHes
   assert.equal(h.release.draft, true);
   assert.equal(h.changes.filter(change => change.path.includes('/releases/')).length, 0);
 });
+
+test('public GA requires GA CPU manifests even if a caller attempts an RC override', async () => {
+  const h = harness();
+  const cpu = cpuHarness({ sourceVersion: `${version}-rc1` });
+  const original = h.api;
+  h.api = (...args) => args[1].includes('/actions/runs/') || args[1].includes('/git/ref/tags/') ? cpu.api(...args) : original(...args);
+  h.receiptReader = cpu.receiptReader;
+  h.sourceVersion = cpu.sourceVersion;
+  h.deliveryVersion = cpu.sourceVersion;
+  h.manifestReader = async reference => {
+    if (reference.endsWith(`:${cpu.sourceVersion}`)) return cpu.manifestReader(reference);
+    throw new Error('CPU GA target is absent');
+  };
+  await assert.rejects(finalize(version, h), /CPU GA target is absent/);
+  assert.equal(h.release.draft, true);
+  assert.equal(h.changes.filter(change => change.path.includes('/releases/')).length, 0);
+});

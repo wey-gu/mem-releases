@@ -174,7 +174,7 @@ export async function finalize(version, {
   attempts = 13, delay = 30000, allowNewer = false, publish = false,
   readToken = process.env.MEM_REPO_TOKEN, writeToken = process.env.MEM_METADATA_TOKEN,
   checkEngineering = true,
-  cpuRuns, sourceVersion, deliveryVersion, receiptReader, manifestReader,
+  cpuRuns, sourceVersion, receiptReader, manifestReader,
 } = {}) {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Expected a clean GA version');
   await requireProtectedPublication(api);
@@ -191,7 +191,8 @@ export async function finalize(version, {
       throw new Error('The draft GA is missing a required core artifact');
     }
     await notes(version, fetcher);
-    await requireCpuDelivery(version, { api, cpuRuns, sourceVersion, deliveryVersion, receiptReader, manifestReader, readToken });
+    // RC checks qualify a later promotion; a public GA always requires GA tags.
+    await requireCpuDelivery(version, { api, cpuRuns, sourceVersion, deliveryVersion: version, receiptReader, manifestReader, readToken });
     await requireMetadataWrite(version, api, writeToken);
     try { await api('PATCH', `repos/${REPO}/releases/${release.id}`, { draft: false, make_latest: 'false' }); }
     catch (error) {

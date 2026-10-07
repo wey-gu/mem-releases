@@ -182,12 +182,13 @@ jobs:
         run: node scripts/finalize-ga-release.mjs preflight "$GA" "$ALLOW_NEWER"
 
       - uses: docker/setup-buildx-action@v3
-      - name: Require terminal RC CPU results before promotion
+      - name: Require terminal CPU delivery before promotion
         env:
           GH_TOKEN: ${{ github.token }}
           MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
           GA: ${{ steps.v.outputs.ga_tag }}
-          CPU_DELIVERY_VERSION: ${{ steps.v.outputs.rc_tag }}
+          # A desktop-only promotion requires GA CPU delivery to exist already.
+          CPU_DELIVERY_VERSION: ${{ inputs.promote_docker && steps.v.outputs.rc_tag || steps.v.outputs.ga_tag }}
         run: node scripts/finalize-ga-release.mjs cpu-delivery "$GA"
 
       - name: Pre-flight desktop policy before any promotion job

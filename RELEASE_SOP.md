@@ -216,6 +216,10 @@ receipt before desktop distribution and again before `draft:false`. Failed,
 pending, missing or expired receipts stop publication. Desktop promotion waits
 for the requested CPU promotion job; GPU, scan and deferred RPM remain separate.
 A retry cannot use a successful receipt from an earlier failed run attempt.
+If `promote_docker=false`, GA CPU manifests must already exist and match the
+RC receipts; validate checks them before any job can promote. This supports
+desktop-only completion after CPU delivery, not a GA that omits CPU delivery.
+RC manifests alone can never qualify the first public GA Release PATCH.
 
 Record the workflow run, the resulting GA Release and finalization state, the R2/CDN readback,
 and the updater readback. A core release is not evidence that a deferred RPM
