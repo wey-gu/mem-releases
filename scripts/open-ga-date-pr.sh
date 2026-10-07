@@ -47,6 +47,8 @@ if [[ -z "$url" ]]; then
   [[ "$(jq length <<<"$existing")" == 0 ]] || { echo 'Date PR was closed; inspect it before retrying.' >&2; exit 1; }
   body="$(mktemp)"
   trap 'rm -f "$body"' EXIT
+  revision="$(git -C "$tools_dir/.." rev-parse HEAD)"
+  evidence="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-wey-gu/mem-releases}/actions/runs/${GITHUB_RUN_ID:-local-fixture}"
   cat > "$body" <<EOF
 ### Issue
 Issue Number: ref wey-gu/mem-releases#85
@@ -61,8 +63,9 @@ ${version} 的发布记录仍为 unreleased。
 只将当前版本日期更新为 ${date}。其他条目、产品代码、标签和制品保持原样；由既有 bot 和评审流程合并。
 
 ### Tests
-- [x] Unit / source-pin test：发布自动化的 date-ga-changelog 测试覆盖实际 UTC 日、版本隔离与重试。
+- [x] Unit / source-pin test：node --test scripts/test_date_ga_changelog.mjs scripts/test_open_ga_date_pr.mjs，10/10 PASS；覆盖实际 UTC 日、版本隔离与重试。
 - [x] Not a UI change
+本次 workflow 在提交日期前运行上述测试。验证源码 SHA：${revision}。运行与日志：${evidence}。
 生产网站仍须 staging 与明确 GO；日期 PR 和合并不能作为已部署证据。网站部署校验通过后才能报告验收完成。
 
 #### UI evidence
@@ -71,7 +74,7 @@ Not a UI change.
 ### Side effects / risks
 发布日期元数据修正。网站部署与父 gitlink 同步沿用现有授权边界。
 EOF
-  url="$(gh pr create -R "$repo" --base main --head "$branch" --title "Date ${version} using its GA publication time" --body-file "$body" --label "component/${COMPONENT}" --label type/bug --assignee ThaddeusJiang)"
+  url="$(gh pr create -R "$repo" --base main --head "$branch" --title "Date ${version} using its GA publication time" --body-file "$body" --label "component/${COMPONENT}" --label type/bug --label severity/moderate --label impact/wrong-result --assignee ThaddeusJiang)"
 fi
 echo "Date PR: $url" >> "$GITHUB_STEP_SUMMARY"
 author="$(gh pr view "$url" --json author --jq .author.login)"

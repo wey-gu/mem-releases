@@ -39,6 +39,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
+      - name: Check date automation
+        run: node --test scripts/test_date_ga_changelog.mjs scripts/test_open_ga_date_pr.mjs
       - name: Read the actual GA publication
         env:
           GH_TOKEN: ${{ github.token }}

@@ -25,7 +25,8 @@ switch (args[1]) {
   case 'list': console.log(JSON.stringify(state.pr ? [state.pr] : [])); break;
   case 'create':
     const labels = args.flatMap((arg, i) => arg === '--label' ? args[i + 1].split(',') : []);
-    if (!labels.includes('component/web') || !labels.includes('type/bug') || labels.some(label => !['component/web', 'type/bug'].includes(label))) throw new Error('Unknown or missing PR labels');
+    const known = ['component/web', 'type/bug', 'severity/moderate', 'impact/wrong-result'];
+    if (known.some(label => !labels.includes(label)) || labels.some(label => !known.includes(label))) throw new Error('Unknown or missing PR labels');
     state.creates++; state.pr = { state: 'OPEN', url: 'https://github.com/example/repo/pull/1' }; console.log(state.pr.url); break;
   case 'view':
     console.log(args.includes('author') ? 'github-actions[bot]' : JSON.stringify({ reviewRequests: state.requests.map(login => ({login})), reviews: [] })); break;
