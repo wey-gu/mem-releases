@@ -1,0 +1,67 @@
+name: date-ga-changelog
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published GA version to retry (e.g. 0.10.96)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ga-date-${{ github.event.release.tag_name || format('v{0}', inputs.version) }}
+  cancel-in-progress: false
+
+jobs:
+  dates:
+    if: ${{ github.event_name == 'workflow_dispatch' || (!github.event.release.draft && !github.event.release.prerelease && !contains(github.event.release.tag_name, '-')) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repo: nowledge-co/nowledge-labs-website
+            file: nowledge-mem/data/changelog.ts
+            component: web
+          - repo: nowledge-co/mem
+            file: nowledge-graph/CHANGELOG.md
+            component: docs
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Read the actual GA publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || format('v{0}', inputs.version) }}
+        run: gh api -X GET "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > ga-release.json
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ matrix.repo }}
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: main
+          path: target
+          persist-credentials: false
+      - name: Open or reuse the date PR
+        working-directory: target
+        env:
+          GH_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+          TARGET_REPO: ${{ matrix.repo }}
+          TARGET_FILE: ${{ matrix.file }}
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          gh auth setup-git
+          bash ../scripts/open-ga-date-pr.sh "$GITHUB_WORKSPACE/ga-release.json" "$TARGET_REPO" "$TARGET_FILE"
+      - name: Report the deployment boundary
+        run: |
+          echo 'Dates prepared; PR review, bot merge and website deployment remain separate.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Website staging/production GO and parent gitlink synchronization keep their existing rules.' >> "$GITHUB_STEP_SUMMARY"

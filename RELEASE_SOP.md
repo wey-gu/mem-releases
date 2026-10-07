@@ -261,12 +261,28 @@ is pending and send a completion update after its promotion verifies.
 ## 7. Close the history loop
 
 The version and unreleased-note metadata are already merged on `main`; do not
-merge the release branch back. After GA, date the Changelog entry, deploy it,
+merge the release branch back. After a stable GitHub Release is published,
+`date-ga-changelog.yml` opens or reuses date-only website and engineering PRs
+using its actual `published_at` UTC day. It uses the existing `MEM_REPO_TOKEN`
+with contents/pull-request write access to both canonical repositories; missing
+access fails the job. RC/Draft publication does not date entries. To retry an
+already published GA, dispatch it with `version=<x.y.z>`.
+Publication by a workflow's `GITHUB_TOKEN` does not trigger another workflow;
+that caller must explicitly dispatch this date workflow or use an authorized
+App/PAT publication token. The current operator publication triggers it normally.
+Review and bot-merge the date PRs, deploy the Changelog,
 and merge its parent gitlink update to `main`. Run the release-history check
 to prove the tagged release branch is patch-equivalent to its recorded `main`
 source commits and that every copied commit has a valid `-x` provenance trailer.
 An ancestor-only check is invalid for this workflow because cherry-pick creates
 new commit IDs by design.
+
+The website's `verify-ga-changelog.yml` checks the public default and explicit
+release-notes endpoints after a successful production `deployment_status`.
+The deployment carrier receives this workflow through the existing canonical
+sync. If that callback is unavailable, dispatch the verifier after deployment
+with `version=<x.y.z>`. It is a read-only content check, not production GO or
+complete staging proof. Vercel deployment itself keeps its existing authority.
 
 ## Fast-path rule
 
