@@ -204,7 +204,7 @@ gh workflow run promote-rc-to-ga.yml -R wey-gu/mem-releases \
   -f push_latest=true
 ```
 
-Record the workflow run, the resulting GA release draft, the R2/CDN readback,
+Record the workflow run, the resulting GA Release and finalization state, the R2/CDN readback,
 and the updater readback. A core release is not evidence that a deferred RPM
 has been delivered.
 
@@ -261,8 +261,50 @@ is pending and send a completion update after its promotion verifies.
 ## 7. Close the history loop
 
 The version and unreleased-note metadata are already merged on `main`; do not
-merge the release branch back. After GA, date the Changelog entry, deploy it,
-and merge its parent gitlink update to `main`. Run the release-history check
+merge the release branch back. Direct GA, RC desktop promotion, and
+`finish-ga-release` call `scripts/finalize-ga-release.mjs publish` only after
+their existing delivery verification and draft-asset reconciliation succeed.
+The common finalizer publishes the draft, reads its actual `published_at`, and
+uses its UTC calendar date. It verifies both the explicit version and default
+website APIs before a separate `make_latest` PATCH and GitHub latest readback.
+
+The website resolves each clean, public, non-prerelease GA from its own GitHub
+Release timestamp. Author new notes as `unreleased`; no per-GA website date PR,
+deployment, or parent website gitlink update is needed. Keep the pre-distribution
+notes deployment and production staging/GO gates. Before adopting this flow,
+deploy the resolver through the approved canonical/carrier path and verify the
+`X-Changelog-Publication-Source: github-releases` response header. Distribution
+preflight rejects an old deployment or unavailable release lookup.
+
+The finalizer also requires the exact engineering date on `nowledge-co/mem`
+`main`. `MEM_REPO_TOKEN` remains read-only. A separately scoped
+`MEM_METADATA_TOKEN` (Contents and Pull requests write; Issues write for labels)
+must be configured before distribution to prepare a date-only PR, reuse an existing correction, and request `wey-gu`
+and `hawkingrei`. It never merges. For an already-public release, recovery may omit this token after the engineering
+correction has merged through the normal bot/review process. New publication
+preflight rejects a missing token before any distribution. The run stays incomplete
+until `main` has the correct date; it reports the pending PR or missing token.
+
+If publication succeeded but website cache or engineering archival is pending,
+rerun only this published-release recovery workflow:
+
+```bash
+gh workflow run finalize-ga-release.yml -R wey-gu/mem-releases \
+  -f ga_tag=<version>
+```
+
+It refuses drafts and performs no build, upload, tag move, or website deployment.
+All desktop publication/finalization jobs share a non-cancelling concurrency
+group. A newer GA prevents an older task from moving latest backward; explicit
+older-release mode preserves the newer latest. Website readback retries are
+bounded to six minutes. A failed finalizer means a partial public release,
+not permission to upload the same artifacts again. The `release-publish` environment must enforce required reviewers, prevent
+self-review, and disable admin bypass. Both preflight and finalization read
+these settings and reject missing protection; the jobs wait for GitHub
+environment approval. CLI mutations run only within this repository's workflows.
+These release approvals do not replace the separate website staging/GO proof.
+
+Run the release-history check
 to prove the tagged release branch is patch-equivalent to its recorded `main`
 source commits and that every copied commit has a valid `-x` provenance trailer.
 An ancestor-only check is invalid for this workflow because cherry-pick creates
