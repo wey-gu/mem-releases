@@ -26,6 +26,9 @@ permissions:
 jobs:
   finish:
     runs-on: ubuntu-22.04
+    concurrency:
+      group: ga-desktop-publication
+      cancel-in-progress: false
     environment: release-publish
     env:
       RC: ${{ inputs.rc_tag }}
@@ -41,6 +44,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      - name: Check GA website metadata before distribution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALLOW_NEWER: ${{ inputs.allow_newer_desktop_latest || false }}
+        run: node scripts/finalize-ga-release.mjs preflight "$GA" "$ALLOW_NEWER"
 
       - name: Validate inputs
         run: |
@@ -210,6 +219,14 @@ jobs:
             "${{ steps.rename.outputs.deb }}" \
             "${{ steps.rename.outputs.appimg }}"
 
+      - name: Finalize GA publication and metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+          MEM_METADATA_TOKEN: ${{ secrets.MEM_METADATA_TOKEN }}
+          ALLOW_NEWER: ${{ inputs.allow_newer_desktop_latest || false }}
+        run: node scripts/finalize-ga-release.mjs publish "$GA" "$ALLOW_NEWER"
+
       - name: Summary
         run: |
           {
@@ -220,5 +237,5 @@ jobs:
             else
               echo "- Delivery verified for: latest, latest redirect, direct downloads, update feed, APT"
             fi
-            echo "- GH release tag: v${GA} (draft)"
+            echo "- GH release tag: v${GA} (published; metadata verified)"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,38 @@
+name: finalize-ga-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ga_tag:
+        description: 'Existing GA version to finalize; no uploads or rebuilds'
+        type: string
+        required: true
+      allow_newer_desktop_latest:
+        description: 'Keep a newer GA as latest when finalizing an older release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    name: Finalize GA ${{ inputs.ga_tag }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    environment: release-publish
+    concurrency:
+      group: ga-desktop-publication
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Finalize publication metadata without replacing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+          MEM_METADATA_TOKEN: ${{ secrets.MEM_METADATA_TOKEN }}
+          GA: ${{ inputs.ga_tag }}
+          ALLOW_NEWER: ${{ inputs.allow_newer_desktop_latest }}
+        run: node scripts/finalize-ga-release.mjs finalize "$GA" "$ALLOW_NEWER"

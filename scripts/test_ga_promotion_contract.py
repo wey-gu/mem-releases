@@ -11,6 +11,39 @@ CORE_PLATFORMS = (
 
 
 class GAPromotionContractTest(unittest.TestCase):
+    def test_all_ga_producers_use_shared_finalization_after_delivery_and_assets(self):
+        for name, job in (("promote-rc-to-ga.yml", "promote-desktop"),
+                          ("release-desktop.yml", "publish"),
+                          ("finish-ga-release.yml", "finish")):
+            with self.subTest(workflow=name):
+                workflow = (ROOT / ".github" / "workflows" / name).read_text()
+                section = workflow.split(f"\n  {job}:\n", 1)[1]
+                self.assertLess(section.index("finalize-ga-release.mjs preflight"),
+                                section.index("node ../scripts/verify-ga-delivery.mjs"))
+                self.assertLess(section.index("node ../scripts/verify-ga-delivery.mjs"),
+                                section.index("finalize-ga-release.mjs publish"))
+                self.assertLess(section.index("upload-draft-release-assets.mjs"),
+                                section.index("finalize-ga-release.mjs publish"))
+                self.assertIn("group: ga-desktop-publication", section)
+        promote = (ROOT / ".github" / "workflows" / "promote-rc-to-ga.yml").read_text()
+        validate = promote.split("\n  validate:\n", 1)[1].split("\n  promote-docker:\n", 1)[0]
+        self.assertIn("finalize-ga-release.mjs preflight", validate)
+        direct = (ROOT / ".github" / "workflows" / "release-desktop.yml").read_text()
+        meta = direct.split("\n  meta:\n", 1)[1].split("\n  build-macos-arm64:\n", 1)[0]
+        self.assertIn("finalize-ga-release.mjs preflight", meta)
+        recap = promote.split("\n  recap:\n", 1)[1]
+        self.assertIn("needs.promote-desktop.result == 'skipped'", recap)
+        self.assertIn("finalize-ga-release.mjs finalize", recap)
+        self.assertNotIn("finalize-ga-release.mjs publish", recap)
+
+    def test_metadata_recovery_never_uploads_or_publishes_a_draft(self):
+        recovery = (ROOT / ".github" / "workflows" / "finalize-ga-release.yml").read_text()
+        self.assertIn("finalize-ga-release.mjs finalize", recovery)
+        self.assertNotIn("finalize-ga-release.mjs publish", recovery)
+        self.assertNotIn("upload", recovery.replace("no uploads", ""))
+        self.assertNotIn("wrangler", recovery)
+        self.assertIn("group: ga-desktop-publication", recovery)
+
     def test_desktop_promotion_does_not_deploy_backbone(self):
         for name in ("promote-rc-to-ga.yml", "finish-ga-release.yml"):
             with self.subTest(workflow=name):
