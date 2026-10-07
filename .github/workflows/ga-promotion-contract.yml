@@ -8,11 +8,8 @@ on:
       - .github/workflows/release-desktop.yml
       - .github/workflows/promote-rpm-to-ga.yml
       - .github/workflows/ga-promotion-contract.yml
-      - .github/workflows/date-ga-changelog.yml
       - scripts/date-ga-changelog.mjs
-      - scripts/open-ga-date-pr.sh
       - scripts/test_date_ga_changelog.mjs
-      - scripts/test_open_ga_date_pr.mjs
       - scripts/test_ga_promotion_contract.py
       - scripts/verify-ga-delivery.mjs
       - scripts/test_verify_ga_delivery.mjs
@@ -36,11 +33,8 @@ on:
       - .github/workflows/release-desktop.yml
       - .github/workflows/promote-rpm-to-ga.yml
       - .github/workflows/ga-promotion-contract.yml
-      - .github/workflows/date-ga-changelog.yml
       - scripts/date-ga-changelog.mjs
-      - scripts/open-ga-date-pr.sh
       - scripts/test_date_ga_changelog.mjs
-      - scripts/test_open_ga_date_pr.mjs
       - scripts/test_ga_promotion_contract.py
       - scripts/verify-ga-delivery.mjs
       - scripts/test_verify_ga_delivery.mjs
@@ -72,7 +66,7 @@ jobs:
       - name: Check GA promotion boundary
         run: python3 -m unittest discover -s scripts -p test_ga_promotion_contract.py
       - name: Check GA changelog dates
-        run: node --test scripts/test_date_ga_changelog.mjs scripts/test_open_ga_date_pr.mjs
+        run: node --test scripts/test_date_ga_changelog.mjs
       - name: Check exact GA delivery gate
         run: node --test scripts/test_verify_ga_delivery.mjs
       - name: Check draft Release asset reconciliation

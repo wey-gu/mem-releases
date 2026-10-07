@@ -1,5 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
 
 export function gaDate(release) {
   const version = /^v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/.exec(release.tag_name)?.[1];
@@ -39,10 +41,24 @@ export function dateChangelog(source, release, kind = 'website') {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [releaseFile, targetFile] = process.argv.slice(2);
-  const release = JSON.parse(readFileSync(releaseFile, 'utf8'));
-  const source = readFileSync(targetFile, 'utf8');
-  const dated = dateChangelog(source, release, targetFile.endsWith('.ts') ? 'website' : 'engineering');
-  if (dated !== source) writeFileSync(targetFile, dated);
-  console.log(JSON.stringify({ ...gaDate(release), changed: dated !== source }));
+  const [version, memRoot] = process.argv.slice(2);
+  if (!memRoot || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
+    throw new Error('Usage: node scripts/date-ga-changelog.mjs <x.y.z> <mem-checkout>');
+  }
+  const release = JSON.parse(execFileSync('gh', ['api', '-X', 'GET', `repos/wey-gu/mem-releases/releases/tags/v${version}`], { encoding: 'utf8', timeout: 15000 }));
+  const published = gaDate(release);
+  if (published.version !== version) throw new Error('Release version mismatch.');
+  // Validate both entries before writing, so a date conflict cannot leave one dated.
+  const changes = [
+    ['nowledge-labs-website/nowledge-mem/data/changelog.ts', 'website'],
+    ['nowledge-graph/CHANGELOG.md', 'engineering'],
+  ].map(([file, kind]) => {
+    const path = join(memRoot, file);
+    const source = readFileSync(path, 'utf8');
+    return { path, source, dated: dateChangelog(source, release, kind) };
+  });
+  for (const { path, source, dated } of changes) {
+    if (dated !== source) writeFileSync(path, dated);
+    console.log(`${published.version} / ${published.date}: ${dated === source ? 'unchanged' : 'updated'} ${path}`);
+  }
 }
