@@ -15,6 +15,22 @@ ask a maintainer to synchronize the mirror from the canonical repository.
 Wait for that synchronization and the Changelog deployment to complete,
 then read back the public Changelog before distributing release packages.
 
+# Desktop update delivery
+
+Before package distribution, verify named operator authentication and the
+known-good stable release in the production desktop update authority. After all
+GA artifacts are ready, prepare and publish the exact candidate using the
+observed revision and a persisted operation UUID. Retain the stable recovery
+baseline until the candidate is accepted.
+
+Before declaring desktop delivery complete, verify
+`/latest?platform=<platform>&update_control=1&request_id=<fresh-id>` with the
+previous desktop version's native User-Agent for `mac`, `mac_intel`, `win`,
+`linux-appimage`, `linux-deb`, and `linux-rpm`. Require a fresh protocol-1
+`allowed` response with the expected version, request ID, target, download URL,
+file size, SHA-256 and `no-store` cache policy. Ordinary `/latest` and
+`/update.json` readback alone does not verify desktop Check for Updates.
+
 # Release candidate integrity
 
 For every Nowledge Mem App release, cut a release branch before release
