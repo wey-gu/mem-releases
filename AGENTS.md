@@ -4,6 +4,17 @@ Publish the Changelog website before publishing any release packages. Do not
 start package distribution until the Changelog deployment has completed
 successfully.
 
+# Changelog repository and synchronization
+
+Submit all Changelog and release-note changes to the canonical repository:
+`git@github.com:nowledge-co/nowledge-labs-website`.
+
+`git@github.com:wey-gu/nowledge-labs-website.git` is a mirror. Do not edit,
+commit, or push release-note changes directly to it. During each release,
+ask a maintainer to synchronize the mirror from the canonical repository.
+Wait for that synchronization and the Changelog deployment to complete,
+then read back the public Changelog before distributing release packages.
+
 # Release candidate integrity
 
 For every Nowledge Mem App release, cut a release branch before release
@@ -17,8 +28,8 @@ separate, ordered changes:
    version fields and their generated manifests or lockfiles only; it must not
    include user-facing changelog prose or a `nowledge-labs-website` gitlink
    update.
-3. Draft and review the Changelog in `nowledge-labs-website`, then merge its
-   parent gitlink/history PR **to `main`**. Ordinary product PRs may continue
+3. Draft and review the Changelog in `nowledge-co/nowledge-labs-website`, then
+   merge its parent gitlink/history PR **to `main`**. Ordinary product PRs may continue
    to merge while the notes are prepared. Deploy and read back the public
    Changelog before package distribution.
 4. Record the exact merged `main` commits for the version-only and parent
