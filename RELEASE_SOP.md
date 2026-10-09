@@ -20,15 +20,18 @@ instead of a moving view of `main`.
 
 ## 0. Verify the release capability before the cut
 
-Before creating a branch, verify that the release workflows can read every
-private source dependency and that signing, upload, and registry secrets are
-available. Run the standalone Rust bundle workflow against a known-good source
-ref if the private dependency contract or workflow changed recently.
+Before creating a branch, verify that the release workflows can read the
+private product source and every source-recorded Rust dependency, and that
+signing, upload, and registry secrets are available. Run the standalone Rust
+bundle workflow against a known-good source ref if the dependency contract or
+workflow changed recently.
 
-For renamed private dependencies, preserve the existing deploy-key identity.
-For example, HawDB is the renamed Skein dependency and must be cloned with
-`SKEIN_REPO_SSH_KEY` over SSH, not with a token scoped only to the parent
-source repository.
+The private product source still requires `MEM_REPO_TOKEN`. HawDB is public
+at `https://github.com/nowledge-co/hawdb.git` and must be fetched over HTTPS
+at the exact gitlink recorded by the selected source commit. Its checkout
+does not require a deploy key or a HawDB-specific token. Do not replace the
+recorded commit with a moving branch or tag, and do not persist checkout
+credentials in the dependency.
 
 Do not cut an RC merely to discover a missing credential. An RC tag is
 immutable release evidence, not a disposable CI retry handle.

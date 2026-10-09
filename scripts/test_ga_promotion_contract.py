@@ -1,4 +1,4 @@
-"""Guard the GA recovery boundary that failed during 0.10.94 promotion."""
+"""Guard release source-dependency and GA delivery boundaries."""
 
 import os
 from pathlib import Path
@@ -15,6 +15,80 @@ CORE_PLATFORMS = (
 
 
 class GAPromotionContractTest(unittest.TestCase):
+    def test_public_hawdb_does_not_require_private_credentials(self):
+        workflows = ("release-desktop.yml", "test-windows-bazel.yml", "build-rust-bundle.yml")
+        for name in workflows:
+            with self.subTest(workflow=name):
+                workflow = (ROOT / ".github" / "workflows" / name).read_text()
+                for obsolete in ("SKEIN_REPO_SSH_KEY", "webfactory/ssh-agent",
+                                 "git@github.com:nowledge-co/hawdb.git"):
+                    self.assertFalse(obsolete in workflow, f"{name} still requires {obsolete}")
+                self.assertIn("repository: nowledge-co/mem", workflow)
+                self.assertIn("secrets.MEM_REPO_TOKEN", workflow)
+
+    def test_hawdb_checkout_uses_the_exact_source_gitlink(self):
+        expected_sha = "1519433bb70900bf3f51f5a3ed93de0873072713"
+        for name in ("release-desktop.yml", "test-windows-bazel.yml"):
+            workflow = (ROOT / ".github" / "workflows" / name).read_text()
+            checkout = workflow.split("name: Checkout HawDB dependency\n", 1)[1].split(
+                "\n      - ", 1
+            )[0]
+            self.assertIn("if: steps.desktop_dependency.outputs.sha != ''", checkout)
+            self.assertIn("repository: nowledge-co/hawdb", checkout)
+            self.assertRegex(
+                checkout,
+                r'(?m)^          ref: "?\$\{\{ steps\.desktop_dependency\.outputs\.sha \}\}"?$',
+            )
+            self.assertIn("persist-credentials: false", checkout)
+            self.assertNotIn("ssh-key:", checkout)
+            self.assertNotIn("token:", checkout)
+            resolver = workflow.split("        id: desktop_dependency\n", 1)[1].split(
+                "\n      - ", 1
+            )[0]
+            script = "\n".join(
+                line[10:] for line in resolver.split("        run: |\n", 1)[1].splitlines()
+            )
+            cases = ((True, "gitlink"), (False, "missing"), (True, "blob"), (True, "missing"))
+            for has_contract, entry_kind in cases:
+                with (
+                    self.subTest(workflow=name, has_contract=has_contract, entry_kind=entry_kind),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    root = Path(directory)
+                    source_script = root / "nowledge-graph" / "scripts" / "build-rust-bundle.sh"
+                    source_script.parent.mkdir(parents=True)
+                    source_script.write_text("--init-desktop-https\n" if has_contract else "legacy source\n")
+                    git_env = {
+                        **os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                    }
+
+                    def git(*args):
+                        return subprocess.run(["git", *args], cwd=root, env=git_env, check=True,
+                                              capture_output=True, text=True)
+
+                    git("init", "-q")
+                    git("add", "nowledge-graph")
+                    if entry_kind == "gitlink":
+                        git("update-index", "--add", "--cacheinfo", f"160000,{expected_sha},hawdb")
+                    elif entry_kind == "blob":
+                        (root / "hawdb").write_text("This is not a dependency gitlink.\n")
+                        git("add", "hawdb")
+                    git("-c", "user.name=Release Contract", "-c", "user.email=release-contract@example.invalid",
+                        "commit", "--no-gpg-sign", "-qm", "Record candidate dependency")
+                    output = root / "github-output"
+                    result = subprocess.run(["bash", "-c", script], cwd=root, check=False,
+                                            env={**git_env, "GITHUB_OUTPUT": str(output)},
+                                            capture_output=True, text=True)
+                    if has_contract and entry_kind != "gitlink":
+                        self.assertNotEqual(
+                            result.returncode, 0, "Malformed source dependency must stop checkout"
+                        )
+                        self.assertFalse(output.exists())
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(output.read_text() if output.exists() else "",
+                                         f"sha={expected_sha}\n" if has_contract else "")
+
     def test_windows_pre_cache_initialization_uses_source_contract_and_propagates_failure(self):
         workflow = (ROOT / ".github" / "workflows" / "release-desktop.yml").read_text()
         windows = workflow.split("\n  build-windows:\n", 1)[1].split("\n  build-linux-deb-appimage:\n", 1)[0]
