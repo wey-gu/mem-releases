@@ -1,1 +1,1 @@
-Fixture guide v2. Review all files before apply.
+Fixture guide v3. Discard should retain live v2.
