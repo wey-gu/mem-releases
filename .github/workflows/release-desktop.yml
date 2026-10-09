@@ -472,19 +472,6 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
-      - &checkout_bazel_observability_tools
-        name: Checkout Bazel release tools
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository }}
-          ref: ${{ github.sha }}
-          path: release-tools
-          persist-credentials: false
-
-      - &enable_bazel_build_observability
-        name: Enable Bazel build logging
-        uses: ./release-tools/.github/actions/bazel-build-observability
-
       - name: Authenticate Bazel remote cache
         continue-on-error: true
         uses: google-github-actions/auth@v3
@@ -657,9 +644,6 @@ jobs:
         with:
           bazelisk-cache: true
           repository-cache: true
-
-      - *checkout_bazel_observability_tools
-      - *enable_bazel_build_observability
 
       - name: Authenticate Bazel remote cache
         continue-on-error: true
@@ -1028,9 +1012,6 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
-      - *checkout_bazel_observability_tools
-      - *enable_bazel_build_observability
-
       - name: Authenticate Bazel remote cache
         continue-on-error: true
         uses: google-github-actions/auth@v3
@@ -1193,9 +1174,6 @@ jobs:
         with:
           bazelisk-cache: true
           repository-cache: true
-
-      - *checkout_bazel_observability_tools
-      - *enable_bazel_build_observability
 
       - name: Authenticate Bazel remote cache
         continue-on-error: true
@@ -1615,9 +1593,6 @@ jobs:
         with:
           bazelisk-cache: true
           repository-cache: true
-
-      - *checkout_bazel_observability_tools
-      - *enable_bazel_build_observability
 
       - name: Authenticate Bazel remote cache
         continue-on-error: true

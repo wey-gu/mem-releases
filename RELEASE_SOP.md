@@ -56,20 +56,6 @@ source SHA, and retains the installer as the `windows-bazel-x86_64` Actions
 artifact. It runs only on manual dispatch and has no release or distribution
 job. Its result is tracked separately from the core Cargo release.
 
-### Bazel build diagnostics
-
-Desktop Bazel jobs and the manual Windows validation job enable a shared Bash
-logging action from the workflow's exact tooling commit. Each build prints its
-module and sanitized command, streams native Bazel output through `tee`, and
-copies Bazel's elapsed-time and process/cache summary lines into the Job Summary.
-Failures retain their original exit code; query and info streams pass through
-unchanged. Missing statistics are marked not reported.
-
-The root `.bazelrc` already enables `build --announce_rc`. Logging adds no build
-flags and leaves each module's existing configuration in control. It has no
-Python runtime dependency, BEP parsing, inferred cache hit percentage, or raw
-log artifact upload. Native packaging qualification starts with the 0.10.99 RC.
-
 ## 1. Cut the release branch first
 
 Choose the last intended product commit on `main`, fetch it, and record it:

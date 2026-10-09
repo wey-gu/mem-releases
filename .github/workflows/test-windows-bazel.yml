@@ -197,15 +197,6 @@ jobs:
         with:
           bazelisk-cache: true
           repository-cache: true
-      - name: Checkout Bazel release tools
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository }}
-          ref: ${{ github.sha }}
-          path: release-tools
-          persist-credentials: false
-      - name: Enable Bazel build logging
-        uses: ./release-tools/.github/actions/bazel-build-observability
       - name: Authenticate Bazel remote cache
         continue-on-error: true
         uses: google-github-actions/auth@v3
