@@ -4,6 +4,33 @@ Publish the Changelog website before publishing any release packages. Do not
 start package distribution until the Changelog deployment has completed
 successfully.
 
+# Changelog repository and synchronization
+
+Submit all Changelog and release-note changes to the canonical repository:
+`git@github.com:nowledge-co/nowledge-labs-website`.
+
+`git@github.com:wey-gu/nowledge-labs-website.git` is a mirror. Do not edit,
+commit, or push release-note changes directly to it. During each release,
+ask a maintainer to synchronize the mirror from the canonical repository.
+Wait for that synchronization and the Changelog deployment to complete,
+then read back the public Changelog before distributing release packages.
+
+# Desktop update delivery
+
+Before package distribution, verify named operator authentication and the
+known-good stable release in the production desktop update authority. After all
+GA artifacts are ready, prepare and publish the exact candidate using the
+observed revision and a persisted operation UUID. Retain the stable recovery
+baseline until the candidate is accepted.
+
+Before declaring desktop delivery complete, verify
+`/latest?platform=<platform>&update_control=1&request_id=<fresh-id>` with the
+previous desktop version's native User-Agent for `mac`, `mac_intel`, `win`,
+`linux-appimage`, `linux-deb`, and `linux-rpm`. Require a fresh protocol-1
+`allowed` response with the expected version, request ID, target, download URL,
+file size, SHA-256 and `no-store` cache policy. Ordinary `/latest` and
+`/update.json` readback alone does not verify desktop Check for Updates.
+
 # Release candidate integrity
 
 For every Nowledge Mem App release, cut a release branch before release
@@ -17,8 +44,8 @@ separate, ordered changes:
    version fields and their generated manifests or lockfiles only; it must not
    include user-facing changelog prose or a `nowledge-labs-website` gitlink
    update.
-3. Draft and review the Changelog in `nowledge-labs-website`, then merge its
-   parent gitlink/history PR **to `main`**. Ordinary product PRs may continue
+3. Draft and review the Changelog in `nowledge-co/nowledge-labs-website`, then
+   merge its parent gitlink/history PR **to `main`**. Ordinary product PRs may continue
    to merge while the notes are prepared. Deploy and read back the public
    Changelog before package distribution.
 4. Record the exact merged `main` commits for the version-only and parent
@@ -26,9 +53,11 @@ separate, ordered changes:
    with `git cherry-pick -x`, in dependency order. Never merge `main` into the
    release branch or pick unrelated product commits.
 5. Record the resulting release-branch head as `RELEASE_SHA`. Run every source
-   preflight and native-link check against `RELEASE_SHA`; create RC and GA tags
-   only from that commit. A tag does not need to be a Git ancestor of `main`;
-   it must have auditable `-x` provenance to the reviewed `main` metadata.
+   preflight against `RELEASE_SHA`. Observe the merge-triggered
+   `ci/mem-native-link-arm64` result and stop only if it has failed; do not
+   manually trigger it for a release. Create RC and GA tags only from the
+   resulting commit. A tag does not need to be a Git ancestor of `main`; it
+   must have auditable `-x` provenance to the reviewed `main` metadata.
 6. After GA, date the Changelog entry and merge its website and parent gitlink
    updates to `main`. Run the release-history check for patch-equivalence and
    `-x` provenance, rather than an ancestor-only check.

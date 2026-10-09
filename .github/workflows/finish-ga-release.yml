@@ -8,13 +8,13 @@ on:
         required: true
         type: string
       ga_tag:
-        description: "GA version already promoted to R2/APT/Docker (e.g. 0.9.4; clean semver)"
+        description: "GA version already promoted to R2/Docker (and APT for normal GA; clean semver)"
         required: true
         type: string
-      push_latest:
-        description: "Move production auto-updater feed/latest endpoints to GA"
+      allow_newer_desktop_latest:
+        description: "For an older out-of-band GA only: allow desktop latest to remain at a newer GA"
         type: boolean
-        default: true
+        default: false
 
 concurrency:
   group: finish-ga-${{ github.event.inputs.ga_tag }}
@@ -30,7 +30,6 @@ jobs:
     env:
       RC: ${{ inputs.rc_tag }}
       GA: ${{ inputs.ga_tag }}
-      RUN_LATEST: ${{ inputs.push_latest }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -39,6 +38,10 @@ jobs:
       CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Validate inputs
         run: |
           set -euo pipefail
@@ -48,6 +51,21 @@ jobs:
           fi
           if [[ "${RC%%-*}" != "$GA" ]]; then
             echo "::error::RC base '${RC%%-*}' does not match GA '$GA'."
+            exit 1
+          fi
+
+      - name: Refuse to modify a published GA Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if draft="$(gh api "repos/${{ github.repository }}/releases/tags/v${GA}" --jq .draft 2>release-lookup.err)"; then
+            if [[ "$draft" != "true" ]]; then
+              echo "::error::v${GA} is already published; recovery must not replace its assets."
+              exit 1
+            fi
+          elif ! grep -q 'HTTP 404' release-lookup.err; then
+            cat release-lookup.err >&2
             exit 1
           fi
 
@@ -69,22 +87,6 @@ jobs:
         working-directory: mem-backbone
         run: npm ci --no-audit --no-fund
 
-      - name: Mark as latest (production auto-updater feed)
-        if: ${{ env.RUN_LATEST == 'true' }}
-        working-directory: mem-backbone
-        env:
-          WRANGLER_ENV: production
-        run: |
-          set -euo pipefail
-          export PATH="$PWD/node_modules/.bin:$PATH"
-          if ! command -v wrangler >/dev/null 2>&1; then
-            echo "::warning::wrangler not found in node_modules/.bin; installing inline"
-            npm install --no-save --no-audit --no-fund wrangler
-            export PATH="$PWD/node_modules/.bin:$PATH"
-          fi
-          wrangler --version
-          node scripts/update-latest-version.js "$GA" "$WRANGLER_ENV"
-
       - name: Purge Cloudflare edge cache for uploaded keys
         if: ${{ env.CLOUDFLARE_ZONE_ID != '' && env.CLOUDFLARE_API_TOKEN != '' }}
         run: |
@@ -99,7 +101,6 @@ jobs:
             "https://${host}/app/${GA}/x86_64-pc-windows-msvc.exe"
             "https://${host}/app/${GA}/x86_64-unknown-linux-gnu.deb"
             "https://${host}/app/${GA}/x86_64-unknown-linux-gnu.AppImage"
-            "https://${host}/app/${GA}/x86_64-unknown-linux-gnu.rpm"
           )
           files_json=$(printf '"%s",' "${urls[@]}")
           files_json="[${files_json%,}]"
@@ -112,19 +113,29 @@ jobs:
           echo "$response" | python3 -m json.tool
           echo "$response" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('success') else 1)"
 
-      - name: Verify download delivery (R2 + APT + Worker)
+      - name: Verify download delivery (R2 + optional APT + Worker)
         working-directory: mem-backbone
         run: |
           set -euo pipefail
           echo "Pre-settle 20s before first verify attempt..."
           sleep 20
 
+          scope='latest,latest-redirect,direct,update'
+          health_scope='latest'
+          if [[ "${{ inputs.allow_newer_desktop_latest }}" != "true" ]]; then
+            scope="${scope},apt"
+            health_scope="${health_scope},apt"
+          fi
+
           attempts=5
           delay=15
           for i in $(seq 1 "$attempts"); do
             echo "::group::Verify download delivery (attempt $i/$attempts)"
-            if VERIFY_RELEASE_VERSION="$GA" VERIFY_SCOPE="latest,latest-redirect,direct,update,apt" \
-                 timeout -k 10s 90s node scripts/verify-download-delivery.mjs; then
+            export VERIFY_RELEASE_VERSION="$GA" VERIFY_SCOPE="$scope"
+            export VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-appimage"
+            export VERIFY_ALLOW_NEWER_LATEST="${{ inputs.allow_newer_desktop_latest }}"
+            if VERIFY_SCOPE="$health_scope" timeout -k 10s 90s node scripts/verify-download-delivery.mjs &&
+               timeout -k 10s 90s node ../scripts/verify-ga-delivery.mjs; then
               echo "::endgroup::"
               echo "Download delivery verified on attempt $i."
               exit 0
@@ -163,8 +174,7 @@ jobs:
           EXE_WIN="$(find . -maxdepth 1 -type f -iname '*.exe' -print -quit)"
           DEB="$(find . -maxdepth 1 -type f -iname '*.deb' -print -quit)"
           APPIMG="$(find . -maxdepth 1 -type f -iname '*.AppImage' -print -quit)"
-          RPM="$(find . -maxdepth 1 -type f -iname '*.rpm' -print -quit)"
-          for kv in DMG_ARM:"$DMG_ARM" DMG_X64:"$DMG_X64" EXE_WIN:"$EXE_WIN" DEB:"$DEB" APPIMG:"$APPIMG" RPM:"$RPM"; do
+          for kv in DMG_ARM:"$DMG_ARM" DMG_X64:"$DMG_X64" EXE_WIN:"$EXE_WIN" DEB:"$DEB" APPIMG:"$APPIMG"; do
             name="${kv%%:*}"; val="${kv#*:}"
             if [[ -z "$val" || ! -f "$val" ]]; then
               echo "::error::Missing artifact after rename: $name"
@@ -177,7 +187,6 @@ jobs:
             echo "exe_win=$PWD/$EXE_WIN"
             echo "deb=$PWD/$DEB"
             echo "appimg=$PWD/$APPIMG"
-            echo "rpm=$PWD/$RPM"
           } >> "$GITHUB_OUTPUT"
 
       - name: Create draft GA GitHub release
@@ -187,23 +196,29 @@ jobs:
           set -euo pipefail
           TAG="v${GA}"
           REPO="${{ github.repository }}"
-          gh release view "$TAG" -R "$REPO" >/dev/null 2>&1 || gh release create "$TAG" -R "$REPO" \
-            --title "Nowledge Mem ${GA}" \
-            --draft \
-            --notes "Promoted from v${RC}. Same bits; generated by finish-ga-release after promote-rc-to-ga completed Docker/R2/APT but stopped before the feed/release tail."
-          gh release upload "$TAG" -R "$REPO" --clobber \
+          if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$REPO" \
+              --title "Nowledge Mem ${GA}" \
+              --draft \
+              --notes "Promoted from v${RC}. Same bits; generated by finish-ga-release after the core promotion stopped before GA Release creation." \
+              || gh release view "$TAG" -R "$REPO" >/dev/null
+          fi
+          node scripts/upload-draft-release-assets.mjs "$TAG" "$REPO" \
             "${{ steps.rename.outputs.dmg_arm }}" \
             "${{ steps.rename.outputs.dmg_x64 }}" \
             "${{ steps.rename.outputs.exe_win }}" \
             "${{ steps.rename.outputs.deb }}" \
-            "${{ steps.rename.outputs.appimg }}" \
-            "${{ steps.rename.outputs.rpm }}"
+            "${{ steps.rename.outputs.appimg }}"
 
       - name: Summary
         run: |
           {
             echo "### Finished GA ${GA}"
-            echo "- Latest feed moved: ${RUN_LATEST}"
-            echo "- Delivery verified for: latest, latest redirect, direct downloads, update feed, APT"
+            echo "- Desktop latest: dynamically discovered from R2 (verified)"
+            if [[ "${{ inputs.allow_newer_desktop_latest }}" == "true" ]]; then
+              echo "- Delivery verified for: latest, latest redirect, direct downloads, update feed (APT unchanged)"
+            else
+              echo "- Delivery verified for: latest, latest redirect, direct downloads, update feed, APT"
+            fi
             echo "- GH release tag: v${GA} (draft)"
           } >> "$GITHUB_STEP_SUMMARY"

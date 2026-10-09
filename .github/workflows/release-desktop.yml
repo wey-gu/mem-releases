@@ -30,7 +30,12 @@ on:
         type: boolean
         default: true
       latest:
-        description: "Mark this version as latest in the auto-updater feed."
+        description: "Deprecated compatibility input; desktop latest is discovered from R2 and this value does not gate it."
+        required: false
+        type: boolean
+        default: false
+      allow_newer_desktop_latest:
+        description: "For an older out-of-band GA only: keep newer desktop latest and skip APT; exact GA downloads are still required"
         required: false
         type: boolean
         default: false
@@ -87,16 +92,20 @@ jobs:
       source_ref: ${{ steps.resolve.outputs.source_ref }}
       is_dry_run: ${{ steps.resolve.outputs.is_dry_run }}
       run_publish: ${{ steps.resolve.outputs.run_publish }}
-      run_latest: ${{ steps.resolve.outputs.run_latest }}
       run_vulkan: ${{ steps.resolve.outputs.run_vulkan }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - id: resolve
         name: Resolve version + source ref + flags
         shell: bash
         env:
           DISPATCH_TAG: ${{ inputs.tag }}
           DISPATCH_PUBLISH: ${{ inputs.publish }}
-          DISPATCH_LATEST: ${{ inputs.latest }}
           DISPATCH_VULKAN: ${{ inputs.build_vulkan }}
           PAYLOAD_REF: ${{ github.event.client_payload.ref }}
           PAYLOAD_VERSION: ${{ github.event.client_payload.version }}
@@ -114,7 +123,6 @@ jobs:
               VERSION="$DISPATCH_TAG"
               SOURCE_REF="v${VERSION}"
               PUBLISH="$DISPATCH_PUBLISH"
-              LATEST="$DISPATCH_LATEST"
               VULKAN="$DISPATCH_VULKAN"
               ;;
             push)
@@ -122,13 +130,11 @@ jobs:
               VERSION="${PUSH_REF#v}"
               SOURCE_REF="$PUSH_REF"
               PUBLISH="true"
-              LATEST="false"
               ;;
             repository_dispatch)
               VERSION="$PAYLOAD_VERSION"
               SOURCE_REF="$PAYLOAD_REF"
               PUBLISH="true"
-              LATEST="false"
               ;;
             *)
               echo "::error::Unsupported event: $EVENT_NAME"
@@ -139,26 +145,71 @@ jobs:
           # run. Only a bare semver `X.Y.Z` ever publishes. Same gate as
           # the private repo's workflow.
           if [[ "$VERSION" == *-* ]]; then
-            DRY="true"; PUBLISH="false"; LATEST="false"
+            DRY="true"; PUBLISH="false"
           else
             DRY="false"
           fi
           # Normalize VULKAN to a strict true/false ("" from a non-dispatch
-          # trigger becomes false). NEVER touches publish/latest/updater.
+          # trigger becomes false). NEVER touches publish/updater.
           if [[ "$VULKAN" == "true" ]]; then VULKAN="true"; else VULKAN="false"; fi
           echo "version=$VERSION"        >> "$GITHUB_OUTPUT"
           echo "source_ref=$SOURCE_REF"  >> "$GITHUB_OUTPUT"
           echo "is_dry_run=$DRY"         >> "$GITHUB_OUTPUT"
           echo "run_publish=$PUBLISH"    >> "$GITHUB_OUTPUT"
-          echo "run_latest=$LATEST"      >> "$GITHUB_OUTPUT"
           echo "run_vulkan=$VULKAN"      >> "$GITHUB_OUTPUT"
-          echo "Resolved: version=$VERSION source_ref=$SOURCE_REF dry=$DRY publish=$PUBLISH latest=$LATEST vulkan=$VULKAN"
+          echo "Resolved: version=$VERSION source_ref=$SOURCE_REF dry=$DRY publish=$PUBLISH vulkan=$VULKAN"
+
+      - name: Pre-flight GA policy before build and optional Vulkan jobs
+        if: ${{ steps.resolve.outputs.run_publish == 'true' }}
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          VERIFY_ALLOW_NEWER_LATEST: ${{ inputs.allow_newer_desktop_latest }}
+          VERIFY_PLATFORMS: mac,mac-intel,win,linux,linux-deb,linux-rpm,linux-appimage
+        run: |
+          set -euo pipefail
+          if [[ "$VERIFY_ALLOW_NEWER_LATEST" != "true" && -z "$GPG_PRIVATE_KEY" ]]; then
+            echo "::error::GPG_PRIVATE_KEY is required for direct GA APT publication."
+            exit 1
+          fi
+          VERIFY_RELEASE_VERSION="$VERSION" node scripts/verify-ga-delivery.mjs --preflight
+
+      - name: Refuse an existing GA Release before build and Vulkan jobs
+        if: ${{ steps.resolve.outputs.run_publish == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          releases="$(gh release list -R "${{ github.repository }}" --limit 1000 --json tagName)"
+          if [[ "$(jq length <<<"$releases")" -ge 1000 ]]; then
+            echo "::error::GA Release inventory is truncated; refusing direct GA."
+            exit 1
+          fi
+          if jq -e --arg tag "v${VERSION}" '.[] | select(.tagName == $tag)' <<<"$releases" >/dev/null; then
+            echo "::error::v${VERSION} already has a Release; use explicit recovery rather than a rebuild."
+            exit 1
+          fi
+
+      - name: Install release-owned R2 preflight dependency
+        if: ${{ steps.resolve.outputs.run_publish == 'true' }}
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Refuse existing R2 GA objects before build and Vulkan jobs
+        if: ${{ steps.resolve.outputs.run_publish == 'true' }}
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: node scripts/assert-fresh-r2-version.mjs "$VERSION" all
 
   # -----------------------------------------------------------------------
   # NOTE: the former NON-GATING `rust-backend` companion job (strangler
   # Phase 1, via build-rust-bundle.yml) has been retired. 0.10.0 desktop
   # ships RUST-ONLY: each of the five build jobs below now builds its own
-  # native nmem-server binary in-place (via build-rust-bundle.{sh,ps1})
+  # native Rust payload in-place (Unix uses Bazel; Windows uses Cargo)
   # and bundles it through Tauri's resources, so a separate companion
   # artifact job is no longer needed.
   # -----------------------------------------------------------------------
@@ -171,7 +222,7 @@ jobs:
 
   build-macos-arm64:
     needs: meta
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 180
     env:
       VERSION: ${{ needs.meta.outputs.version }}
@@ -295,12 +346,12 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
-      # Defensive: on the macos-14 arm64 runner the rustup proxy ends up
+      # Defensive: on an arm64 macOS runner the rustup proxy ends up
       # routing `cargo` to `rustup-init` when the toolchain target matches
       # the host arch (seen 2026-05-14 — `cargo metadata` printed
       # rustup-init's help text). Pin the default to the source-declared Rust
       # version and print the resolved toolchain so failures are diagnosable.
-      - name: Pin default toolchain (workaround for macos-14 arm64 proxy)
+      - name: Pin default toolchain (workaround for arm64 rustup proxy)
         run: |
           set -euo pipefail
           rustup default 1.98.1
@@ -449,7 +500,7 @@ jobs:
           unset APPLE_CERTIFICATE
           unset APPLE_CERTIFICATE_PASSWORD
           rm -rf python-standalone rust-backend
-          ./scripts/build-rust-bundle.sh --target aarch64-apple-darwin --bazel-public-binaries
+          ./scripts/build-rust-bundle.sh --target aarch64-apple-darwin --bazel-public-binaries --bazel-hawdb-server
           ./scripts/build-macos.sh --arch arm64 --skip-python
 
       - name: Locate + rename DMG
@@ -473,7 +524,7 @@ jobs:
 
   build-macos-x86_64:
     needs: meta
-    runs-on: macos-14
+    runs-on: macos-15-intel
     timeout-minutes: 180
     env:
       VERSION: ${{ needs.meta.outputs.version }}
@@ -604,11 +655,20 @@ jobs:
           brew install cmake ninja protobuf
           rustup target add x86_64-apple-darwin
 
-      # RISK H1 (cross-arch build): this compiles the full static stack
-      # (llama.cpp + Metal, ladybug/kuzu C++, lancedb, boringssl) for
-      # x86_64 ON the arm64 macos-14 runner. This is the highest-risk build
-      # of the matrix and may need a native x86_64 runner if the cross-arch
-      # C/C++ toolchain misbehaves.
+      - name: Set up Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+
+      - name: Authenticate Bazel remote cache
+        continue-on-error: true
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.GCP_BAZEL_CACHE_PROJECT_ID }}
+          workload_identity_provider: ${{ env.GCP_BAZEL_CACHE_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_BAZEL_CACHE_SERVICE_ACCOUNT }}
+
       - name: Build (x86_64, rust backend, signed, notarized)
         working-directory: nowledge-graph
         run: |
@@ -616,7 +676,7 @@ jobs:
           unset APPLE_CERTIFICATE
           unset APPLE_CERTIFICATE_PASSWORD
           rm -rf python-standalone rust-backend
-          ./scripts/build-rust-bundle.sh --target x86_64-apple-darwin
+          ./scripts/build-rust-bundle.sh --target x86_64-apple-darwin --bazel-public-binaries --bazel-hawdb-server
           ./scripts/build-macos.sh --arch x86_64 --skip-python
 
       - name: Locate + rename DMG
@@ -686,14 +746,20 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Initialize Rust path dependencies before cache restore
-        shell: pwsh
+      - &initialize_windows_path_dependencies
+        name: Initialize Rust path dependencies before cache restore
+        shell: bash
         run: |
-          "XDG_CACHE_HOME=$env:RUNNER_TEMP/nmem-pdfium-cache" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git `
-              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git `
-              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          set -euo pipefail
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/nmem-pdfium-cache" >> "$GITHUB_ENV"
+          if [[ -x scripts/init-release-rust-submodules.sh ]]; then
+            scripts/init-release-rust-submodules.sh --init-https
+          else
+            echo "::warning::Source ref predates the release submodule helper; using the legacy contract."
+            git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git \
+                -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
+                submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
+          fi
 
       # BoringSSL (boring-sys2) assembles its crypto with NASM. The pinned
       # windows-2022 image (MSVC 14.44, needed because 14.51 breaks ladybug's
@@ -823,6 +889,8 @@ jobs:
       - name: Build Rust backend bundle (Windows)
         working-directory: nowledge-graph
         shell: pwsh
+        # Restore the Cargo entry point used by the successful v0.10.91-rc2
+        # Windows build. Bazel validation lives in test-windows-bazel.yml.
         run: .\scripts\build-rust-bundle.ps1 -Target x86_64-pc-windows-msvc
 
       - name: Build Tauri (NSIS)
@@ -976,7 +1044,7 @@ jobs:
 
       - name: Build Rust backend bundle (Linux x86_64)
         working-directory: nowledge-graph
-        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --bazel-public-binaries
+        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --bazel-public-binaries --bazel-hawdb-server
 
       - name: Build .deb + .AppImage (Tauri native)
         working-directory: nowledge-graph
@@ -1142,7 +1210,7 @@ jobs:
 
       - name: Build Rust backend bundle (Linux x86_64)
         working-directory: nowledge-graph
-        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --bazel-public-binaries
+        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --bazel-public-binaries --bazel-hawdb-server
 
       - name: Checkout RPM packaging tools
         uses: actions/checkout@v4
@@ -1203,7 +1271,7 @@ jobs:
   #   publish/prerelease jobs `find` artifacts only under the CPU bucket
   #   names (`windows-x86_64`, `linux-deb-appimage`, `linux-rpm`), so a
   #   -vulkan artifact can never be picked up by the R2 upload, the APT
-  #   repo, or the `Mark as latest` updater-feed step. The -vulkan bundles
+  #   repo, or the core updater delivery check. The -vulkan bundles
   #   are attached DIRECTLY to the GH Release as MANUAL DOWNLOADS ONLY.
   #   See docs/implementation/RUST_DESKTOP_GPU_ACCELERATION.md (CI plan §4).
   # =======================================================================
@@ -1250,14 +1318,7 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Initialize Rust path dependencies before cache restore
-        shell: pwsh
-        run: |
-          "XDG_CACHE_HOME=$env:RUNNER_TEMP/nmem-pdfium-cache" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git `
-              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git `
-              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - *initialize_windows_path_dependencies
 
       # BoringSSL (boring-sys2) assembles its crypto with NASM. The pinned
       # windows-2022 image (MSVC 14.44, needed because 14.51 breaks ladybug's
@@ -1399,16 +1460,23 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - uses: actions/checkout@v4
+        with:
+          path: release-tools
+          persist-credentials: false
+
       # Attach DIRECTLY to the GH Release as a manual download. This is the
       # ONLY distribution path for -vulkan: it never touches R2, APT, or the
-      # auto-updater feed. `--clobber` makes a rerun idempotent, and
-      # `view || create` tolerates this job racing ahead of the
-      # publish / pre-release preparation jobs by creating the tag if needed. We
+      # auto-updater feed. Draft assets are reconciled by SHA-256; a rerun
+      # skips identical bytes and refuses different bytes.
+      # A competing job may create the draft after our first view. A failed
+      # create is followed by another view before proceeding. We
       # MATCH the release flavor those jobs use so we never accidentally
       # create a GA-flavored release for an rc: a dry-run (rc/ci/beta) gets
       # `--prerelease --draft` (the load-bearing flag that keeps the rc OUT of
       # the auto-updater feed); a clean GA tag gets `--draft`.
       - name: Attach -vulkan installer to GH Release (manual download only)
+        if: ${{ needs.meta.outputs.is_dry_run == 'true' || needs.meta.outputs.run_publish == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -1418,11 +1486,15 @@ jobs:
           TAG="v${VERSION}"
           FLAGS=(--draft)
           if [[ "$IS_DRY_RUN" == "true" ]]; then FLAGS+=(--prerelease); fi
-          gh release view "$TAG" -R "$REPO" >/dev/null 2>&1 || gh release create "$TAG" -R "$REPO" \
-            "${FLAGS[@]}" \
-            --title "Nowledge Mem ${VERSION}" \
-            --notes "Desktop bundles for ${VERSION}."
-          gh release upload "$TAG" -R "$REPO" --clobber "${{ steps.locate.outputs.exe }}"
+          if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$REPO" \
+              "${FLAGS[@]}" \
+              --title "Nowledge Mem ${VERSION}" \
+              --notes "Desktop bundles for ${VERSION}." \
+              || gh release view "$TAG" -R "$REPO" >/dev/null
+          fi
+          node release-tools/scripts/upload-draft-release-assets.mjs "$TAG" "$REPO" \
+            "${{ steps.locate.outputs.exe }}"
 
   build-linux-vulkan:
     needs: meta
@@ -1642,6 +1714,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - uses: actions/checkout@v4
+        with:
+          path: release-tools
+          persist-credentials: false
+
       # Attach DIRECTLY to the GH Release as manual downloads only (never R2 /
       # APT / auto-updater). See the Windows -vulkan job for the rationale.
       # NOTE for the lead: the AppImage self-contains libvulkan.so.1 (bundled
@@ -1651,6 +1728,7 @@ jobs:
       # vulkan loader package would fail to start. The AppImage is the
       # recommended, self-contained Linux -vulkan download.
       - name: Attach -vulkan bundles to GH Release (manual download only)
+        if: ${{ needs.meta.outputs.is_dry_run == 'true' || needs.meta.outputs.run_publish == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -1660,11 +1738,14 @@ jobs:
           TAG="v${VERSION}"
           FLAGS=(--draft)
           if [[ "$IS_DRY_RUN" == "true" ]]; then FLAGS+=(--prerelease); fi
-          gh release view "$TAG" -R "$REPO" >/dev/null 2>&1 || gh release create "$TAG" -R "$REPO" \
-            "${FLAGS[@]}" \
-            --title "Nowledge Mem ${VERSION}" \
-            --notes "Desktop bundles for ${VERSION}."
-          gh release upload "$TAG" -R "$REPO" --clobber \
+          if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$REPO" \
+              "${FLAGS[@]}" \
+              --title "Nowledge Mem ${VERSION}" \
+              --notes "Desktop bundles for ${VERSION}." \
+              || gh release view "$TAG" -R "$REPO" >/dev/null
+          fi
+          node release-tools/scripts/upload-draft-release-assets.mjs "$TAG" "$REPO" \
             "${{ steps.locate.outputs.deb }}" \
             "${{ steps.locate.outputs.appimage }}"
 
@@ -1797,7 +1878,6 @@ jobs:
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
-      RUN_LATEST: ${{ needs.meta.outputs.run_latest }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -1809,6 +1889,10 @@ jobs:
       GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
       GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Pre-flight version safety check
         run: |
           set -euo pipefail
@@ -1818,6 +1902,21 @@ jobs:
           fi
           if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Version '$VERSION' is not a clean semver."
+            exit 1
+          fi
+
+      - name: Refuse to overwrite a published GA Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if draft="$(gh api "repos/${{ github.repository }}/releases/tags/v${VERSION}" --jq .draft 2>release-lookup.err)"; then
+            if [[ "$draft" != "true" ]]; then
+              echo "::error::v${VERSION} is already published; direct GA must not replace its assets."
+              exit 1
+            fi
+          elif ! grep -q 'HTTP 404' release-lookup.err; then
+            cat release-lookup.err >&2
             exit 1
           fi
 
@@ -1843,6 +1942,18 @@ jobs:
       - name: Install mem-backbone npm deps
         working-directory: mem-backbone
         run: npm ci --no-audit --no-fund
+
+      - name: Pre-flight desktop version and APT policy
+        env:
+          VERIFY_ALLOW_NEWER_LATEST: ${{ inputs.allow_newer_desktop_latest }}
+          VERIFY_PLATFORMS: mac,mac-intel,win,linux,linux-deb,linux-rpm,linux-appimage
+        run: |
+          set -euo pipefail
+          if [[ "$VERIFY_ALLOW_NEWER_LATEST" != "true" && -z "$GPG_PRIVATE_KEY" ]]; then
+            echo "::error::GPG_PRIVATE_KEY is required for core GA APT publication."
+            exit 1
+          fi
+          VERIFY_RELEASE_VERSION="$VERSION" node scripts/verify-ga-delivery.mjs --preflight
 
       - name: Import GPG signing key
         run: |
@@ -1903,11 +2014,8 @@ jobs:
           node scripts/upload-package.cjs "$VERSION" linux     "${{ steps.paths.outputs.appimg }}"
           node scripts/upload-package.cjs "$VERSION" linux     "${{ steps.paths.outputs.rpm }}"
 
-      # Why this step exists: if the publish job runs more than once for
-      # the same version (e.g. a downstream step failed and we re-ran),
-      # the second upload overwrites R2 but CDN edges that cached the
-      # first upload keep serving the OLD bytes for the cache-control's
-      # max-age (1 year). Even the cache-control fix landing in
+      # Why this step exists: CDN edges may retain an earlier response for
+      # a versioned key. The cache-control fix landing in
       # mem-backbone (drop `immutable`) only makes new edges revalidate
       # on ETag — already-warmed edges still hold their copy until they
       # naturally evict. Purging eliminates that race entirely.
@@ -1948,45 +2056,10 @@ jobs:
 
       - name: Update APT repo
         working-directory: mem-backbone
-        if: ${{ env.GPG_PRIVATE_KEY != '' }}
+        if: ${{ !inputs.allow_newer_desktop_latest }}
         run: node scripts/update-apt-repo.cjs "$VERSION" "${{ steps.paths.outputs.deb }}"
 
-      - name: Mark as latest (auto-updater feed)
-        if: ${{ needs.meta.outputs.run_latest == 'true' }}
-        working-directory: mem-backbone
-        # `update-latest-version.js` shells out to bare `wrangler deploy`
-        # for the Cloudflare Worker that serves the auto-updater feed.
-        # `wrangler` isn't a global binary on `ubuntu-22.04`, so we prepend
-        # the local `node_modules/.bin` produced by the earlier `npm ci` to
-        # PATH. If mem-backbone's package.json ever drops wrangler from
-        # deps, the fallback `npm install --no-save wrangler` keeps the
-        # step resilient.
-        env:
-          # The mem-backbone script accepts the wrangler env as a 2nd
-          # positional arg (see `scripts/update-latest-version.js`).
-          # `run_latest` is only true for clean-semver GA releases, so
-          # production is always the right choice here. To support a
-          # future staging path, plumb this through a workflow_dispatch
-          # input instead of hardcoding — for example:
-          #   inputs:
-          #     wrangler_env:
-          #       default: production
-          # …and then set WRANGLER_ENV: ${{ inputs.wrangler_env }}.
-          # CLOUDFLARE_API_TOKEN is already exposed at the job-level env
-          # block above; wrangler reads it directly.
-          WRANGLER_ENV: production
-        run: |
-          set -euo pipefail
-          export PATH="$PWD/node_modules/.bin:$PATH"
-          if ! command -v wrangler >/dev/null 2>&1; then
-            echo "::warning::wrangler not found in node_modules/.bin; installing inline"
-            npm install --no-save --no-audit --no-fund wrangler
-            export PATH="$PWD/node_modules/.bin:$PATH"
-          fi
-          wrangler --version
-          node scripts/update-latest-version.js "$VERSION" "$WRANGLER_ENV"
-
-      - name: Verify download delivery (R2 + APT + Worker)
+      - name: Verify download delivery (R2 + optional APT + Worker)
         working-directory: mem-backbone
         # The verify script is read-only and idempotent, but it probes
         # objects that were uploaded to R2 only seconds earlier. The very
@@ -1995,7 +2068,7 @@ jobs:
         # range support (the HEAD already advertises accept-ranges: bytes —
         # it's pure propagation timing, not a real defect). Seen as a
         # false-negative on 0.8.8 and 0.9.0: every real step (R2 upload, APT,
-        # auto-updater feed flip) succeeded, then this step failed on the
+        # auto-updater discovery) succeeded, then this step failed on the
         # AppImage range probe; re-running minutes later passed unchanged.
         #
         # Rather than loosen the strict 206 assertion (the desktop
@@ -2005,8 +2078,10 @@ jobs:
         run: |
           set -euo pipefail
           scope='latest,latest-redirect,direct,update'
-          if [[ -n "${GPG_PRIVATE_KEY:-}" ]]; then
+          health_scope='latest'
+          if [[ "${{ inputs.allow_newer_desktop_latest }}" != "true" ]]; then
             scope="${scope},apt"
+            health_scope="${health_scope},apt"
           fi
 
           # Let the just-uploaded R2 objects propagate to the edge before the
@@ -2018,8 +2093,11 @@ jobs:
           delay=15
           for i in $(seq 1 "$attempts"); do
             echo "::group::Verify download delivery (attempt $i/$attempts)"
-            if VERIFY_RELEASE_VERSION="$VERSION" VERIFY_SCOPE="$scope" \
-                 node scripts/verify-download-delivery.mjs; then
+            export VERIFY_RELEASE_VERSION="$VERSION" VERIFY_SCOPE="$scope"
+            export VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-rpm,linux-appimage"
+            export VERIFY_ALLOW_NEWER_LATEST="${{ inputs.allow_newer_desktop_latest }}"
+            if VERIFY_SCOPE="$health_scope" timeout -k 10s 90s node scripts/verify-download-delivery.mjs &&
+               timeout -k 10s 90s node ../scripts/verify-ga-delivery.mjs; then
               echo "::endgroup::"
               echo "✅ Download delivery verified on attempt $i."
               exit 0
@@ -2051,11 +2129,14 @@ jobs:
           # Tag on THIS public repo. If it doesn't exist yet, create it
           # pointing at the workflow's current commit (the README/workflow
           # commit, not source code).
-          gh release view "$TAG" -R "$REPO" >/dev/null 2>&1 || gh release create "$TAG" -R "$REPO" \
-            --title "Nowledge Mem $VERSION" \
-            --draft \
-            --notes "Desktop bundles for $VERSION. Source: nowledge-co/mem @ ${SOURCE_REF}. Auto-generated by release-desktop workflow."
-          gh release upload "$TAG" -R "$REPO" --clobber \
+          if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$REPO" \
+              --title "Nowledge Mem $VERSION" \
+              --draft \
+              --notes "Desktop bundles for $VERSION. Source: nowledge-co/mem @ ${SOURCE_REF}. Auto-generated by release-desktop workflow." \
+              || gh release view "$TAG" -R "$REPO" >/dev/null
+          fi
+          node scripts/upload-draft-release-assets.mjs "$TAG" "$REPO" \
             "${{ steps.paths.outputs.dmg_arm }}" \
             "${{ steps.paths.outputs.dmg_x64 }}" \
             "${{ steps.paths.outputs.exe_win }}" \
@@ -2077,30 +2158,32 @@ jobs:
               >/dev/null 2>&1 && echo "deleted artifact $id" || true
           done
 
-      # A failure anywhere after "Upload to Cloudflare R2" leaves a release that
-      # is already public on the download page and apt, but has no GitHub release
-      # and a stale auto-updater feed. Nothing about that state looks wrong from
-      # the outside, so say it out loud on the run itself.
+      # A failure after "Upload to Cloudflare R2" may leave public artifacts,
+      # APT metadata, or a draft GH Release behind. The updater may already
+      # discover the new R2 objects. Report the possible partial state.
       - name: Report partial publish
         if: failure()
         run: |
-          echo "::error::PARTIAL PUBLISH for ${VERSION}. Some surfaces are already live."
+          echo "::error::FAILED PUBLISH for ${VERSION}. Check which surfaces are already live."
           {
-            echo "### Partial publish: ${VERSION}"
+            echo "### Publish failed; inspect partial state: ${VERSION}"
             echo ""
-            echo "The publish job failed part-way. Every surface BEFORE the failing"
-            echo "step is already live and does not roll back:"
+            echo "The publish job failed. Check which steps completed; successful"
+            echo "public uploads do not roll back after a later failure:"
             echo ""
             echo "- R2 / download page (artifacts may already be downloadable)"
-            echo "- APT repo (apt users may already see this version)"
+            echo "- APT repo (if its update step ran)"
+            echo "- GH Release draft (if its creation step ran)"
             echo ""
-            echo "Check what actually landed, then finish by hand:"
+            echo "Check what actually landed before any recovery. The updater"
+            echo "may already discover the GA objects in R2. Verify all six"
+            echo "platforms and, if updated, APT with mem-backbone's read-only delivery script."
+            echo "Do not redeploy the production Backbone Worker to repair this job."
             echo ""
             echo '```'
-            echo "curl -sIL https://backbone-mem.nowledge.co/download/${VERSION}/mac | grep -i location"
+            echo "VERIFY_RELEASE_VERSION=${VERSION} VERIFY_SCOPE=latest,latest-redirect,direct,update VERIFY_PLATFORMS=mac,mac-intel,win,linux,linux-deb,linux-rpm,linux-appimage node scripts/verify-download-delivery.mjs"
+            echo "# If APT was updated, add apt to VERIFY_SCOPE and rerun."
             echo "gh release view v${VERSION} --repo ${{ github.repository }}"
-            echo "# auto-updater feed (needs CF creds, mem-backbone):"
-            echo "node scripts/update-latest-version.js ${VERSION} production"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -2110,4 +2193,4 @@ jobs:
           echo "- Source ref: ${SOURCE_REF} (nowledge-co/mem)"   >> "$GITHUB_STEP_SUMMARY"
           echo "- R2 prefix:  app/$VERSION/"                     >> "$GITHUB_STEP_SUMMARY"
           echo "- GH release: v$VERSION (draft, on this repo)"   >> "$GITHUB_STEP_SUMMARY"
-          echo "- Latest:     ${RUN_LATEST}"                      >> "$GITHUB_STEP_SUMMARY"
+          echo "- Updater:    latest/update delivery verified"    >> "$GITHUB_STEP_SUMMARY"
