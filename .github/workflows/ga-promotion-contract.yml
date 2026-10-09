@@ -6,6 +6,8 @@ on:
       - .github/workflows/promote-rc-to-ga.yml
       - .github/workflows/finish-ga-release.yml
       - .github/workflows/release-desktop.yml
+      - .github/workflows/test-windows-bazel.yml
+      - .github/workflows/build-rust-bundle.yml
       - .github/workflows/promote-rpm-to-ga.yml
       - .github/workflows/ga-promotion-contract.yml
       - scripts/test_ga_promotion_contract.py
@@ -29,6 +31,8 @@ on:
       - .github/workflows/promote-rc-to-ga.yml
       - .github/workflows/finish-ga-release.yml
       - .github/workflows/release-desktop.yml
+      - .github/workflows/test-windows-bazel.yml
+      - .github/workflows/build-rust-bundle.yml
       - .github/workflows/promote-rpm-to-ga.yml
       - .github/workflows/ga-promotion-contract.yml
       - scripts/test_ga_promotion_contract.py

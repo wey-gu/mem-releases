@@ -2,7 +2,7 @@
 #
 # Source code is fetched at build time from a separate (private) repo
 # via a fine-grained PAT (MEM_REPO_TOKEN, Contents: Read only).
-# Private Skein uses its read-only repository deploy key (SKEIN_REPO_SSH_KEY).
+# Public HawDB is checked out over HTTPS at the source-recorded gitlink.
 # Builds all desktop bundles (macOS arm64 + x86_64, Windows NSIS, Linux .deb +
 # .AppImage + .rpm), signs + notarises macOS, uploads to Cloudflare R2,
 # updates the APT repo, drafts a GitHub Release here.
@@ -243,40 +243,27 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - &load_private_hawdb_deploy_key
-        name: Load private HawDB deploy key
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SKEIN_REPO_SSH_KEY }}
-
-      - &authorize_private_hawdb
-        name: Resolve private HawDB submodule over SSH
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config --global \
-            url."git@github.com:nowledge-co/hawdb.git".insteadOf \
-            "https://github.com/nowledge-co/hawdb.git"
-
-      - &resolve_private_desktop_dependency
-        name: Resolve private Desktop dependency
+      - &resolve_hawdb_dependency
+        name: Resolve HawDB dependency
         id: desktop_dependency
         shell: bash
         run: |
           set -euo pipefail
           if grep -q -- '--init-desktop-https' nowledge-graph/scripts/build-rust-bundle.sh; then
             read -r mode kind sha dependency_path <<< "$(git ls-tree HEAD hawdb)"
-            [[ "$mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ ]]
+            if ! [[ "$mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ && "$dependency_path" == hawdb ]]; then
+              echo "::error::Source must record HawDB as an exact dependency gitlink." >&2
+              exit 1
+            fi
             echo "sha=$sha" >> "$GITHUB_OUTPUT"
           fi
 
-      - &checkout_private_desktop_dependency
-        name: Checkout private Desktop dependency
+      - &checkout_hawdb_dependency
+        name: Checkout HawDB dependency
         if: steps.desktop_dependency.outputs.sha != ''
         uses: actions/checkout@v4
         with:
           repository: nowledge-co/hawdb
-          ssh-key: ${{ secrets.SKEIN_REPO_SSH_KEY }}
           ref: ${{ steps.desktop_dependency.outputs.sha }}
           path: hawdb
           persist-credentials: false
@@ -558,11 +545,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -739,11 +723,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -948,11 +929,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -1130,11 +1108,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -1307,11 +1282,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -1531,11 +1503,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
