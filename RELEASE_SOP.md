@@ -55,23 +55,17 @@ job. Its result is tracked separately from the core Cargo release.
 
 ### Bazel build diagnostics
 
-Desktop Bazel jobs and the manual Windows validation job enable the shared
-build receipt action from the workflow's exact tooling commit. Each build
-prints its module directory and sanitized command, then adds the observed
-Bazel version, exit code, elapsed time, runner process counts, and local action
-cache counters to the Job Summary. Query and info output remain unchanged.
+Desktop Bazel jobs and the manual Windows validation job enable a shared Bash
+logging action from the workflow's exact tooling commit. Each build prints its
+module and sanitized command, streams native Bazel output through `tee`, and
+copies Bazel's elapsed-time and process/cache summary lines into the Job Summary.
+Failures retain their original exit code; query and info streams pass through
+unchanged. Missing statistics are marked not reported.
 
-The root `.bazelrc` already enables `build --announce_rc`. The wrapper requests
-RC announcements for independent modules too, without changing configuration
-files, cache settings, or an explicit command-line announcement override.
-Runner counts come from the Build Event Protocol; local action cache hits are
-reported separately and no combined hit percentage is inferred. Missing or
-invalid metrics are marked unavailable, including when a build fails early.
-
-Sanitized JSON receipts are retained for 14 days as
-`bazel-build-receipts-<job>-<attempt>`, even when packaging fails. Raw build
-events are not uploaded; a caller-provided BEP file is preserved. Full native
-packaging qualification of this instrumentation starts with the 0.10.99 RC.
+The root `.bazelrc` already enables `build --announce_rc`. Logging adds no build
+flags and leaves each module's existing configuration in control. It has no
+Python runtime dependency, BEP parsing, inferred cache hit percentage, or raw
+log artifact upload. Native packaging qualification starts with the 0.10.99 RC.
 
 ## 1. Cut the release branch first
 

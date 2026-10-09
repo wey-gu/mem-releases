@@ -1,13 +1,18 @@
 name: Bazel build observability
-description: Show build commands and publish sanitized Bazel cache receipts.
+description: Show Bazel commands and summarize native build diagnostics.
 runs:
   using: composite
   steps:
-    - uses: actions/setup-python@v5
-      with:
-        python-version: "3.12"
-    - name: Install the Bazel build receipt wrapper
+    - name: Enable native Bazel build logging
       shell: bash
       env:
         OBSERVABILITY_ACTION_PATH: ${{ github.action_path }}
-      run: python "$OBSERVABILITY_ACTION_PATH/bazel.py" --configure
+      run: |
+        set -euo pipefail
+        real_bazel="$(command -v bazel)"
+        wrapper_dir="$RUNNER_TEMP/nmem-bazel-wrapper"
+        mkdir -p "$wrapper_dir"
+        tr -d '\r' < "$OBSERVABILITY_ACTION_PATH/bazel.sh" > "$wrapper_dir/bazel"
+        chmod +x "$wrapper_dir/bazel"
+        printf 'NMEM_BAZEL_LOG_REAL=%s\n' "$real_bazel" >> "$GITHUB_ENV"
+        printf '%s\n' "$wrapper_dir" >> "$GITHUB_PATH"
