@@ -2,7 +2,7 @@
 #
 # Source code is fetched at build time from a separate (private) repo
 # via a fine-grained PAT (MEM_REPO_TOKEN, Contents: Read only).
-# Private Skein uses its read-only repository deploy key (SKEIN_REPO_SSH_KEY).
+# Public HawDB is checked out over HTTPS at the source-recorded gitlink.
 # Builds all desktop bundles (macOS arm64 + x86_64, Windows NSIS, Linux .deb +
 # .AppImage + .rpm), signs + notarises macOS, uploads to Cloudflare R2,
 # updates the APT repo, drafts a GitHub Release here.
@@ -243,40 +243,27 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - &load_private_hawdb_deploy_key
-        name: Load private HawDB deploy key
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SKEIN_REPO_SSH_KEY }}
-
-      - &authorize_private_hawdb
-        name: Resolve private HawDB submodule over SSH
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config --global \
-            url."git@github.com:nowledge-co/hawdb.git".insteadOf \
-            "https://github.com/nowledge-co/hawdb.git"
-
-      - &resolve_private_desktop_dependency
-        name: Resolve private Desktop dependency
+      - &resolve_hawdb_dependency
+        name: Resolve HawDB dependency
         id: desktop_dependency
         shell: bash
         run: |
           set -euo pipefail
           if grep -q -- '--init-desktop-https' nowledge-graph/scripts/build-rust-bundle.sh; then
             read -r mode kind sha dependency_path <<< "$(git ls-tree HEAD hawdb)"
-            [[ "$mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ ]]
+            if ! [[ "$mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ && "$dependency_path" == hawdb ]]; then
+              echo "::error::Source must record HawDB as an exact dependency gitlink." >&2
+              exit 1
+            fi
             echo "sha=$sha" >> "$GITHUB_OUTPUT"
           fi
 
-      - &checkout_private_desktop_dependency
-        name: Checkout private Desktop dependency
+      - &checkout_hawdb_dependency
+        name: Checkout HawDB dependency
         if: steps.desktop_dependency.outputs.sha != ''
         uses: actions/checkout@v4
         with:
           repository: nowledge-co/hawdb
-          ssh-key: ${{ secrets.SKEIN_REPO_SSH_KEY }}
           ref: ${{ steps.desktop_dependency.outputs.sha }}
           path: hawdb
           persist-credentials: false
@@ -500,7 +487,7 @@ jobs:
           unset APPLE_CERTIFICATE
           unset APPLE_CERTIFICATE_PASSWORD
           rm -rf python-standalone rust-backend
-          ./scripts/build-rust-bundle.sh --target aarch64-apple-darwin --bazel-public-binaries --bazel-hawdb-server
+          ./scripts/build-rust-bundle.sh --channel production --target aarch64-apple-darwin --bazel-public-binaries
           ./scripts/build-macos.sh --arch arm64 --skip-python
 
       - name: Locate + rename DMG
@@ -545,11 +532,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -676,7 +660,7 @@ jobs:
           unset APPLE_CERTIFICATE
           unset APPLE_CERTIFICATE_PASSWORD
           rm -rf python-standalone rust-backend
-          ./scripts/build-rust-bundle.sh --target x86_64-apple-darwin --bazel-public-binaries --bazel-hawdb-server
+          ./scripts/build-rust-bundle.sh --channel production --target x86_64-apple-darwin --bazel-public-binaries
           ./scripts/build-macos.sh --arch x86_64 --skip-python
 
       - name: Locate + rename DMG
@@ -723,11 +707,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -891,7 +872,7 @@ jobs:
         shell: pwsh
         # Restore the Cargo entry point used by the successful v0.10.91-rc2
         # Windows build. Bazel validation lives in test-windows-bazel.yml.
-        run: .\scripts\build-rust-bundle.ps1 -Target x86_64-pc-windows-msvc
+        run: .\scripts\build-rust-bundle.ps1 -Channel production -Target x86_64-pc-windows-msvc
 
       - name: Build Tauri (NSIS)
         working-directory: nowledge-graph
@@ -932,11 +913,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -1044,7 +1022,7 @@ jobs:
 
       - name: Build Rust backend bundle (Linux x86_64)
         working-directory: nowledge-graph
-        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --bazel-public-binaries --bazel-hawdb-server
+        run: ./scripts/build-rust-bundle.sh --channel production --target x86_64-unknown-linux-gnu --bazel-public-binaries
 
       - name: Build .deb + .AppImage (Tauri native)
         working-directory: nowledge-graph
@@ -1111,11 +1089,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -1210,7 +1185,7 @@ jobs:
 
       - name: Build Rust backend bundle (Linux x86_64)
         working-directory: nowledge-graph
-        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --bazel-public-binaries --bazel-hawdb-server
+        run: ./scripts/build-rust-bundle.sh --channel production --target x86_64-unknown-linux-gnu --bazel-public-binaries
 
       - name: Checkout RPM packaging tools
         uses: actions/checkout@v4
@@ -1297,11 +1272,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -1437,7 +1409,7 @@ jobs:
       - name: Build Rust backend bundle (Windows, Vulkan)
         working-directory: nowledge-graph
         shell: pwsh
-        run: .\scripts\build-rust-bundle.ps1 -Target x86_64-pc-windows-msvc -Gpu vulkan
+        run: .\scripts\build-rust-bundle.ps1 -Channel production -Target x86_64-pc-windows-msvc -Gpu vulkan
 
       - name: Build Tauri (NSIS)
         working-directory: nowledge-graph
@@ -1521,11 +1493,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -1647,7 +1616,7 @@ jobs:
 
       - name: Build Rust backend bundle (Linux x86_64, Vulkan)
         working-directory: nowledge-graph
-        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --gpu vulkan --bazel-public-binaries
+        run: ./scripts/build-rust-bundle.sh --channel production --target x86_64-unknown-linux-gnu --gpu vulkan --bazel-public-binaries
 
       - name: Build .deb + .AppImage (Tauri native)
         working-directory: nowledge-graph
