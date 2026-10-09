@@ -82,7 +82,7 @@ class GAPromotionContractTest(unittest.TestCase):
                     self.assertIn("requires --channel nightly", rejected.stderr)
 
     def test_public_hawdb_does_not_require_private_credentials(self):
-        workflows = ("release-desktop.yml", "test-windows-bazel.yml", "build-rust-bundle.yml")
+        workflows = ("release-desktop.yml", "test-windows-bazel.yml", "build-rust-bundle.yml", "rpm-test.yml")
         for name in workflows:
             with self.subTest(workflow=name):
                 workflow = (ROOT / ".github" / "workflows" / name).read_text()

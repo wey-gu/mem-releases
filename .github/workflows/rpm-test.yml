@@ -144,24 +144,9 @@ jobs:
               tooling_sha=os.environ['GITHUB_SHA'], deb_sha256=os.environ['DEB_SHA256'])
           path.write_text(json.dumps(receipt, indent=2) + '\n')
           PYTHON
-      - name: Resolve private Cargo metadata dependency
-        id: hawdb
-        working-directory: source
-        run: |
-          read -r mode kind sha dependency_path <<< "$(git ls-tree HEAD hawdb)"
-          [[ "$mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ && "$dependency_path" == hawdb ]]
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-      - name: Checkout private Cargo metadata dependency
-        uses: actions/checkout@v4
-        with:
-          repository: nowledge-co/hawdb
-          ssh-key: ${{ secrets.SKEIN_REPO_SSH_KEY }}
-          ref: ${{ steps.hawdb.outputs.sha }}
-          path: source/hawdb
-          persist-credentials: false
       - name: Initialize public Cargo metadata dependencies
         working-directory: source
-        run: scripts/init-release-rust-submodules.sh --init-https
+        run: scripts/init-release-rust-submodules.sh --init-desktop-https
       - uses: dtolnay/rust-toolchain@1.98.1
       - name: Cache the patched packaging CLI build
         uses: actions/cache@v4
