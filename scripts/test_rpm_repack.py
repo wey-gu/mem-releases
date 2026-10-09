@@ -21,7 +21,9 @@ class PayloadIdentityTests(unittest.TestCase):
         scripts = tauri / "scripts"
         scripts.mkdir(parents=True)
         config = {
-            "files": {"/usr/share/nowledge-mem/install-cli.sh": "scripts/install-cli.sh"},
+            "files": {
+                "/usr/share/nowledge-mem/install-cli.sh": "scripts/install-cli.sh"
+            },
             "postInstallScript": "scripts/post.sh",
             "preRemoveScript": "scripts/pre.sh",
             "postRemoveScript": "scripts/remove.sh",
@@ -51,13 +53,20 @@ class PayloadIdentityTests(unittest.TestCase):
         self.installed_script.write_text(self.script_contents)
         self.installed_script.chmod(0o755)
         self.receipt = root / "receipt.json"
-        self.receipt.write_text(json.dumps({
-            "version": "0.10.99",
-            "executable": rpm_repack.inventory(binary.parent),
-            "backend": rpm_repack.inventory(self.backend),
-        }))
+        self.receipt.write_text(
+            json.dumps(
+                {
+                    "version": "0.10.99",
+                    "executable": rpm_repack.inventory(binary.parent),
+                    "backend": rpm_repack.inventory(self.backend),
+                }
+            )
+        )
         self.rpm = root / "package.rpm"
         self.rpm.write_bytes(b"controlled package metadata fixture")
+        for directory in self.payload.rglob("*"):
+            if directory.is_dir():
+                directory.chmod(0o755)
 
     def verify(self):
         def query(args, **kwargs):
@@ -81,7 +90,9 @@ class PayloadIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "permissions differ"):
             self.verify()
 
-    @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX payload validation requires mkfifo")
+    @unittest.skipUnless(
+        hasattr(os, "mkfifo"), "POSIX payload validation requires mkfifo"
+    )
     def test_unexpected_backend_fifo_is_rejected(self):
         os.mkfifo(self.backend / "unexpected-fifo")
         with self.assertRaisesRegex(ValueError, "Unsupported payload entry"):

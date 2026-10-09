@@ -177,6 +177,7 @@ jobs:
       - name: Verify payload identity and the Linux runtime contract
         run: |
           set -euo pipefail
+          umask 022
           mapfile -t rpms < <(find source/nowledge-graph/src-tauri/target/release/bundle/rpm -name '*.rpm' -type f)
           [[ ${#rpms[@]} -eq 1 ]]
           rpm_path="$(realpath "${rpms[0]}")"

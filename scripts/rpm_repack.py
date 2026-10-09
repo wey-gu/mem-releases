@@ -37,15 +37,20 @@ def require_runtime_directories(payload, directory):
         raise ValueError(f"Runtime directory is outside the payload: {directory}")
     while directory != payload:
         directory_stat = directory.lstat()
-        if not stat.S_ISDIR(directory_stat.st_mode) or stat.S_IMODE(directory_stat.st_mode) != 0o755:
-            raise ValueError(f"RPM runtime directory type or permissions differ: {directory}")
+        if (
+            not stat.S_ISDIR(directory_stat.st_mode)
+            or stat.S_IMODE(directory_stat.st_mode) != 0o755
+        ):
+            raise ValueError(
+                f"RPM runtime directory type or permissions differ: {directory}"
+            )
         directory = directory.parent
 
 
 def runtime_inventory(payload, root):
     result = inventory(root)
-    # The RPM writer creates 0755 installation directories. Validate required
-    # ancestors without requiring the bundle to retain unused empty DEB folders.
+    # RPM resources and extraction with umask 022 produce public directories.
+    # Validate required ancestors without retaining unused empty DEB folders.
     require_runtime_directories(payload, root)
     for relative_path in result:
         require_runtime_directories(payload, (root / relative_path).parent)
@@ -147,7 +152,9 @@ def verify(source, payload, rpm, receipt):
     if actual != expected["executable"]:
         raise ValueError("Repacked executable bytes or permissions changed")
     backends = list(payload.glob("usr/lib/**/rust-backend"))
-    if not backends or any(runtime_inventory(payload, path) != expected["backend"] for path in backends):
+    if not backends or any(
+        runtime_inventory(payload, path) != expected["backend"] for path in backends
+    ):
         raise ValueError("Repacked backend resource bytes or permissions changed")
     app = source / "nowledge-graph"
     config = json.loads((app / "src-tauri/tauri.linux.conf.json").read_text())[
@@ -162,7 +169,9 @@ def verify(source, payload, rpm, receipt):
         else:
             require_runtime_directories(payload, installed.parent)
             if file_identity(wanted) != file_identity(installed):
-                raise ValueError(f"RPM file mapping bytes or permissions differ: {destination}")
+                raise ValueError(
+                    f"RPM file mapping bytes or permissions differ: {destination}"
+                )
     metadata = subprocess.check_output(
         [
             "rpm",
