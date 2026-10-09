@@ -207,7 +207,7 @@ jobs:
       - name: Build Rust backend bundle (Windows)
         working-directory: nowledge-graph
         shell: bash
-        run: "./scripts/build-rust-bundle.sh --target x86_64-pc-windows-msvc --bazel-public-binaries --bazel-hawdb-server"
+        run: "./scripts/build-rust-bundle.sh --channel production --target x86_64-pc-windows-msvc --bazel-public-binaries"
       - name: Build Tauri (NSIS)
         working-directory: nowledge-graph
         shell: pwsh

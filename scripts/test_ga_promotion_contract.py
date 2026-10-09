@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -15,6 +16,34 @@ CORE_PLATFORMS = (
 
 
 class GAPromotionContractTest(unittest.TestCase):
+    def test_release_bundle_commands_select_public_production_channel(self):
+        for name, expected_bash, expected_powershell in (
+            ("release-desktop.yml", 5, 2),
+            ("test-windows-bazel.yml", 1, 0),
+        ):
+            workflow = (ROOT / ".github" / "workflows" / name).read_text()
+            bash_calls = []
+            powershell_calls = []
+            for line in workflow.splitlines():
+                if "./scripts/build-rust-bundle.sh " in line:
+                    command = line.split("./scripts/build-rust-bundle.sh ", 1)[1].rstrip('"')
+                    bash_calls.append(shlex.split(command))
+                elif r".\scripts\build-rust-bundle.ps1 " in line:
+                    command = line.split(r".\scripts\build-rust-bundle.ps1 ", 1)[1]
+                    powershell_calls.append(shlex.split(command))
+            self.assertEqual(len(bash_calls), expected_bash, name)
+            self.assertEqual(len(powershell_calls), expected_powershell, name)
+            for args in bash_calls:
+                with self.subTest(workflow=name, args=args):
+                    self.assertNotIn("--bazel-hawdb-server", args, "Production cannot build the Nightly server")
+                    self.assertIn("--bazel-public-binaries", args)
+                    self.assertIn("--channel", args)
+                    self.assertEqual(args[args.index("--channel") + 1], "production")
+            for args in powershell_calls:
+                with self.subTest(workflow=name, args=args):
+                    self.assertIn("-Channel", args)
+                    self.assertEqual(args[args.index("-Channel") + 1], "production")
+
     def test_public_hawdb_does_not_require_private_credentials(self):
         workflows = ("release-desktop.yml", "test-windows-bazel.yml", "build-rust-bundle.yml")
         for name in workflows:
