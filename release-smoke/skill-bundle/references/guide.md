@@ -1,1 +1,1 @@
-Fixture guide v1. Preserve the complete folder.
+Fixture guide v2. Review all files before apply.
