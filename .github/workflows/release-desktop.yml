@@ -746,14 +746,20 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Initialize Rust path dependencies before cache restore
-        shell: pwsh
+      - &initialize_windows_path_dependencies
+        name: Initialize Rust path dependencies before cache restore
+        shell: bash
         run: |
-          "XDG_CACHE_HOME=$env:RUNNER_TEMP/nmem-pdfium-cache" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git `
-              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git `
-              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          set -euo pipefail
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/nmem-pdfium-cache" >> "$GITHUB_ENV"
+          if [[ -x scripts/init-release-rust-submodules.sh ]]; then
+            scripts/init-release-rust-submodules.sh --init-https
+          else
+            echo "::warning::Source ref predates the release submodule helper; using the legacy contract."
+            git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git \
+                -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
+                submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
+          fi
 
       # BoringSSL (boring-sys2) assembles its crypto with NASM. The pinned
       # windows-2022 image (MSVC 14.44, needed because 14.51 breaks ladybug's
@@ -1302,14 +1308,7 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Initialize Rust path dependencies before cache restore
-        shell: pwsh
-        run: |
-          "XDG_CACHE_HOME=$env:RUNNER_TEMP/nmem-pdfium-cache" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git `
-              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git `
-              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - *initialize_windows_path_dependencies
 
       # BoringSSL (boring-sys2) assembles its crypto with NASM. The pinned
       # windows-2022 image (MSVC 14.44, needed because 14.51 breaks ladybug's
