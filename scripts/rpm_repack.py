@@ -32,6 +32,26 @@ def inventory(root):
     return result
 
 
+def require_runtime_directories(payload, directory):
+    if ".." in directory.relative_to(payload).parts:
+        raise ValueError(f"Runtime directory is outside the payload: {directory}")
+    while directory != payload:
+        directory_stat = directory.lstat()
+        if not stat.S_ISDIR(directory_stat.st_mode) or stat.S_IMODE(directory_stat.st_mode) != 0o755:
+            raise ValueError(f"RPM runtime directory type or permissions differ: {directory}")
+        directory = directory.parent
+
+
+def runtime_inventory(payload, root):
+    result = inventory(root)
+    # The RPM writer creates 0755 installation directories. Validate required
+    # ancestors without requiring the bundle to retain unused empty DEB folders.
+    require_runtime_directories(payload, root)
+    for relative_path in result:
+        require_runtime_directories(payload, (root / relative_path).parent)
+    return result
+
+
 def require_elf(path):
     with path.open("rb") as stream:
         header = stream.read(20)
@@ -123,11 +143,11 @@ def stage(source, payload, reference_executable, version, source_sha, receipt):
 
 def verify(source, payload, rpm, receipt):
     expected = json.loads(receipt.read_text())
-    actual = inventory(payload / "usr/bin")
+    actual = runtime_inventory(payload, payload / "usr/bin")
     if actual != expected["executable"]:
         raise ValueError("Repacked executable bytes or permissions changed")
     backends = list(payload.glob("usr/lib/**/rust-backend"))
-    if not backends or any(inventory(path) != expected["backend"] for path in backends):
+    if not backends or any(runtime_inventory(payload, path) != expected["backend"] for path in backends):
         raise ValueError("Repacked backend resource bytes or permissions changed")
     app = source / "nowledge-graph"
     config = json.loads((app / "src-tauri/tauri.linux.conf.json").read_text())[
@@ -137,10 +157,12 @@ def verify(source, payload, rpm, receipt):
         wanted = (app / "src-tauri" / original).resolve()
         installed = payload / destination.lstrip("/")
         if wanted.is_dir():
-            if inventory(wanted) != inventory(installed):
+            if inventory(wanted) != runtime_inventory(payload, installed):
                 raise ValueError(f"RPM directory mapping differs: {destination}")
-        elif file_identity(wanted) != file_identity(installed):
-            raise ValueError(f"RPM file mapping bytes or permissions differ: {destination}")
+        else:
+            require_runtime_directories(payload, installed.parent)
+            if file_identity(wanted) != file_identity(installed):
+                raise ValueError(f"RPM file mapping bytes or permissions differ: {destination}")
     metadata = subprocess.check_output(
         [
             "rpm",

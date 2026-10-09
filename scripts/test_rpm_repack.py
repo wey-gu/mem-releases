@@ -43,6 +43,9 @@ class PayloadIdentityTests(unittest.TestCase):
         server = self.backend / "nmem-server"
         server.write_bytes(b"qualified public backend bytes")
         server.chmod(0o755)
+        web = self.backend / "web-dist"
+        web.mkdir()
+        (web / "index-web.html").write_text("Qualified Web entry point")
         self.installed_script = self.payload / "usr/share/nowledge-mem/install-cli.sh"
         self.installed_script.parent.mkdir(parents=True)
         self.installed_script.write_text(self.script_contents)
@@ -88,6 +91,31 @@ class PayloadIdentityTests(unittest.TestCase):
         (self.backend / "unexpected-link").symlink_to(self.backend / "nmem-server")
         with self.assertRaisesRegex(ValueError, "Unsupported payload entry"):
             self.verify()
+
+    def test_private_backend_root_is_rejected(self):
+        self.backend.chmod(0o700)
+        with self.assertRaisesRegex(ValueError, "runtime directory"):
+            self.verify()
+
+    def test_private_backend_subdirectory_is_rejected(self):
+        (self.backend / "web-dist").chmod(0o700)
+        with self.assertRaisesRegex(ValueError, "runtime directory"):
+            self.verify()
+
+    def test_private_mapped_script_parent_is_rejected(self):
+        self.installed_script.parent.chmod(0o700)
+        with self.assertRaisesRegex(ValueError, "runtime directory"):
+            self.verify()
+
+    def test_private_executable_parent_is_rejected(self):
+        (self.payload / "usr/bin").chmod(0o700)
+        with self.assertRaisesRegex(ValueError, "runtime directory"):
+            self.verify()
+
+    def test_unused_empty_backend_directory_may_be_omitted(self):
+        (self.backend / "unused-empty").mkdir()
+        self.verify()
+        self.assertTrue(json.loads(self.receipt.read_text())["rpm_verified"])
 
 
 if __name__ == "__main__":
