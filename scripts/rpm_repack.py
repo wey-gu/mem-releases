@@ -7,23 +7,28 @@ import mmap
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 
 from verify_rpm_archive import verify_archive_digest
 
 
+def file_identity(path):
+    file_stat = path.lstat()
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise ValueError(f"Unsupported payload entry: {path}")
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    return {"sha256": digest, "mode": stat.S_IMODE(file_stat.st_mode)}
+
+
 def inventory(root):
+    if not stat.S_ISDIR(root.lstat().st_mode):
+        raise ValueError(f"Expected a payload directory: {root}")
     result = {}
     for path in sorted(root.rglob("*")):
-        if path.is_symlink():
-            raise ValueError(f"Unexpected symlink: {path}")
-        if path.is_file():
-            with path.open("rb") as stream:
-                digest = hashlib.file_digest(stream, "sha256").hexdigest()
-            result[str(path.relative_to(root))] = {
-                "sha256": digest,
-                "mode": path.stat().st_mode & 0o777,
-            }
+        if not stat.S_ISDIR(path.lstat().st_mode):
+            result[str(path.relative_to(root))] = file_identity(path)
     return result
 
 
@@ -134,8 +139,8 @@ def verify(source, payload, rpm, receipt):
         if wanted.is_dir():
             if inventory(wanted) != inventory(installed):
                 raise ValueError(f"RPM directory mapping differs: {destination}")
-        elif wanted.read_bytes() != installed.read_bytes():
-            raise ValueError(f"RPM file mapping differs: {destination}")
+        elif file_identity(wanted) != file_identity(installed):
+            raise ValueError(f"RPM file mapping bytes or permissions differ: {destination}")
     metadata = subprocess.check_output(
         [
             "rpm",

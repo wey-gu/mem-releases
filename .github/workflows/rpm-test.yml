@@ -93,7 +93,9 @@ jobs:
           print(f'Qualified DEB source: {source_tag} {sha}; original run {run["id"]}')
           PYTHON
       - name: Test archive verification regressions
-        run: python -m unittest discover -s tooling/scripts -p test_verify_rpm_archive.py -v
+        run: |
+          python -m unittest discover -s tooling/scripts -p test_verify_rpm_archive.py -v
+          python -m unittest discover -s tooling/scripts -p test_rpm_repack.py -v
       - name: Download the qualified Linux artifact
         uses: actions/download-artifact@v4
         with:
