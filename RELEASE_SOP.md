@@ -261,8 +261,27 @@ is pending and send a completion update after its promotion verifies.
 ## 7. Close the history loop
 
 The version and unreleased-note metadata are already merged on `main`; do not
-merge the release branch back. After GA, date the Changelog entry, deploy it,
-and merge its parent gitlink update to `main`. Run the release-history check
+merge the release branch back. After publishing the stable GitHub Release, run
+this command from the `mem-releases` checkout (Node and an authenticated `gh`
+are required):
+
+```bash
+node scripts/date-ga-changelog.mjs <x.y.z> /path/to/mem
+```
+
+It fills the current website and engineering entries using the actual
+`published_at` UTC day. It checks both before writing; RC/Draft, missing entries
+and conflicting dates fail. Repeating it leaves correct dates unchanged.
+Review and submit the local date changes, deploy the website through its owner,
+and merge the parent gitlink through the existing bot/review process. Then read
+both public endpoints and confirm the GA version and date:
+
+```bash
+curl -fsS https://mem.nowledge.co/api/changelog/release-notes | jq '{version,date}'
+curl -fsS 'https://mem.nowledge.co/api/changelog/release-notes?version=<x.y.z>' | jq '{version,date}'
+```
+
+The command does not commit, open PRs or deploy. Run the release-history check
 to prove the tagged release branch is patch-equivalent to its recorded `main`
 source commits and that every copied commit has a valid `-x` provenance trailer.
 An ancestor-only check is invalid for this workflow because cherry-pick creates
