@@ -1,0 +1,32 @@
+name: bazel-build-observability
+on:
+  pull_request:
+    paths:
+      - .github/actions/bazel-build-observability/**
+      - .github/workflows/bazel-build-observability.yml
+      - .github/workflows/release-desktop.yml
+      - .github/workflows/test-windows-bazel.yml
+      - scripts/test_bazel_build_observability.py
+  push:
+    branches: [main]
+    paths:
+      - .github/actions/bazel-build-observability/**
+      - .github/workflows/bazel-build-observability.yml
+      - .github/workflows/release-desktop.yml
+      - .github/workflows/test-windows-bazel.yml
+      - scripts/test_bazel_build_observability.py
+permissions:
+  contents: read
+jobs:
+  receipt-contract:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s scripts -p test_bazel_build_observability.py

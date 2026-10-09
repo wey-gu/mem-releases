@@ -1,0 +1,13 @@
+name: Bazel build observability
+description: Show build commands and publish sanitized Bazel cache receipts.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install the Bazel build receipt wrapper
+      shell: bash
+      env:
+        OBSERVABILITY_ACTION_PATH: ${{ github.action_path }}
+      run: python "$OBSERVABILITY_ACTION_PATH/bazel.py" --configure

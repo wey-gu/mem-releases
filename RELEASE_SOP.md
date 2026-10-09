@@ -53,6 +53,26 @@ source SHA, and retains the installer as the `windows-bazel-x86_64` Actions
 artifact. It runs only on manual dispatch and has no release or distribution
 job. Its result is tracked separately from the core Cargo release.
 
+### Bazel build diagnostics
+
+Desktop Bazel jobs and the manual Windows validation job enable the shared
+build receipt action from the workflow's exact tooling commit. Each build
+prints its module directory and sanitized command, then adds the observed
+Bazel version, exit code, elapsed time, runner process counts, and local action
+cache counters to the Job Summary. Query and info output remain unchanged.
+
+The root `.bazelrc` already enables `build --announce_rc`. The wrapper requests
+RC announcements for independent modules too, without changing configuration
+files, cache settings, or an explicit command-line announcement override.
+Runner counts come from the Build Event Protocol; local action cache hits are
+reported separately and no combined hit percentage is inferred. Missing or
+invalid metrics are marked unavailable, including when a build fails early.
+
+Sanitized JSON receipts are retained for 14 days as
+`bazel-build-receipts-<job>-<attempt>`, even when packaging fails. Raw build
+events are not uploaded; a caller-provided BEP file is preserved. Full native
+packaging qualification of this instrumentation starts with the 0.10.99 RC.
+
 ## 1. Cut the release branch first
 
 Choose the last intended product commit on `main`, fetch it, and record it:

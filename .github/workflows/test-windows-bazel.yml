@@ -206,6 +206,15 @@ jobs:
         with:
           bazelisk-cache: true
           repository-cache: true
+      - name: Checkout Bazel release tools
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: release-tools
+          persist-credentials: false
+      - name: Enable Bazel build receipts
+        uses: ./release-tools/.github/actions/bazel-build-observability
       - name: Authenticate Bazel remote cache
         continue-on-error: true
         uses: google-github-actions/auth@v3
@@ -217,6 +226,14 @@ jobs:
         working-directory: nowledge-graph
         shell: bash
         run: "./scripts/build-rust-bundle.sh --target x86_64-pc-windows-msvc --bazel-public-binaries --bazel-hawdb-server"
+      - name: Upload Bazel build receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazel-build-receipts-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nmem-bazel-receipts/*.json
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Build Tauri (NSIS)
         working-directory: nowledge-graph
         shell: pwsh

@@ -485,6 +485,19 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
+      - &checkout_bazel_observability_tools
+        name: Checkout Bazel release tools
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: release-tools
+          persist-credentials: false
+
+      - &enable_bazel_build_observability
+        name: Enable Bazel build receipts
+        uses: ./release-tools/.github/actions/bazel-build-observability
+
       - name: Authenticate Bazel remote cache
         continue-on-error: true
         uses: google-github-actions/auth@v3
@@ -502,6 +515,16 @@ jobs:
           rm -rf python-standalone rust-backend
           ./scripts/build-rust-bundle.sh --target aarch64-apple-darwin --bazel-public-binaries --bazel-hawdb-server
           ./scripts/build-macos.sh --arch arm64 --skip-python
+
+      - &upload_bazel_build_receipts
+        name: Upload Bazel build receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazel-build-receipts-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nmem-bazel-receipts/*.json
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Locate + rename DMG
         id: locate
@@ -661,6 +684,9 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
+      - *checkout_bazel_observability_tools
+      - *enable_bazel_build_observability
+
       - name: Authenticate Bazel remote cache
         continue-on-error: true
         uses: google-github-actions/auth@v3
@@ -678,6 +704,8 @@ jobs:
           rm -rf python-standalone rust-backend
           ./scripts/build-rust-bundle.sh --target x86_64-apple-darwin --bazel-public-binaries --bazel-hawdb-server
           ./scripts/build-macos.sh --arch x86_64 --skip-python
+
+      - *upload_bazel_build_receipts
 
       - name: Locate + rename DMG
         id: locate
@@ -1034,6 +1062,9 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
+      - *checkout_bazel_observability_tools
+      - *enable_bazel_build_observability
+
       - name: Authenticate Bazel remote cache
         continue-on-error: true
         uses: google-github-actions/auth@v3
@@ -1045,6 +1076,8 @@ jobs:
       - name: Build Rust backend bundle (Linux x86_64)
         working-directory: nowledge-graph
         run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --bazel-public-binaries --bazel-hawdb-server
+
+      - *upload_bazel_build_receipts
 
       - name: Build .deb + .AppImage (Tauri native)
         working-directory: nowledge-graph
@@ -1200,6 +1233,9 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
+      - *checkout_bazel_observability_tools
+      - *enable_bazel_build_observability
+
       - name: Authenticate Bazel remote cache
         continue-on-error: true
         uses: google-github-actions/auth@v3
@@ -1211,6 +1247,8 @@ jobs:
       - name: Build Rust backend bundle (Linux x86_64)
         working-directory: nowledge-graph
         run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --bazel-public-binaries --bazel-hawdb-server
+
+      - *upload_bazel_build_receipts
 
       - name: Build native .rpm (Tauri rpmbuild)
         # Tauri's rpm-rs compression is universally slow regardless of
@@ -1625,6 +1663,9 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
 
+      - *checkout_bazel_observability_tools
+      - *enable_bazel_build_observability
+
       - name: Authenticate Bazel remote cache
         continue-on-error: true
         uses: google-github-actions/auth@v3
@@ -1636,6 +1677,8 @@ jobs:
       - name: Build Rust backend bundle (Linux x86_64, Vulkan)
         working-directory: nowledge-graph
         run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --gpu vulkan --bazel-public-binaries
+
+      - *upload_bazel_build_receipts
 
       - name: Build .deb + .AppImage (Tauri native)
         working-directory: nowledge-graph
