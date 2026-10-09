@@ -132,8 +132,7 @@ def configure():
     wrapper_dir = root / "nmem-bazel-wrapper"
     wrapper_dir.mkdir(exist_ok=True)
     wrapper = wrapper_dir / "bazel"
-    wrapper.write_text('#!/usr/bin/env bash\nexec "$NMEM_OBS_PYTHON" "$NMEM_OBS_SCRIPT" "$@"\n',
-                       encoding="utf-8", newline="\n")
+    wrapper.write_bytes(b'#!/usr/bin/env bash\nexec "$NMEM_OBS_PYTHON" "$NMEM_OBS_SCRIPT" "$@"\n')
     wrapper.chmod(0o755)
     values = {
         "NMEM_OBS_REAL_BAZEL": real_bazel,
