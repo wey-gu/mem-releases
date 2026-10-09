@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -17,18 +18,32 @@ class GAPromotionContractTest(unittest.TestCase):
     def test_windows_pre_cache_initialization_uses_source_contract_and_propagates_failure(self):
         workflow = (ROOT / ".github" / "workflows" / "release-desktop.yml").read_text()
         windows = workflow.split("\n  build-windows:\n", 1)[1].split("\n  build-linux-deb-appimage:\n", 1)[0]
-        step = windows.split("name: Initialize Rust path dependencies before cache restore\n", 1)[1]
-        step = step.split("\n      # BoringSSL", 1)[0]
+        anchor = "initialize_windows_path_dependencies"
+        definitions = re.findall(
+            rf"^      - &{anchor}\n(?P<step>(?:^        .*\n|^\n)+)",
+            workflow, re.MULTILINE,
+        )
+        self.assertEqual(len(definitions), 1, "The shared Windows step must have one definition")
+        step = definitions[0]
         self.assertIn("        shell: bash\n", step)
         script = "\n".join(line[10:] for line in step.split("        run: |\n", 1)[1].splitlines())
+        self.assertIn(f"- &{anchor}\n{step}", windows)
+        self.assertLess(windows.index(f"&{anchor}"),
+                        windows.index("uses: Swatinem/rust-cache@v2"))
         self.assertLess(windows.index("Initialize Rust path dependencies before cache restore"),
                         windows.index("Resolve or repair the PDFium runtime cache"))
         vulkan = workflow.split("\n  build-windows-vulkan:\n", 1)[1].split("\n  build-linux-vulkan:\n", 1)[0]
         self.assertLess(vulkan.index("*initialize_windows_path_dependencies"),
                         vulkan.index("uses: Swatinem/rust-cache@v2"))
 
-        for has_helper, status in ((True, 0), (True, 37), (False, 0), (False, 41)):
-            with self.subTest(has_helper=has_helper, status=status), tempfile.TemporaryDirectory() as directory:
+        # Vulkan resolves the YAML alias to this exact mapping. Exercise both
+        # consumers so moving the definition cannot silently select a legacy step.
+        for job, has_helper, status in (
+            (job, has_helper, status)
+            for job in ("windows", "windows-vulkan")
+            for has_helper, status in ((True, 0), (True, 37), (False, 0), (False, 41))
+        ):
+            with self.subTest(job=job, has_helper=has_helper, status=status), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 (root / "scripts").mkdir()
                 if has_helper:

@@ -357,8 +357,7 @@ jobs:
           rustup default 1.98.1
           rustup show
 
-      - &initialize_windows_path_dependencies
-        name: Initialize Rust path dependencies before cache restore
+      - name: Initialize Rust path dependencies before cache restore
         shell: bash
         run: |
           set -euo pipefail
@@ -747,7 +746,8 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Initialize Rust path dependencies before cache restore
+      - &initialize_windows_path_dependencies
+        name: Initialize Rust path dependencies before cache restore
         shell: bash
         run: |
           set -euo pipefail
