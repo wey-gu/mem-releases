@@ -49,33 +49,24 @@ jobs:
           "NMEM_BUILD_SHA_FULL=$sourceSha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Testing Windows Bazel source $sourceSha (package $version)"
-      - name: Load private HawDB deploy key
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: "${{ secrets.SKEIN_REPO_SSH_KEY }}"
-      - name: Resolve private HawDB submodule over SSH
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config --global \
-            url."git@github.com:nowledge-co/hawdb.git".insteadOf \
-            "https://github.com/nowledge-co/hawdb.git"
-      - name: Resolve private Desktop dependency
+      - name: Resolve HawDB dependency
         id: desktop_dependency
         shell: bash
         run: |
           set -euo pipefail
           if grep -q -- '--init-desktop-https' nowledge-graph/scripts/build-rust-bundle.sh; then
             read -r mode kind sha dependency_path <<< "$(git ls-tree HEAD hawdb)"
-            [[ "$mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ ]]
+            if ! [[ "$mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ && "$dependency_path" == hawdb ]]; then
+              echo "::error::Source must record HawDB as an exact dependency gitlink." >&2
+              exit 1
+            fi
             echo "sha=$sha" >> "$GITHUB_OUTPUT"
           fi
-      - name: Checkout private Desktop dependency
+      - name: Checkout HawDB dependency
         if: steps.desktop_dependency.outputs.sha != ''
         uses: actions/checkout@v4
         with:
           repository: nowledge-co/hawdb
-          ssh-key: "${{ secrets.SKEIN_REPO_SSH_KEY }}"
           ref: "${{ steps.desktop_dependency.outputs.sha }}"
           path: hawdb
           persist-credentials: false
