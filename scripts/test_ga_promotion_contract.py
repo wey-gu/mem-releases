@@ -15,6 +15,19 @@ CORE_PLATFORMS = (
 )
 
 
+def bundle_arguments(workflow):
+    bash_calls = []
+    powershell_calls = []
+    for line in workflow.splitlines():
+        if "./scripts/build-rust-bundle.sh " in line:
+            command = line.split("./scripts/build-rust-bundle.sh ", 1)[1].rstrip('"')
+            bash_calls.append(shlex.split(command))
+        elif r".\scripts\build-rust-bundle.ps1 " in line:
+            command = line.split(r".\scripts\build-rust-bundle.ps1 ", 1)[1]
+            powershell_calls.append(shlex.split(command))
+    return bash_calls, powershell_calls
+
+
 class GAPromotionContractTest(unittest.TestCase):
     def test_release_bundle_commands_select_public_production_channel(self):
         for name, expected_bash, expected_powershell in (
@@ -22,15 +35,7 @@ class GAPromotionContractTest(unittest.TestCase):
             ("test-windows-bazel.yml", 1, 0),
         ):
             workflow = (ROOT / ".github" / "workflows" / name).read_text()
-            bash_calls = []
-            powershell_calls = []
-            for line in workflow.splitlines():
-                if "./scripts/build-rust-bundle.sh " in line:
-                    command = line.split("./scripts/build-rust-bundle.sh ", 1)[1].rstrip('"')
-                    bash_calls.append(shlex.split(command))
-                elif r".\scripts\build-rust-bundle.ps1 " in line:
-                    command = line.split(r".\scripts\build-rust-bundle.ps1 ", 1)[1]
-                    powershell_calls.append(shlex.split(command))
+            bash_calls, powershell_calls = bundle_arguments(workflow)
             self.assertEqual(len(bash_calls), expected_bash, name)
             self.assertEqual(len(powershell_calls), expected_powershell, name)
             for args in bash_calls:
@@ -38,11 +43,43 @@ class GAPromotionContractTest(unittest.TestCase):
                     self.assertNotIn("--bazel-hawdb-server", args, "Production cannot build the Nightly server")
                     self.assertIn("--bazel-public-binaries", args)
                     self.assertIn("--channel", args)
+                    self.assertEqual(sum(arg == "--channel" or arg.startswith("--channel=")
+                                         for arg in args), 1, "Production channel must be unique")
                     self.assertEqual(args[args.index("--channel") + 1], "production")
             for args in powershell_calls:
                 with self.subTest(workflow=name, args=args):
                     self.assertIn("-Channel", args)
+                    self.assertEqual(sum(arg.lower() == "-channel" or arg.lower().startswith("-channel:")
+                                         for arg in args), 1, "Production channel must be unique")
                     self.assertEqual(args[args.index("-Channel") + 1], "production")
+
+    def test_bundle_arguments_admitted_by_recorded_product_source(self):
+        source_root = os.environ.get("NMEM_RELEASE_SOURCE_ROOT")
+        if not source_root:
+            self.skipTest("Set NMEM_RELEASE_SOURCE_ROOT to validate the frozen private product source")
+        source = (Path(source_root) / "nowledge-graph/scripts/build-rust-bundle.sh").read_text()
+        embed_root = Path(source_root) / "nmem-rs/crates/nmem-embed"
+        self.assertIn('[[bin]]\nname = "nmem-models"', (embed_root / "Cargo.toml").read_text())
+        self.assertIn('"fetch" => {', (embed_root / "src/bin/models_cli.rs").read_text())
+        self.assertIn('name: "qwen3-embedding-0.6b-q8_0"', (embed_root / "src/registry.rs").read_text())
+        marker = "# ----------------------------------------------------------------------------\n# Configuration / paths"
+        self.assertIn(marker, source, "Source admission boundary changed; review the extraction")
+        admission = source.split(marker, 1)[0]
+        probe = admission + '\nprintf "admitted:%s:%s:%s\\n" "$CHANNEL" "$BAZEL_PUBLIC_BINARIES" "$BAZEL_HAWDB_SERVER"\n'
+        for name in ("release-desktop.yml", "test-windows-bazel.yml"):
+            workflow = (ROOT / ".github" / "workflows" / name).read_text()
+            for args in bundle_arguments(workflow)[0]:
+                with self.subTest(workflow=name, args=args):
+                    result = subprocess.run(["bash", "-c", probe, "bundle-admission", *args],
+                                            capture_output=True, text=True, check=False)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.splitlines()[-1], "admitted:production:true:false")
+                    rejected = subprocess.run(
+                        ["bash", "-c", probe, "bundle-admission", *args, "--bazel-hawdb-server"],
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertIn("requires --channel nightly", rejected.stderr)
 
     def test_public_hawdb_does_not_require_private_credentials(self):
         workflows = ("release-desktop.yml", "test-windows-bazel.yml", "build-rust-bundle.yml")
@@ -118,7 +155,7 @@ class GAPromotionContractTest(unittest.TestCase):
                         self.assertEqual(output.read_text() if output.exists() else "",
                                          f"sha={expected_sha}\n" if has_contract else "")
 
-    def test_windows_pre_cache_initialization_uses_source_contract_and_propagates_failure(self):
+    def test_build_initialization_uses_source_contract_before_cargo_and_propagates_failure(self):
         workflow = (ROOT / ".github" / "workflows" / "release-desktop.yml").read_text()
         windows = workflow.split("\n  build-windows:\n", 1)[1].split("\n  build-linux-deb-appimage:\n", 1)[0]
         anchor = "initialize_windows_path_dependencies"
@@ -139,11 +176,34 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertLess(vulkan.index("*initialize_windows_path_dependencies"),
                         vulkan.index("uses: Swatinem/rust-cache@v2"))
 
+        scripts_by_job = {"windows": script, "windows-vulkan": script}
+        bundle = (ROOT / ".github" / "workflows" / "build-rust-bundle.yml").read_text()
+        self.assertLess(bundle.index("Install Rust backend build toolchain (macOS)"),
+                        bundle.index("cargo run"))
+        self.assertIn("cargo run -p nmem-embed --bin nmem-models -- fetch", bundle)
+        for name in ("test-windows-bazel.yml", "build-rust-bundle.yml"):
+            standalone = (ROOT / ".github" / "workflows" / name).read_text()
+            definitions = re.findall(
+                r"^      - name: Initialize Rust path dependencies before cache restore\n"
+                r"(?P<step>(?:^        .*\n|^\n)+)",
+                standalone, re.MULTILINE,
+            )
+            self.assertEqual(len(definitions), 1, name)
+            standalone_step = definitions[0]
+            self.assertIn("        shell: bash\n", standalone_step, name)
+            self.assertLess(standalone.index("Initialize Rust path dependencies before cache restore"),
+                            standalone.index("uses: Swatinem/rust-cache@v2"), name)
+            self.assertLess(standalone.index("Initialize Rust path dependencies before cache restore"),
+                            standalone.index("cargo clean" if name.startswith("test-") else "cargo run"), name)
+            scripts_by_job[name] = "\n".join(
+                line[10:] for line in standalone_step.split("        run: |\n", 1)[1].splitlines()
+            )
+
         # Vulkan resolves the YAML alias to this exact mapping. Exercise both
         # consumers so moving the definition cannot silently select a legacy step.
         for job, has_helper, status in (
             (job, has_helper, status)
-            for job in ("windows", "windows-vulkan")
+            for job in scripts_by_job
             for has_helper, status in ((True, 0), (True, 37), (False, 0), (False, 41))
         ):
             with self.subTest(job=job, has_helper=has_helper, status=status), tempfile.TemporaryDirectory() as directory:
@@ -159,7 +219,7 @@ class GAPromotionContractTest(unittest.TestCase):
                 git.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > called-legacy\n'
                                f'exit {0 if has_helper else status}\n')
                 git.chmod(0o755)
-                result = subprocess.run(["bash", "-c", script], cwd=root, check=False,
+                result = subprocess.run(["bash", "-c", scripts_by_job[job]], cwd=root, check=False,
                                         env={**os.environ, "RUNNER_TEMP": str(root / "runner"),
                                              "GITHUB_ENV": str(root / "github-env"),
                                              "PATH": str(root / "bin") + os.pathsep + os.environ["PATH"]},
@@ -173,7 +233,8 @@ class GAPromotionContractTest(unittest.TestCase):
                     self.assertFalse((root / "called-contract").exists())
                     self.assertIn("submodule\nupdate\n--init\n--depth\n1\nupstream_forks/ladybug\nupstream_forks/rig\n",
                                   (root / "called-legacy").read_text())
-                self.assertIn("XDG_CACHE_HOME=", (root / "github-env").read_text())
+                if job != "build-rust-bundle.yml":
+                    self.assertIn("XDG_CACHE_HOME=", (root / "github-env").read_text())
 
     def test_desktop_promotion_does_not_deploy_backbone(self):
         for name in ("promote-rc-to-ga.yml", "finish-ga-release.yml"):
