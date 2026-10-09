@@ -48,6 +48,7 @@ class PayloadIdentityTests(unittest.TestCase):
         web = self.backend / "web-dist"
         web.mkdir()
         (web / "index-web.html").write_text("Qualified Web entry point")
+        (web / "index-web.html").chmod(0o644)
         self.installed_script = self.payload / "usr/share/nowledge-mem/install-cli.sh"
         self.installed_script.parent.mkdir(parents=True)
         self.installed_script.write_text(self.script_contents)
