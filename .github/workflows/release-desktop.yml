@@ -487,7 +487,7 @@ jobs:
           unset APPLE_CERTIFICATE
           unset APPLE_CERTIFICATE_PASSWORD
           rm -rf python-standalone rust-backend
-          ./scripts/build-rust-bundle.sh --target aarch64-apple-darwin --bazel-public-binaries --bazel-hawdb-server
+          ./scripts/build-rust-bundle.sh --channel production --target aarch64-apple-darwin --bazel-public-binaries
           ./scripts/build-macos.sh --arch arm64 --skip-python
 
       - name: Locate + rename DMG
@@ -660,7 +660,7 @@ jobs:
           unset APPLE_CERTIFICATE
           unset APPLE_CERTIFICATE_PASSWORD
           rm -rf python-standalone rust-backend
-          ./scripts/build-rust-bundle.sh --target x86_64-apple-darwin --bazel-public-binaries --bazel-hawdb-server
+          ./scripts/build-rust-bundle.sh --channel production --target x86_64-apple-darwin --bazel-public-binaries
           ./scripts/build-macos.sh --arch x86_64 --skip-python
 
       - name: Locate + rename DMG
@@ -872,7 +872,7 @@ jobs:
         shell: pwsh
         # Restore the Cargo entry point used by the successful v0.10.91-rc2
         # Windows build. Bazel validation lives in test-windows-bazel.yml.
-        run: .\scripts\build-rust-bundle.ps1 -Target x86_64-pc-windows-msvc
+        run: .\scripts\build-rust-bundle.ps1 -Channel production -Target x86_64-pc-windows-msvc
 
       - name: Build Tauri (NSIS)
         working-directory: nowledge-graph
@@ -1022,7 +1022,7 @@ jobs:
 
       - name: Build Rust backend bundle (Linux x86_64)
         working-directory: nowledge-graph
-        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --bazel-public-binaries --bazel-hawdb-server
+        run: ./scripts/build-rust-bundle.sh --channel production --target x86_64-unknown-linux-gnu --bazel-public-binaries
 
       - name: Build .deb + .AppImage (Tauri native)
         working-directory: nowledge-graph
@@ -1185,7 +1185,7 @@ jobs:
 
       - name: Build Rust backend bundle (Linux x86_64)
         working-directory: nowledge-graph
-        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --bazel-public-binaries --bazel-hawdb-server
+        run: ./scripts/build-rust-bundle.sh --channel production --target x86_64-unknown-linux-gnu --bazel-public-binaries
 
       - name: Build native .rpm (Tauri rpmbuild)
         # Tauri's rpm-rs compression is universally slow regardless of
@@ -1397,7 +1397,7 @@ jobs:
       - name: Build Rust backend bundle (Windows, Vulkan)
         working-directory: nowledge-graph
         shell: pwsh
-        run: .\scripts\build-rust-bundle.ps1 -Target x86_64-pc-windows-msvc -Gpu vulkan
+        run: .\scripts\build-rust-bundle.ps1 -Channel production -Target x86_64-pc-windows-msvc -Gpu vulkan
 
       - name: Build Tauri (NSIS)
         working-directory: nowledge-graph
@@ -1604,7 +1604,7 @@ jobs:
 
       - name: Build Rust backend bundle (Linux x86_64, Vulkan)
         working-directory: nowledge-graph
-        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --gpu vulkan --bazel-public-binaries
+        run: ./scripts/build-rust-bundle.sh --channel production --target x86_64-unknown-linux-gnu --gpu vulkan --bazel-public-binaries
 
       - name: Build .deb + .AppImage (Tauri native)
         working-directory: nowledge-graph
