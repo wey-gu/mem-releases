@@ -9,6 +9,8 @@ import re
 import shutil
 import subprocess
 
+from verify_rpm_archive import verify_archive_digest
+
 
 def inventory(root):
     result = {}
@@ -158,15 +160,7 @@ def verify(source, payload, rpm, receipt):
         if installed.rstrip("\n") != script:
             raise ValueError(f"RPM scriptlet differs: {tag}")
     subprocess.run(["rpm", "--checksig", "--nosignature", str(rpm)], check=True)
-    archive_digest = subprocess.check_output(
-        ["rpm", "-qp", "--qf", "%{PAYLOADDIGESTALT}", str(rpm)], text=True
-    ).strip()
-    with subprocess.Popen(["rpm2cpio", str(rpm)], stdout=subprocess.PIPE) as process:
-        actual_digest = hashlib.file_digest(process.stdout, "sha256").hexdigest()
-        if process.wait() or archive_digest != actual_digest:
-            raise ValueError(
-                "Uncompressed RPM archive digest does not match PAYLOADDIGESTALT"
-            )
+    archive_digest = verify_archive_digest(rpm)
     expected["archive_sha256"] = archive_digest
     expected["rpm_verified"] = True
     with rpm.open("rb") as stream:

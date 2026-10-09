@@ -1096,7 +1096,7 @@ jobs:
     # Fedora 40 raised the RPM to GLIBC_2.39/CXXABI_1.3.15, so it could not run
     # on Fedora 39 (GLIBC 2.38) even though the Ubuntu-built AppImage/DEB could.
     # Ubuntu 22.04 gives all three packages the supported GLIBC 2.35 floor;
-    # rpmbuild only creates the archive and does not change the ELF ABI.
+    # Tauri's RPM bundler creates the archive and does not change the ELF ABI.
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     env:
@@ -1220,7 +1220,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/rpm-tool/tauri/target
-          key: rpm-cli-ubuntu22-rust1971-${{ hashFiles('release-tooling/scripts/build-tauri-rpm-cli.sh', 'release-tooling/scripts/patches/rpm-0.16-short-write.patch') }}
+          key: rpm-cli-ubuntu22-rust1981-${{ hashFiles('release-tooling/scripts/build-tauri-rpm-cli.sh', 'release-tooling/scripts/patches/rpm-0.16-short-write.patch') }}
       - name: Build the fixed Tauri packaging CLI
         run: bash release-tooling/scripts/build-tauri-rpm-cli.sh "$RUNNER_TEMP/rpm-tool"
       - name: Build compressed RPM with the short-write fix
@@ -1243,7 +1243,9 @@ jobs:
 
       - name: Verify Linux payloads and ABI floor
         working-directory: nowledge-graph
-        run: ./scripts/verify-linux-package.sh "${{ steps.locate.outputs.rpm }}"
+        run: |
+          ./scripts/verify-linux-package.sh "${{ steps.locate.outputs.rpm }}"
+          python3 ../release-tooling/scripts/verify_rpm_archive.py "${{ steps.locate.outputs.rpm }}"
 
       - uses: actions/upload-artifact@v4
         with:

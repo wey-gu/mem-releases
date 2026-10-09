@@ -14,8 +14,12 @@ on:
         required: true
         type: string
       version:
-        description: "GA version contained in that DEB"
+        description: "App version contained in that DEB (without the RC tag suffix)"
         required: true
+        type: string
+      source_tag:
+        description: "Original GA or RC source tag (defaults to v<version>)"
+        required: false
         type: string
       deb_sha256:
         description: "Expected SHA-256 of the exact DEB to repack"
@@ -38,6 +42,7 @@ jobs:
       SOURCE_SHA: ${{ inputs.source_ref }}
       SOURCE_RUN: ${{ inputs.source_run_id }}
       VERSION: ${{ inputs.version }}
+      SOURCE_TAG: ${{ inputs.source_tag }}
       DEB_SHA256: ${{ inputs.deb_sha256 }}
     steps:
       - uses: actions/checkout@v4
@@ -60,13 +65,15 @@ jobs:
           python - <<'PYTHON'
           import json, os, re, subprocess
           sha, version = os.environ['SOURCE_SHA'], os.environ['VERSION']
+          source_tag = os.environ['SOURCE_TAG'] or f'v{version}'
           assert re.fullmatch(r'[0-9a-f]{40}', sha)
           assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version)
+          assert re.fullmatch(rf'v{re.escape(version)}(?:-rc[1-9][0-9]*)?', source_tag)
           assert re.fullmatch(r'[0-9]+', os.environ['SOURCE_RUN'])
           assert re.fullmatch(r'[0-9a-f]{64}', os.environ['DEB_SHA256'])
           assert subprocess.check_output(['git', '-C', 'source', 'rev-parse', 'HEAD'], text=True).strip() == sha
           refs = subprocess.check_output(['git', '-C', 'source', 'ls-remote', 'origin',
-              f'refs/tags/v{version}', f'refs/tags/v{version}^{{}}'], text=True).splitlines()
+              f'refs/tags/{source_tag}', f'refs/tags/{source_tag}^{{}}'], text=True).splitlines()
           assert refs
           peeled = [line.split()[0] for line in refs if line.endswith('^{}')]
           assert (peeled or [refs[0].split()[0]]) == [sha]
@@ -75,14 +82,18 @@ jobs:
               return json.loads(subprocess.check_output(['gh', 'api', path], text=True))
           run = api(f'repos/{repo}/actions/runs/{os.environ["SOURCE_RUN"]}')
           assert run['path'] == '.github/workflows/release-desktop.yml'
-          assert run['head_branch'] == f'v{version}' and run['event'] == 'workflow_dispatch'
-          tag = api(f'repos/{repo}/git/ref/tags/v{version}')
-          assert run['head_sha'] == tag['object']['sha']
+          assert run['head_branch'] == source_tag and run['event'] in {'push', 'workflow_dispatch'}
+          tag = api(f'repos/{repo}/git/ref/tags/{source_tag}')['object']
+          while tag['type'] == 'tag':
+              tag = api(f'repos/{repo}/git/tags/{tag["sha"]}')['object']
+          assert tag['type'] == 'commit' and run['head_sha'] == tag['sha']
           jobs = api(f'repos/{repo}/actions/runs/{os.environ["SOURCE_RUN"]}/jobs?per_page=100')['jobs']
           selected = [job for job in jobs if job['name'] == 'build-linux-deb-appimage']
           assert len(selected) == 1 and selected[0]['conclusion'] == 'success'
-          print(f'Qualified DEB source: {version} {sha}; original run {run["id"]}')
+          print(f'Qualified DEB source: {source_tag} {sha}; original run {run["id"]}')
           PYTHON
+      - name: Test archive verification regressions
+        run: python -m unittest discover -s tooling/scripts -p test_verify_rpm_archive.py -v
       - name: Download the qualified Linux artifact
         uses: actions/download-artifact@v4
         with:
@@ -128,11 +139,27 @@ jobs:
           from pathlib import Path
           path = Path('receipt.json')
           receipt = json.loads(path.read_text())
-          receipt.update(source_run=int(os.environ['SOURCE_RUN']),
+          receipt.update(source_tag=os.environ['SOURCE_TAG'] or 'v' + os.environ['VERSION'],
+              source_run=int(os.environ['SOURCE_RUN']),
               tooling_sha=os.environ['GITHUB_SHA'], deb_sha256=os.environ['DEB_SHA256'])
           path.write_text(json.dumps(receipt, indent=2) + '\n')
           PYTHON
-      - name: Initialize Cargo metadata dependencies
+      - name: Resolve private Cargo metadata dependency
+        id: hawdb
+        working-directory: source
+        run: |
+          read -r mode kind sha dependency_path <<< "$(git ls-tree HEAD hawdb)"
+          [[ "$mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ && "$dependency_path" == hawdb ]]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Checkout private Cargo metadata dependency
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/hawdb
+          ssh-key: ${{ secrets.SKEIN_REPO_SSH_KEY }}
+          ref: ${{ steps.hawdb.outputs.sha }}
+          path: source/hawdb
+          persist-credentials: false
+      - name: Initialize public Cargo metadata dependencies
         working-directory: source
         run: scripts/init-release-rust-submodules.sh --init-https
       - uses: dtolnay/rust-toolchain@1.98.1
@@ -140,7 +167,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/rpm-tool/tauri/target
-          key: rpm-cli-ubuntu22-rust1971-${{ hashFiles('tooling/scripts/build-tauri-rpm-cli.sh', 'tooling/scripts/patches/rpm-0.16-short-write.patch') }}
+          key: rpm-cli-ubuntu22-rust1981-${{ hashFiles('tooling/scripts/build-tauri-rpm-cli.sh', 'tooling/scripts/patches/rpm-0.16-short-write.patch') }}
       - name: Build the fixed Tauri packaging CLI
         run: bash tooling/scripts/build-tauri-rpm-cli.sh "$RUNNER_TEMP/rpm-tool"
       - name: Bundle compressed RPM without recompiling the App
@@ -156,8 +183,10 @@ jobs:
           ) &
           heartbeat_pid=$!
           trap 'kill "$heartbeat_pid" 2>/dev/null || true' EXIT
+          started="$(date +%s)"
           timeout --kill-after=30s 15m "$RUNNER_TEMP/rpm-tool/tauri/target/release/cargo-tauri" \
             tauri bundle --ci --bundles rpm
+          echo "RPM_BUNDLE_SECONDS=$(( $(date +%s) - started ))" >> "$GITHUB_ENV"
       - name: Verify payload identity and the Linux runtime contract
         run: |
           set -euo pipefail
@@ -173,6 +202,18 @@ jobs:
           python tooling/scripts/rpm_repack.py verify --source source --payload rpm-root \
             --rpm "$rpm_path" --receipt receipt.json
           bash source/nowledge-graph/scripts/verify-linux-package.sh "$rpm_path"
+          python - <<'PYTHON'
+          import hashlib, json, os
+          from pathlib import Path
+          path = Path('receipt.json')
+          receipt = json.loads(path.read_text())
+          cli = Path(os.environ['RUNNER_TEMP']) / 'rpm-tool/tauri/target/release/cargo-tauri'
+          with cli.open('rb') as stream:
+              receipt['tauri_cli_sha256'] = hashlib.file_digest(stream, 'sha256').hexdigest()
+          receipt['bundle_seconds'] = int(os.environ['RPM_BUNDLE_SECONDS'])
+          receipt['linux_runtime_verified'] = True
+          path.write_text(json.dumps(receipt, indent=2) + '\n')
+          PYTHON
           mkdir output
           cp "$rpm_path" receipt.json output/
       - uses: actions/upload-artifact@v4

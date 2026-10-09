@@ -10,7 +10,7 @@
      }
  
      fn flush(&mut self) -> std::io::Result<()> {
-@@ -773,3 +774,35 @@
+@@ -773,3 +774,82 @@
          assert_eq!(records[0].data.as_str(), Some("echo `hello world`"));
      }
  }
@@ -44,5 +44,52 @@
 +        let digest = writer.into_digest().as_ref().to_vec();
 +        assert_eq!(digest.as_slice(), Sha256::digest(input).as_slice());
 +        assert_eq!(output.0, input);
++    }
++
++    #[test]
++    fn gzip_package_digest_matches_decompressed_archive() {
++        use crate::{CompressionWithLevel, FileOptions, IndexTag, PackageBuilder};
++        use std::io::Read;
++
++        let input = std::env::temp_dir().join(format!(
++            "rpm-short-write-{}-{}.data",
++            std::process::id(),
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap()
++                .as_nanos()
++        ));
++        let mut file = std::fs::OpenOptions::new()
++            .write(true)
++            .create_new(true)
++            .open(&input)
++            .unwrap();
++        let mut seed = 0x12345678u32;
++        let bytes: Vec<u8> = (0..65536)
++            .map(|_| {
++                seed ^= seed << 13;
++                seed ^= seed >> 17;
++                seed ^= seed << 5;
++                seed as u8
++            })
++            .collect();
++        file.write_all(&bytes).unwrap();
++        drop(file);
++        let builder = PackageBuilder::new("digest-test", "1.0.0", "MIT", "x86_64", "test")
++            .compression(CompressionWithLevel::Gzip(1))
++            .with_file(&input, FileOptions::new("/usr/share/digest-test/data"))
++            .unwrap();
++        std::fs::remove_file(input).unwrap();
++        let package = builder.build().unwrap();
++        let expected = &package
++            .metadata
++            .header
++            .get_entry_data_as_string_array(IndexTag::RPMTAG_PAYLOADDIGESTALT)
++            .unwrap()[0];
++        let mut archive = Vec::new();
++        flate2::read::GzDecoder::new(package.content.as_slice())
++            .read_to_end(&mut archive)
++            .unwrap();
++        assert_eq!(*expected, hex::encode(Sha256::digest(&archive)));
 +    }
 +}
