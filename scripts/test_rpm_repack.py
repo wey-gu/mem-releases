@@ -10,6 +10,61 @@ from unittest.mock import patch
 import rpm_repack
 
 
+class OriginalRunTagTests(unittest.TestCase):
+    def setUp(self):
+        self.source_tag = "v0.10.99-rc1"
+        self.run = {
+            "path": ".github/workflows/release-desktop.yml",
+            "head_branch": self.source_tag,
+            "event": "push",
+        }
+
+    def test_source_named_tooling_tag_is_accepted(self):
+        self.assertEqual(
+            rpm_repack.original_run_tag(self.run, self.source_tag), self.source_tag
+        )
+
+    def test_exact_build_alias_is_accepted_for_manual_dispatch(self):
+        self.run.update(
+            head_branch="build-" + self.source_tag, event="workflow_dispatch"
+        )
+        self.assertEqual(
+            rpm_repack.original_run_tag(self.run, self.source_tag),
+            self.run["head_branch"],
+        )
+
+    def test_source_named_manual_dispatch_is_accepted(self):
+        self.run["event"] = "workflow_dispatch"
+        self.assertEqual(
+            rpm_repack.original_run_tag(self.run, self.source_tag), self.source_tag
+        )
+
+    def test_arbitrary_branch_is_rejected(self):
+        self.run["head_branch"] = "main"
+        with self.assertRaisesRegex(ValueError, "tooling tag"):
+            rpm_repack.original_run_tag(self.run, self.source_tag)
+
+    def test_different_rc_build_alias_is_rejected(self):
+        self.run.update(head_branch="build-v0.10.99-rc2", event="workflow_dispatch")
+        with self.assertRaisesRegex(ValueError, "tooling tag"):
+            rpm_repack.original_run_tag(self.run, self.source_tag)
+
+    def test_build_alias_push_is_rejected(self):
+        self.run["head_branch"] = "build-" + self.source_tag
+        with self.assertRaises(ValueError):
+            rpm_repack.original_run_tag(self.run, self.source_tag)
+
+    def test_other_workflow_is_rejected(self):
+        self.run["path"] = ".github/workflows/release-mobile.yml"
+        with self.assertRaisesRegex(ValueError, "original Desktop workflow"):
+            rpm_repack.original_run_tag(self.run, self.source_tag)
+
+    def test_other_trigger_is_rejected(self):
+        self.run["event"] = "repository_dispatch"
+        with self.assertRaisesRegex(ValueError, "trigger"):
+            rpm_repack.original_run_tag(self.run, self.source_tag)
+
+
 class PayloadIdentityTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="rpm-payload-fixture-")

@@ -63,7 +63,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python - <<'PYTHON'
-          import json, os, re, subprocess
+          import json, os, re, subprocess, sys
+          from pathlib import Path
+          sys.path.insert(0, 'tooling/scripts')
+          from rpm_repack import original_run_tag
           sha, version = os.environ['SOURCE_SHA'], os.environ['VERSION']
           source_tag = os.environ['SOURCE_TAG'] or f'v{version}'
           assert re.fullmatch(r'[0-9a-f]{40}', sha)
@@ -81,15 +84,17 @@ jobs:
           def api(path):
               return json.loads(subprocess.check_output(['gh', 'api', path], text=True))
           run = api(f'repos/{repo}/actions/runs/{os.environ["SOURCE_RUN"]}')
-          assert run['path'] == '.github/workflows/release-desktop.yml'
-          assert run['head_branch'] == source_tag and run['event'] in {'push', 'workflow_dispatch'}
-          tag = api(f'repos/{repo}/git/ref/tags/{source_tag}')['object']
+          tooling_tag = original_run_tag(run, source_tag)
+          tag = api(f'repos/{repo}/git/ref/tags/{tooling_tag}')['object']
           while tag['type'] == 'tag':
               tag = api(f'repos/{repo}/git/tags/{tag["sha"]}')['object']
           assert tag['type'] == 'commit' and run['head_sha'] == tag['sha']
           jobs = api(f'repos/{repo}/actions/runs/{os.environ["SOURCE_RUN"]}/jobs?per_page=100')['jobs']
           selected = [job for job in jobs if job['name'] == 'build-linux-deb-appimage']
           assert len(selected) == 1 and selected[0]['conclusion'] == 'success'
+          Path('original-build.json').write_text(json.dumps({
+              'original_tooling_tag': tooling_tag, 'original_tooling_sha': run['head_sha']
+          }) + '\n')
           print(f'Qualified DEB source: {source_tag} {sha}; original run {run["id"]}')
           PYTHON
       - name: Test archive verification regressions
@@ -141,6 +146,7 @@ jobs:
           from pathlib import Path
           path = Path('receipt.json')
           receipt = json.loads(path.read_text())
+          receipt.update(json.loads(Path('original-build.json').read_text()))
           receipt.update(source_tag=os.environ['SOURCE_TAG'] or 'v' + os.environ['VERSION'],
               source_run=int(os.environ['SOURCE_RUN']),
               tooling_sha=os.environ['GITHUB_SHA'], deb_sha256=os.environ['DEB_SHA256'])

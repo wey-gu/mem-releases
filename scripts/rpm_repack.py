@@ -13,6 +13,21 @@ import subprocess
 from verify_rpm_archive import verify_archive_digest
 
 
+def original_run_tag(run, source_tag):
+    if run["path"] != ".github/workflows/release-desktop.yml":
+        raise ValueError("Expected the original Desktop workflow")
+    if run["head_branch"] not in {source_tag, "build-" + source_tag}:
+        raise ValueError("Original tooling tag does not match the source RC")
+    if (
+        run["head_branch"] == "build-" + source_tag
+        and run["event"] != "workflow_dispatch"
+    ):
+        raise ValueError("The build-only tooling alias requires a manual trigger")
+    if run["event"] not in {"push", "workflow_dispatch"}:
+        raise ValueError("Unsupported original Desktop trigger")
+    return run["head_branch"]
+
+
 def file_identity(path):
     file_stat = path.lstat()
     if not stat.S_ISREG(file_stat.st_mode):
