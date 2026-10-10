@@ -82,7 +82,7 @@ class GAPromotionContractTest(unittest.TestCase):
                     self.assertIn("requires --channel nightly", rejected.stderr)
 
     def test_public_hawdb_does_not_require_private_credentials(self):
-        workflows = ("release-desktop.yml", "test-windows-bazel.yml", "build-rust-bundle.yml")
+        workflows = ("release-desktop.yml", "test-windows-bazel.yml", "build-rust-bundle.yml", "rpm-test.yml")
         for name in workflows:
             with self.subTest(workflow=name):
                 workflow = (ROOT / ".github" / "workflows" / name).read_text()
@@ -154,6 +154,31 @@ class GAPromotionContractTest(unittest.TestCase):
                         self.assertEqual(result.returncode, 0, result.stderr)
                         self.assertEqual(output.read_text() if output.exists() else "",
                                          f"sha={expected_sha}\n" if has_contract else "")
+
+    def test_rpm_metadata_initialization_precedes_bundling_and_propagates_failure(self):
+        workflow = (ROOT / ".github/workflows/rpm-test.yml").read_text()
+        step_name = "name: Initialize public Cargo metadata dependencies"
+        step = workflow.split(step_name + "\n", 1)[1].split("\n      - ", 1)[0]
+        self.assertIn("working-directory: source", step)
+        command = step.split("run: ", 1)[1].strip()
+        self.assertLess(workflow.index(step_name), workflow.index("name: Build the fixed Tauri packaging CLI"))
+        self.assertLess(workflow.index(step_name), workflow.index("name: Bundle compressed RPM"))
+        for exit_code in (0, 73):
+            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                helper = root / "scripts/init-release-rust-submodules.sh"
+                helper.parent.mkdir()
+                helper.write_text(
+                    '#!/usr/bin/env bash\nset -euo pipefail\n'
+                    '[[ $# -eq 1 && "$1" == --init-desktop-https ]] || exit 2\n'
+                    'printf "initialized:%s\\n" "$1"\n'
+                    f'exit {exit_code}\n'
+                )
+                helper.chmod(0o755)
+                result = subprocess.run(["bash", "-e", "-c", command], cwd=root,
+                                        capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, exit_code, result.stderr)
+                self.assertEqual(result.stdout, "initialized:--init-desktop-https\n")
 
     def test_build_initialization_uses_source_contract_before_cargo_and_propagates_failure(self):
         workflow = (ROOT / ".github" / "workflows" / "release-desktop.yml").read_text()

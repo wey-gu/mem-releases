@@ -9,8 +9,15 @@ on:
       - .github/workflows/test-windows-bazel.yml
       - .github/workflows/build-rust-bundle.yml
       - .github/workflows/promote-rpm-to-ga.yml
+      - .github/workflows/rpm-test.yml
       - .github/workflows/ga-promotion-contract.yml
       - scripts/test_ga_promotion_contract.py
+      - scripts/build-tauri-rpm-cli.sh
+      - scripts/patches/**
+      - scripts/rpm_repack.py
+      - scripts/test_rpm_repack.py
+      - scripts/verify_rpm_archive.py
+      - scripts/test_verify_rpm_archive.py
       - scripts/verify-ga-delivery.mjs
       - scripts/test_verify_ga_delivery.mjs
       - scripts/upload-draft-release-assets.mjs
@@ -34,8 +41,15 @@ on:
       - .github/workflows/test-windows-bazel.yml
       - .github/workflows/build-rust-bundle.yml
       - .github/workflows/promote-rpm-to-ga.yml
+      - .github/workflows/rpm-test.yml
       - .github/workflows/ga-promotion-contract.yml
       - scripts/test_ga_promotion_contract.py
+      - scripts/build-tauri-rpm-cli.sh
+      - scripts/patches/**
+      - scripts/rpm_repack.py
+      - scripts/test_rpm_repack.py
+      - scripts/verify_rpm_archive.py
+      - scripts/test_verify_rpm_archive.py
       - scripts/verify-ga-delivery.mjs
       - scripts/test_verify_ga_delivery.mjs
       - scripts/upload-draft-release-assets.mjs
@@ -59,12 +73,19 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Check GA promotion boundary
         run: python3 -m unittest discover -s scripts -p test_ga_promotion_contract.py
+      - name: Check compressed RPM archive verification
+        run: python3 -m unittest discover -s scripts -p test_verify_rpm_archive.py
+      - name: Check RPM payload identity
+        run: python3 -m unittest discover -s scripts -p test_rpm_repack.py
       - name: Check exact GA delivery gate
         run: node --test scripts/test_verify_ga_delivery.mjs
       - name: Check draft Release asset reconciliation
