@@ -17,6 +17,123 @@ instead of a moving view of `main`.
 - Core RC artifacts are promoted to GA without rebuilding. A delayed RPM is
   promoted separately from its validated RC asset and never changes the APT
   repository or auto-updater feed.
+- Desktop delivery is complete only after the previous native client protocol
+  admits the qualified release on all six platforms. Legacy download/feed
+  checks alone do not prove that Check for Updates works.
+
+### Native update delivery acceptance
+
+After all six GA objects are ready and an authorized release operator has
+published the candidate, run this independent, read-only qualification before
+declaring desktop delivery complete. Keep the previous stable recovery baseline
+until explicit candidate acceptance. Neither this verifier nor a GA upload
+changes the protected update authority; the deployed authority may still
+require separate prepare/publish operations. Do not deploy Backbone to advance
+a version, or infer native delivery from ordinary `/latest` and `/update.json`.
+
+Supply a reviewed manifest derived from the qualified release bytes, with
+`version`, the immutable `source_sha`, and exactly six `artifacts` entries:
+`mac`, `mac_intel`, `win`, `linux-appimage`, `linux-deb`, `linux-rpm`. Each entry
+needs canonical `key` (`app/<version>/<target><extension>`), positive `size`,
+and independently computed lowercase `sha256`. An operator manifest with
+additional ETag/notes/date fields can be used directly. Do not copy expected
+hashes from the controlled endpoint being tested.
+
+```bash
+VERIFY_ARTIFACT_MANIFEST=/secure/reviewed-release-manifest.json \
+VERIFY_PREVIOUS_DESKTOP_VERSION=<previous-shipped-semver> \
+  node scripts/verify-controlled-desktop-delivery.mjs
+```
+
+Alternatively dispatch `qualify-desktop-update-delivery.yml` from the reviewed
+release-tooling ref, supplying `previous_version` and the reviewed JSON as
+`qualified_manifest`. Record the exact tooling SHA, terminal successful run and
+downloaded receipt. The workflow uses public read-only requests, no operator
+credential, and does not publish, enable, stop, complete, or install anything.
+
+Acceptance requires six fresh protocol-1 allowed decisions using the previous
+Desktop's native User-Agent: exact version, unique echoed request IDs, valid
+60-second lifetime, `no-store`, target, immutable URL, size and SHA-256, and one
+consistent authority revision. A stale candidate, held/stopped state or checksum
+disagreement fails qualification even when ordinary downloads work. Inspect
+the protected authority rather than retrying a publication or calling it a
+client cache issue. The existing promotion jobs still verify legacy delivery;
+their success does not replace this final native acceptance. An older patch
+that intentionally does not become latest must not claim this latest-update
+acceptance; record its direct-download-only delivery boundary separately.
+
+### Protected CI update operations
+
+Use `desktop-update-control.yml` to call the existing production update
+authority. This is a manual operation workflow, independent of App builds,
+R2 uploads, GA promotion and Backbone deployment. It runs from reviewed `main`
+only, with `contents: read` and serialized operations that are never cancelled
+by a newer dispatch. Do not use the existing, unprotected `release-publish`
+environment for this credential.
+
+Before the first run, configure the dedicated `desktop-update-production`
+environment to allow only the `main` branch (no tag policies). The CI job reuses
+existing `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` release secrets; it
+requires no additional operator password. Its Cloudflare token must already
+have access to the selected account and Workers preview/external bindings.
+First qualify that capability with the read-only status job; ordinary contract
+CI does not prove the existing token's production permissions.
+
+Cloudflare authenticates an isolated remote preview, which binds only the
+existing `DesktopUpdateControl` class in `nowledge-mem-backbone-prod`. The
+preview calls the authority's existing `/status`, `/history` and `/operation`
+methods, preserving CAS, artifact readiness checks, atomic audit/replay receipts
+and all transition rules. It uses the fixed trusted-tool actor `release-ci`,
+not a caller-provided name or an impersonated human. This is an account-managed
+CI capability, separate from the public HTTP endpoint's named-operator password.
+Neither customer credentials nor the general admin token gain that capability.
+
+The preview is temporary, loopback-proxied and Cloudflare-authenticated; it is
+not a public Worker deployment and does not change the production Backbone
+code, routes, namespace or password map. The generated preview allows only the
+exact persisted operation JSON; status/history plans cannot write. The runtime
+and preview logs remain private and are removed when the owned process exits.
+Never deploy this helper as a public Worker or modify namespace storage directly.
+A missing management token or inaccessible preview fails before any operation.
+The old public-HTTP operator CLI remains available separately for operators who
+already hold its credential; the CI workflow does not use or copy that password.
+
+Start with the read-only status job:
+
+```bash
+gh workflow run desktop-update-control.yml -R wey-gu/mem-releases \
+  --ref main -f action=status
+```
+
+Download its `desktop-update-receipts-*` artifact. Each mutation requires the
+exact observed `expected_revision`, `expected_stable_version`, and
+`expected_candidate_version` (use the literal `none` when absent), a UUID-v4
+`operation_id`, and a reviewed `reason`. Generate and retain the UUID before
+dispatch. The workflow persists the exact request plan as an artifact before
+calling the authority. After an unknown outcome, inspect status/history and
+rerun the **identical inputs and UUID**; the server validates the saved request
+fingerprint and returns its original receipt. Never increment revisions or
+create a new UUID just to make a failed run pass.
+
+`prepare` and `publish` also require `qualified_manifest` containing the
+independently reviewed six-platform version/source/ETag/size/SHA-256 snapshot.
+`publish` additionally requires `previous_version` and automatically runs the
+six-platform native protocol qualification against the returned revision.
+Pass JSON via `--json` and a prepared dispatch payload file rather than
+interpolating multiline JSON into shell code. A publish success requires both
+the authority readback and native delivery checks; a later verification failure
+does not roll back publication. Inspect the plan and receipts before retrying.
+
+Each dispatch performs **one** explicitly selected operation. An unfinished,
+unaccepted published candidate cannot be silently replaced: after reviewing
+authenticated status/history, explicitly `hold` and `recover` to retain the
+known-good stable baseline, then `prepare` and `publish` the next qualified
+candidate, reading the actual state between operations. Recovery checks stable
+artifact availability and must succeed before preparing another candidate.
+Held intervals temporarily pause controlled updates; never leave a failed
+operation uninspected. `complete` and `initialize` are intentionally absent
+from this repair workflow because they cross separate acceptance/bootstrap
+boundaries. It does not silently mark any candidate known-good.
 
 ## 0. Verify the release capability before the cut
 
@@ -283,9 +400,10 @@ semver tag, its publish job requires and uploads all six desktop artifacts,
 including RPM, then requires APT signing credentials, updates APT, and verifies the R2 download and updater
 routes before creating a draft GitHub Release. The old `latest` input is kept
 only so existing dispatch commands still parse; it no longer gates desktop
-latest. The production updater discovers the newest GA objects in R2 as they
-arrive. The release-owned exact-delivery gate checks all six platforms and
-the updater and APT. The explicit older-patch mode skips the APT update and
+latest. Legacy update endpoints discover the newest GA objects in R2 as they
+arrive. The release-owned exact-delivery gate checks legacy delivery on all six
+platforms and APT. Native controlled update acceptance is a separate required
+step described above. The explicit older-patch mode skips the APT update and
 exact APT check so an older version cannot replace its stable candidate. A
 failure after upload is a partial public release even if the draft is absent.
 Do not deploy the Backbone Worker merely to set a release version. Normal GA

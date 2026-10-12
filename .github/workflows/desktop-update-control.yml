@@ -1,0 +1,91 @@
+name: desktop-update-control
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: One explicit operation; status/history are read-only
+        type: choice
+        required: true
+        default: status
+        options: [status, history, hold, stop, recover, prepare, publish]
+      expected_revision:
+        description: Exact revision from the latest authenticated status; mutations only
+        type: string
+      operation_id:
+        description: Persisted UUID-v4; reuse identical inputs after an unknown outcome
+        type: string
+      reason:
+        description: Reviewed reason for this single mutation
+        type: string
+      expected_stable_version:
+        description: Exact observed stable version; mutations only
+        type: string
+      expected_candidate_version:
+        description: Exact observed candidate version, or none; mutations only
+        type: string
+      qualified_manifest:
+        description: Reviewed six-platform manifest JSON; required for prepare and publish
+        type: string
+      previous_version:
+        description: Previous shipped native Desktop version; required for publish verification
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-update-control-production
+  cancel-in-progress: false
+
+jobs:
+  operation:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    environment: desktop-update-production
+    steps:
+      - name: Require reviewed main ref
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$WORKFLOW_REF" != 'refs/heads/main' ]]; then
+            echo '::error::Desktop update operations must run from reviewed main.'
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned preview runtime
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Validate and persist exact operation plan before HTTP
+        env:
+          OPERATION_ACTION: ${{ inputs.action }}
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+          OPERATION_ID: ${{ inputs.operation_id }}
+          OPERATION_REASON: ${{ inputs.reason }}
+          EXPECTED_STABLE_VERSION: ${{ inputs.expected_stable_version }}
+          EXPECTED_CANDIDATE_VERSION: ${{ inputs.expected_candidate_version }}
+          QUALIFIED_MANIFEST: ${{ inputs.qualified_manifest }}
+          VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.previous_version }}
+        run: node scripts/desktop-update-operation.mjs --plan
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-update-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: desktop-update-plan.json
+          if-no-files-found: error
+      - name: Execute one operation and verify readback
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          UPDATE_ENVIRONMENT: production
+        run: node scripts/desktop-update-cloudflare.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-update-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: desktop-update-receipts/
+          if-no-files-found: ignore

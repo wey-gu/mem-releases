@@ -1,0 +1,44 @@
+name: qualify-desktop-update-delivery
+
+on:
+  workflow_dispatch:
+    inputs:
+      previous_version:
+        description: Previous shipped native Desktop version (clean semver)
+        required: true
+        type: string
+      qualified_manifest:
+        description: Reviewed six-platform release manifest JSON with source_sha, version, key, size and SHA-256
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  native-protocol:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify all six native controlled Desktop decisions
+        env:
+          QUALIFIED_MANIFEST: ${{ inputs.qualified_manifest }}
+          VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.previous_version }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$QUALIFIED_MANIFEST" > qualified-manifest.json
+          VERIFY_ARTIFACT_MANIFEST="$PWD/qualified-manifest.json" \
+            node scripts/verify-controlled-desktop-delivery.mjs | tee native-delivery-receipt.json
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: native-desktop-delivery
+          path: |
+            qualified-manifest.json
+            native-delivery-receipt.json
