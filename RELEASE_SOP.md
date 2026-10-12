@@ -339,6 +339,12 @@ If Docker, R2, and APT succeeded but the GA draft is missing, use
 verifies the core platforms and APT before creating the draft; it does not
 deploy the Backbone Worker or promote the separately staged RPM. Do not
 repeat the full promote merely to create the missing draft.
+For a pause-aware promotion that stopped after the exact R2 uploads but before
+the draft was created, use the same recovery with
+`desktop_upgrade_pause_active=true` and the reviewed
+`paused_stable_version`. It re-verifies the active pause and every exact GA
+download, leaves APT deferred, and creates the draft from the original RC
+assets without rewriting R2.
 If any core R2 object or the APT candidate is missing or wrong, withhold that
 GA: `finish-ga-release` will reject it, and normal promote refuses the occupied
 R2 keys. Record the exact keys, the updater response, and the failed run;
