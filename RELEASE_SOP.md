@@ -17,6 +17,50 @@ instead of a moving view of `main`.
 - Core RC artifacts are promoted to GA without rebuilding. A delayed RPM is
   promoted separately from its validated RC asset and never changes the APT
   repository or auto-updater feed.
+- Desktop delivery is complete only after the previous native client protocol
+  admits the qualified release on all six platforms. Legacy download/feed
+  checks alone do not prove that Check for Updates works.
+
+### Native update delivery acceptance
+
+After all six GA objects are ready and the protected named operator has
+published the candidate, run this independent, read-only qualification before
+declaring desktop delivery complete. Keep the previous stable recovery baseline
+until explicit candidate acceptance. Neither this verifier nor a GA upload
+changes the protected update authority; the deployed authority may still
+require separate prepare/publish operations. Do not deploy Backbone to advance
+a version, or infer native delivery from ordinary `/latest` and `/update.json`.
+
+Supply a reviewed manifest derived from the qualified release bytes, with
+`version`, the immutable `source_sha`, and exactly six `artifacts` entries:
+`mac`, `mac_intel`, `win`, `linux-appimage`, `linux-deb`, `linux-rpm`. Each entry
+needs canonical `key` (`app/<version>/<target><extension>`), positive `size`,
+and independently computed lowercase `sha256`. An operator manifest with
+additional ETag/notes/date fields can be used directly. Do not copy expected
+hashes from the controlled endpoint being tested.
+
+```bash
+VERIFY_ARTIFACT_MANIFEST=/secure/reviewed-release-manifest.json \
+VERIFY_PREVIOUS_DESKTOP_VERSION=<previous-shipped-semver> \
+  node scripts/verify-controlled-desktop-delivery.mjs
+```
+
+Alternatively dispatch `qualify-desktop-update-delivery.yml` from the reviewed
+release-tooling ref, supplying `previous_version` and the reviewed JSON as
+`qualified_manifest`. Record the exact tooling SHA, terminal successful run and
+downloaded receipt. The workflow uses public read-only requests, no operator
+credential, and does not publish, enable, stop, complete, or install anything.
+
+Acceptance requires six fresh protocol-1 allowed decisions using the previous
+Desktop's native User-Agent: exact version, unique echoed request IDs, valid
+60-second lifetime, `no-store`, target, immutable URL, size and SHA-256, and one
+consistent authority revision. A stale candidate, held/stopped state or checksum
+disagreement fails qualification even when ordinary downloads work. Inspect
+the protected authority rather than retrying a publication or calling it a
+client cache issue. The existing promotion jobs still verify legacy delivery;
+their success does not replace this final native acceptance. An older patch
+that intentionally does not become latest must not claim this latest-update
+acceptance; record its direct-download-only delivery boundary separately.
 
 ## 0. Verify the release capability before the cut
 
@@ -283,9 +327,10 @@ semver tag, its publish job requires and uploads all six desktop artifacts,
 including RPM, then requires APT signing credentials, updates APT, and verifies the R2 download and updater
 routes before creating a draft GitHub Release. The old `latest` input is kept
 only so existing dispatch commands still parse; it no longer gates desktop
-latest. The production updater discovers the newest GA objects in R2 as they
-arrive. The release-owned exact-delivery gate checks all six platforms and
-the updater and APT. The explicit older-patch mode skips the APT update and
+latest. Legacy update endpoints discover the newest GA objects in R2 as they
+arrive. The release-owned exact-delivery gate checks legacy delivery on all six
+platforms and APT. Native controlled update acceptance is a separate required
+step described above. The explicit older-patch mode skips the APT update and
 exact APT check so an older version cannot replace its stable candidate. A
 failure after upload is a partial public release even if the draft is absent.
 Do not deploy the Backbone Worker merely to set a release version. Normal GA
