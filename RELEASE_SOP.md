@@ -90,6 +90,29 @@ Label the PR `severity/critical` while the release is active so Tide gives the
 fixed release path higher merge priority. The label does not relax review, CI,
 or bot-only merge gates, and it must not be used for unrelated product work.
 
+### Version ownership and cache boundary
+
+The App release version is a distribution identity, not automatically the
+version of every internal library. Maintain one source-owned canonical release
+version and generate the Desktop, CLI, updater, mobile, lockfile, and build
+metadata that must carry it. Keep internal Rust libraries on independent
+versions unless their public compatibility or distribution contract changes.
+
+This boundary matters for build reuse. Changing one authored version file does
+not preserve caches when that value still fans out into `CARGO_PKG_VERSION`,
+Cargo lock entries, or generated Bazel target versions for every crate. The
+long-term product change must limit the release version to shipped leaf
+binaries and package metadata, while keeping generated consistency checks for
+all runtime-visible versions.
+
+Do not partially apply that target architecture during an active release.
+Until the product repository owns a canonical generator and separates internal
+crate versions, update every field required by the current release preflight.
+Make the ownership refactor in a separate reviewed product PR. Its acceptance
+evidence must show both that internal-only package versions remain stable
+across an App release and that every shipped runtime surface reports the new
+App version.
+
 ## 3. Write, merge, deploy, and verify release notes on `main`
 
 Build the changelog worksheet from the exact range:
@@ -215,6 +238,37 @@ The desktop RC uploads its platform artifacts independently. A slow RPM build
 may complete after the macOS, Windows, DEB, and AppImage artifacts; its result
 must still pass the Linux payload and ABI-floor checks before it can be
 promoted. Do not make a failed RPM invisible by treating the RC as complete.
+
+### Mandatory post-build version E2E
+
+Run a version E2E after compilation against the exact RC artifacts, identified
+by their recorded SHA-256 values. Install or extract each shipped packaging
+path and execute the packaged components. At minimum, compare the expected
+release version with all applicable observations:
+
+- the installed Desktop application and package identity;
+- the embedded `nmem-server --version` output and its live health-details
+  version after Desktop startup;
+- the installed `nmem --version` output;
+- the updater metadata and target selected for the candidate.
+
+The check must explicitly reject an empty version, `0`, `0.0.0`, and known
+build-system placeholders even if two components happen to return the same bad
+value. It must fail nonzero if installation, process startup, readiness,
+version probing, JSON parsing, or cleanup fails. Use strict shell error
+handling and assert readiness before parsing a response; diagnostic output
+after a failed command must never turn the job green.
+
+This is an artifact E2E, not a source or archive-shape check. If the release
+operator cannot execute a platform locally, obtain the same evidence from a
+native release runner before promotion. Record the artifact hash, platform,
+commands, observed versions, and terminal result in the release record.
+
+This gate prevents the failure seen in Desktop 0.10.94
+(`nowledge-co/mem#5897`): a Bazel target omitted the Cargo package version, the
+bundled server reported `0.0.0`, and Desktop correctly refused to start it.
+The source-level repair in `nowledge-co/mem#5898` does not replace this
+post-build proof.
 
 ## 6. Promote the tested RC to GA
 
