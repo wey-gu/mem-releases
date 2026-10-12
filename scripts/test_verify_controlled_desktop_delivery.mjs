@@ -57,6 +57,7 @@ for (const [name, mutate, error] of [
   ['wrong size', b => { b.file_size++; }, /size\/SHA-256 mismatch/],
   ['missing no-store', (_b, h) => { h.delete('cache-control'); }, /must be no-store/],
   ['wrong lifetime', b => { b.control.expires_at = '2026-10-12T01:02:00Z'; }, /decision lifetime/],
+  ['non-native timestamp', b => { b.control.issued_at = 'Mon, 12 Oct 2026 01:00:00 GMT'; }, /native RFC3339/],
   ['wrong target', b => { b.target = 'wrong'; }, /platform\/target mismatch/],
   ['changed authority revision', (b, _h, p) => { if (p === 'linux-rpm') b.control.revision++; }, /Authority changed/],
 ]) test(`rejects ${name}`, async () => {

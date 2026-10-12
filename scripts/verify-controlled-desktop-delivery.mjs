@@ -64,6 +64,9 @@ export async function verifyControlledDesktopDelivery({
       Number.isSafeInteger(control.revision) && control.revision >= 0,
       `${platform}: controlled decision is not an allowed protocol-1 response`);
     requireCondition(control.request_id === id, `${platform}: controlled request ID mismatch`);
+    const rfc3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+    requireCondition(typeof control.issued_at === 'string' && typeof control.expires_at === 'string' &&
+      rfc3339.test(control.issued_at) && rfc3339.test(control.expires_at), `${platform}: decision timestamps must be native RFC3339`);
     const issued = Date.parse(control.issued_at), expires = Date.parse(control.expires_at);
     const elapsed = clock() - start;
     requireCondition(Number.isFinite(issued) && Number.isFinite(expires) && expires - issued === 60_000 &&

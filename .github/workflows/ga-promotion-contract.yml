@@ -6,6 +6,7 @@ on:
       - .github/workflows/promote-rc-to-ga.yml
       - .github/workflows/finish-ga-release.yml
       - .github/workflows/qualify-desktop-update-delivery.yml
+      - .github/workflows/desktop-update-control.yml
       - .github/workflows/release-desktop.yml
       - .github/workflows/test-windows-bazel.yml
       - .github/workflows/build-rust-bundle.yml
@@ -16,6 +17,8 @@ on:
       - scripts/test_verify_ga_delivery.mjs
       - scripts/verify-controlled-desktop-delivery.mjs
       - scripts/test_verify_controlled_desktop_delivery.mjs
+      - scripts/desktop-update-operation.mjs
+      - scripts/test_desktop_update_operation.mjs
       - scripts/upload-draft-release-assets.mjs
       - scripts/test_upload_draft_release_assets.mjs
       - scripts/assert-fresh-r2-version.mjs
@@ -34,6 +37,7 @@ on:
       - .github/workflows/promote-rc-to-ga.yml
       - .github/workflows/finish-ga-release.yml
       - .github/workflows/qualify-desktop-update-delivery.yml
+      - .github/workflows/desktop-update-control.yml
       - .github/workflows/release-desktop.yml
       - .github/workflows/test-windows-bazel.yml
       - .github/workflows/build-rust-bundle.yml
@@ -44,6 +48,8 @@ on:
       - scripts/test_verify_ga_delivery.mjs
       - scripts/verify-controlled-desktop-delivery.mjs
       - scripts/test_verify_controlled_desktop_delivery.mjs
+      - scripts/desktop-update-operation.mjs
+      - scripts/test_desktop_update_operation.mjs
       - scripts/upload-draft-release-assets.mjs
       - scripts/test_upload_draft_release_assets.mjs
       - scripts/assert-fresh-r2-version.mjs
@@ -75,6 +81,8 @@ jobs:
         run: node --test scripts/test_verify_ga_delivery.mjs
       - name: Check native controlled Desktop delivery qualification
         run: node --test scripts/test_verify_controlled_desktop_delivery.mjs
+      - name: Check protected Desktop update operations
+        run: node --test scripts/test_desktop_update_operation.mjs
       - name: Check draft Release asset reconciliation
         run: node --test scripts/test_upload_draft_release_assets.mjs
       - name: Check fresh R2 version gate

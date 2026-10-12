@@ -62,6 +62,60 @@ their success does not replace this final native acceptance. An older patch
 that intentionally does not become latest must not claim this latest-update
 acceptance; record its direct-download-only delivery boundary separately.
 
+### Protected CI update operations
+
+Use `desktop-update-control.yml` to call the existing production update
+authority. This is a manual operation workflow, independent of App builds,
+R2 uploads, GA promotion and Backbone deployment. It runs from reviewed `main`
+only, with `contents: read` and serialized operations that are never cancelled
+by a newer dispatch. Do not use the existing, unprotected `release-publish`
+environment for this credential.
+
+Before the first run, configure the dedicated `desktop-update-production`
+environment to allow only the `main` branch (no tag policies). Store the
+existing named-operator credential as its **environment-only** secret
+`DESKTOP_UPDATE_OPERATOR_TOKEN`. General admin tokens do not grant this
+permission. Do not rotate or overwrite the existing operator map to obtain
+access, or put a token into workflow inputs or receipts. The workflow fails
+before HTTP if the secret is missing.
+
+Start with the read-only status job:
+
+```bash
+gh workflow run desktop-update-control.yml -R wey-gu/mem-releases \
+  --ref main -f action=status
+```
+
+Download its `desktop-update-receipts-*` artifact. Each mutation requires the
+exact observed `expected_revision`, `expected_stable_version`, and
+`expected_candidate_version` (use the literal `none` when absent), a UUID-v4
+`operation_id`, and a reviewed `reason`. Generate and retain the UUID before
+dispatch. The workflow persists the exact request plan as an artifact before
+calling the authority. After an unknown outcome, inspect status/history and
+rerun the **identical inputs and UUID**; the server validates the saved request
+fingerprint and returns its original receipt. Never increment revisions or
+create a new UUID just to make a failed run pass.
+
+`prepare` and `publish` also require `qualified_manifest` containing the
+independently reviewed six-platform version/source/ETag/size/SHA-256 snapshot.
+`publish` additionally requires `previous_version` and automatically runs the
+six-platform native protocol qualification against the returned revision.
+Pass JSON via `--json` and a prepared dispatch payload file rather than
+interpolating multiline JSON into shell code. A publish success requires both
+the authority readback and native delivery checks; a later verification failure
+does not roll back publication. Inspect the plan and receipts before retrying.
+
+Each dispatch performs **one** explicitly selected operation. An unfinished,
+unaccepted published candidate cannot be silently replaced: after reviewing
+authenticated status/history, explicitly `hold` and `recover` to retain the
+known-good stable baseline, then `prepare` and `publish` the next qualified
+candidate, reading the actual state between operations. Recovery checks stable
+artifact availability and must succeed before preparing another candidate.
+Held intervals temporarily pause controlled updates; never leave a failed
+operation uninspected. `complete` and `initialize` are intentionally absent
+from this repair workflow because they cross separate acceptance/bootstrap
+boundaries. It does not silently mark any candidate known-good.
+
 ## 0. Verify the release capability before the cut
 
 Before creating a branch, verify that the release workflows can read the
