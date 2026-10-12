@@ -310,10 +310,21 @@ gh workflow run promote-rc-to-ga.yml -R wey-gu/mem-releases \
   -f paused_stable_version=<previous-version>
 ```
 
-After core and RPM staging succeeds, remove only the pause Worker's APT route.
-Keep Desktop latest, update, and latest-download routes paused. Confirm that the
-old APT repository is readable, then publish the authenticated DEB from the
-draft GA Release:
+After core and RPM staging succeeds, use the audited route workflow to remove
+only the pause Worker's APT route. Keep Desktop latest, update, and
+latest-download routes paused. The workflow requires a fresh UUID, verifies all
+six draft assets and the complete pause boundary, deletes only the exact APT
+route, retains the Worker deployment, and confirms that the old APT repository
+is readable:
+
+```bash
+gh workflow run open-apt-pause-route.yml -R wey-gu/mem-releases \
+  -f ga_tag=<version> \
+  -f previous_version=<previous-version> \
+  -f operation_id=<uuid-v4>
+```
+
+Then publish the authenticated DEB from the draft GA Release:
 
 ```bash
 gh workflow run promote-apt-to-ga.yml -R wey-gu/mem-releases \
