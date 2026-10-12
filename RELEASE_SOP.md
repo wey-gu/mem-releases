@@ -23,7 +23,7 @@ instead of a moving view of `main`.
 
 ### Native update delivery acceptance
 
-After all six GA objects are ready and the protected named operator has
+After all six GA objects are ready and an authorized release operator has
 published the candidate, run this independent, read-only qualification before
 declaring desktop delivery complete. Keep the previous stable recovery baseline
 until explicit candidate acceptance. Neither this verifier nor a GA upload
@@ -72,12 +72,31 @@ by a newer dispatch. Do not use the existing, unprotected `release-publish`
 environment for this credential.
 
 Before the first run, configure the dedicated `desktop-update-production`
-environment to allow only the `main` branch (no tag policies). Store the
-existing named-operator credential as its **environment-only** secret
-`DESKTOP_UPDATE_OPERATOR_TOKEN`. General admin tokens do not grant this
-permission. Do not rotate or overwrite the existing operator map to obtain
-access, or put a token into workflow inputs or receipts. The workflow fails
-before HTTP if the secret is missing.
+environment to allow only the `main` branch (no tag policies). The CI job reuses
+existing `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` release secrets; it
+requires no additional operator password. Its Cloudflare token must already
+have access to the selected account and Workers preview/external bindings.
+First qualify that capability with the read-only status job; ordinary contract
+CI does not prove the existing token's production permissions.
+
+Cloudflare authenticates an isolated remote preview, which binds only the
+existing `DesktopUpdateControl` class in `nowledge-mem-backbone-prod`. The
+preview calls the authority's existing `/status`, `/history` and `/operation`
+methods, preserving CAS, artifact readiness checks, atomic audit/replay receipts
+and all transition rules. It uses the fixed trusted-tool actor `release-ci`,
+not a caller-provided name or an impersonated human. This is an account-managed
+CI capability, separate from the public HTTP endpoint's named-operator password.
+Neither customer credentials nor the general admin token gain that capability.
+
+The preview is temporary, loopback-proxied and Cloudflare-authenticated; it is
+not a public Worker deployment and does not change the production Backbone
+code, routes, namespace or password map. The generated preview allows only the
+exact persisted operation JSON; status/history plans cannot write. The runtime
+and preview logs remain private and are removed when the owned process exits.
+Never deploy this helper as a public Worker or modify namespace storage directly.
+A missing management token or inaccessible preview fails before any operation.
+The old public-HTTP operator CLI remains available separately for operators who
+already hold its credential; the CI workflow does not use or copy that password.
 
 Start with the read-only status job:
 

@@ -58,17 +58,23 @@ export function buildPlan(input) {
   return plan;
 }
 
-export async function executePlan(plan, { token, fetcher = fetch, record = async () => {}, verify = verifyControlledDesktopDelivery } = {}) {
+export function validatePlan(plan) {
   const normalized = buildPlan({ action: plan.action, expected_revision: plan.request && String(plan.request.expected_revision),
     operation_id: plan.request?.operation_id, reason: plan.request?.reason,
     expected_stable_version: plan.expected_stable_version, expected_candidate_version: plan.expected_candidate_version ?? 'none',
     previous_version: plan.previous_version, manifest: plan.manifest });
   requireCondition(JSON.stringify(plan) === JSON.stringify(normalized), 'Plan differs from validated operation; no request sent');
-  requireCondition(typeof token === 'string' && token.length >= 32 && !/[\r\n]/.test(token), 'DESKTOP_UPDATE_OPERATOR_TOKEN is missing or invalid; no request sent');
+  return plan;
+}
+
+export async function executePlan(plan, { token, fetcher = fetch, authorityFetch, record = async () => {}, verify = verifyControlledDesktopDelivery } = {}) {
+  validatePlan(plan);
+  if (authorityFetch === undefined) requireCondition(typeof token === 'string' && token.length >= 32 && !/[\r\n]/.test(token), 'DESKTOP_UPDATE_OPERATOR_TOKEN is missing or invalid; no request sent');
+  else requireCondition(typeof authorityFetch === 'function', 'Invalid authenticated authority transport');
   const call = async (path, body) => {
-    const response = await fetcher(`${origin}${path}`, {
+    const response = await (authorityFetch ?? fetcher)(`${origin}${path}`, {
       method: body ? 'POST' : 'GET', redirect: 'error', signal: AbortSignal.timeout(30_000),
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'User-Agent': 'Nowledge-Mem-Desktop-Operator/1' },
+      headers: { ...(authorityFetch ? {} : { Authorization: `Bearer ${token}` }), 'Content-Type': 'application/json', 'User-Agent': 'Nowledge-Mem-Desktop-Operator/1' },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
     let value;

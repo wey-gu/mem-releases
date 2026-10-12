@@ -17,11 +17,22 @@ then read back the public Changelog before distributing release packages.
 
 # Desktop update delivery
 
-Before package distribution, verify named operator authentication and the
+Before package distribution, verify authorized release-operator access and the
 known-good stable release in the production desktop update authority. After all
 GA artifacts are ready, prepare and publish the exact candidate using the
 observed revision and a persisted operation UUID. Retain the stable recovery
 baseline until the candidate is accepted.
+
+The protected CI workflow can reuse existing Cloudflare account-management
+credentials through an authenticated, isolated remote preview binding to the
+existing authority. It must call the original authority operations with fixed
+`release-ci` attribution, exact revision/UUID, persisted request and readback;
+never edit namespace storage directly, deploy the helper publicly, change the
+production Backbone, or copy/rotate the operator password map. First qualify
+the CI token with a read-only status job. The public HTTP operator endpoint
+continues to require its independent named credential; general admin/customer
+tokens do not gain update permission. See RELEASE_SOP.md for the CI capability
+and cleanup boundary.
 
 Before declaring desktop delivery complete, verify
 `/latest?platform=<platform>&update_control=1&request_id=<fresh-id>` with the

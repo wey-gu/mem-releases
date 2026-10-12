@@ -59,6 +59,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Install pinned preview runtime
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Validate and persist exact operation plan before HTTP
         env:
           OPERATION_ACTION: ${{ inputs.action }}
@@ -77,8 +79,10 @@ jobs:
           if-no-files-found: error
       - name: Execute one operation and verify readback
         env:
-          DESKTOP_UPDATE_OPERATOR_TOKEN: ${{ secrets.DESKTOP_UPDATE_OPERATOR_TOKEN }}
-        run: node scripts/desktop-update-operation.mjs --execute
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          UPDATE_ENVIRONMENT: production
+        run: node scripts/desktop-update-cloudflare.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
