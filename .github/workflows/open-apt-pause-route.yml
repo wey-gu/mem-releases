@@ -21,7 +21,8 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  # Draft Releases are hidden from read-only GITHUB_TOKENs.
+  contents: write
 
 jobs:
   open-apt:

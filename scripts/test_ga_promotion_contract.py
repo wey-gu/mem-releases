@@ -378,12 +378,14 @@ class GAPromotionContractTest(unittest.TestCase):
 
         open_apt = (ROOT / ".github" / "workflows" /
                     "open-apt-pause-route.yml").read_text()
+        self.assertIn("permissions:\n  # Draft Releases are hidden from read-only GITHUB_TOKENs.\n  contents: write", open_apt)
         self.assertIn("node scripts/verify-upgrade-pause.mjs", open_apt)
         self.assertIn("node scripts/open-apt-pause-route.mjs", open_apt)
         self.assertIn("node scripts/verify-upgrade-pause.mjs --desktop-only", open_apt)
         self.assertIn("node scripts/verify-ga-delivery.mjs --apt-preflight", open_apt)
         self.assertLess(open_apt.index("node scripts/verify-upgrade-pause.mjs"),
                         open_apt.index("node scripts/open-apt-pause-route.mjs"))
+        self.assertIn("permissions:\n  # Draft Releases are hidden from read-only GITHUB_TOKENs.\n  contents: write", apt)
 
 
 if __name__ == "__main__":
