@@ -376,6 +376,15 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertLess(apt.index("--apt-preflight"),
                         apt.index("name: Publish the exact GA DEB to APT"))
 
+        open_apt = (ROOT / ".github" / "workflows" /
+                    "open-apt-pause-route.yml").read_text()
+        self.assertIn("node scripts/verify-upgrade-pause.mjs", open_apt)
+        self.assertIn("node scripts/open-apt-pause-route.mjs", open_apt)
+        self.assertIn("node scripts/verify-upgrade-pause.mjs --desktop-only", open_apt)
+        self.assertIn("node scripts/verify-ga-delivery.mjs --apt-preflight", open_apt)
+        self.assertLess(open_apt.index("node scripts/verify-upgrade-pause.mjs"),
+                        open_apt.index("node scripts/open-apt-pause-route.mjs"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,93 @@
+name: open-apt-pause-route
+
+on:
+  workflow_dispatch:
+    inputs:
+      ga_tag:
+        description: "Draft GA version whose APT repository will be published next"
+        required: true
+        type: string
+      previous_version:
+        description: "Known-good stable Desktop version protected by the pause"
+        required: true
+        type: string
+      operation_id:
+        description: "Fresh UUID for the audited route operation"
+        required: true
+        type: string
+
+concurrency:
+  group: desktop-upgrade-pause-routes
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  open-apt:
+    runs-on: ubuntu-22.04
+    environment: release-publish
+    env:
+      GA: ${{ inputs.ga_tag }}
+      PREVIOUS_VERSION: ${{ inputs.previous_version }}
+      OPERATION_ID: ${{ inputs.operation_id }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      VERIFY_PLATFORMS: mac,mac-intel,win,linux-appimage,linux-deb,linux-rpm
+      VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.previous_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate the staged release and operation boundary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$GA" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::ga_tag must be clean semver."
+            exit 1
+          }
+          [[ "$PREVIOUS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$PREVIOUS_VERSION" != "$GA" ]] || {
+            echo "::error::previous_version must be a clean semver different from GA."
+            exit 1
+          }
+          [[ "$OPERATION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
+            echo "::error::operation_id must be a lowercase UUID v4."
+            exit 1
+          }
+          release="$(gh release view "v${GA}" --repo "$REPO" --json isDraft,assets)"
+          [[ "$(jq -r '.isDraft' <<<"$release")" == "true" ]] || {
+            echo "::error::v${GA} must exist as a draft release."
+            exit 1
+          }
+          [[ "$(jq '.assets | length' <<<"$release")" == "6" ]] || {
+            echo "::error::v${GA} must contain all six Desktop package assets."
+            exit 1
+          }
+          node scripts/verify-upgrade-pause.mjs
+
+      - name: Remove only the APT pause route
+        run: node scripts/open-apt-pause-route.mjs
+
+      - name: Verify APT is open while Desktop remains paused
+        run: |
+          set -euo pipefail
+          node scripts/verify-upgrade-pause.mjs --desktop-only
+          VERIFY_RELEASE_VERSION="$GA" node scripts/verify-ga-delivery.mjs --apt-preflight
+
+      - name: Summary
+        run: |
+          {
+            echo "### APT pause route opened"
+            echo "- Operation: ${OPERATION_ID}"
+            echo "- Intended GA: ${GA}"
+            echo "- Retained Desktop pause routes: 5"
+            echo "- Pause Worker deployment: retained"
+          } >> "$GITHUB_STEP_SUMMARY"
