@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { verifyGADelivery, verifyVersionPolicy } from './verify-ga-delivery.mjs';
+import {
+  verifyAptDelivery,
+  verifyAptPromotionPolicy,
+  verifyGADelivery,
+  verifyStagedGADelivery,
+  verifyVersionPolicy,
+} from './verify-ga-delivery.mjs';
 
 const version = '0.10.94';
 const files = {
@@ -161,4 +167,40 @@ test('preflight checks every platform and fails closed on missing latest', async
     platforms: ['mac', 'win'],
     fetcher: mixed,
   }), /Preflight refuses 0\.10\.94 behind live win latest 0\.10\.95/);
+});
+
+test('staged GA verifies exact direct downloads without consulting mutable latest', async () => {
+  const seen = [];
+  const fetcher = async (value) => {
+    const url = new URL(value);
+    seen.push(url.pathname);
+    assert.match(url.pathname, /^\/download\/0\.10\.94\//);
+    const platform = url.pathname.split('/').at(-1);
+    return reply(200, {}, artifact(version, files[platform]));
+  };
+  await verifyStagedGADelivery(options(fetcher, { platforms: ['mac', 'win'] }));
+  assert.deepEqual(seen, ['/download/0.10.94/mac', '/download/0.10.94/win']);
+});
+
+test('staged GA rejects a redirect to another version', async () => {
+  const fetcher = async (value) => {
+    const platform = new URL(value).pathname.split('/').at(-1);
+    return reply(200, {}, artifact('0.10.93', files[platform]));
+  };
+  await assert.rejects(
+    verifyStagedGADelivery(options(fetcher, { platforms: ['mac'] })),
+    /expected \/app\/0\.10\.94/,
+  );
+});
+
+test('APT-only verification accepts the exact staged GA', async () => {
+  await verifyAptDelivery(options(fixture()));
+});
+
+test('APT preflight accepts an older live release and rejects a newer one', async () => {
+  await verifyAptPromotionPolicy(options(fixture({ apt: '0.10.93' })));
+  await assert.rejects(
+    verifyAptPromotionPolicy(options(fixture({ apt: '0.10.95' }))),
+    /refuses 0\.10\.94 behind live 0\.10\.95/,
+  );
 });

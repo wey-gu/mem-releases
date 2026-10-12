@@ -277,7 +277,7 @@ post-build proof.
 Once the core RC artifacts have passed their smoke gates, run
 `promote-rc-to-ga.yml`. It promotes Docker, macOS, Windows, DEB, and AppImage
 artifacts without requiring the RPM to exist. It is the only promotion that
-updates APT. The production updater currently discovers the latest desktop
+normally updates APT. The production updater currently discovers the latest desktop
 version from R2 objects; uploading a newer GA can expose it before this
 workflow finishes. `push_latest` controls Docker `:latest` only. Finish the
 core artifact smoke before dispatch, and treat any failure after R2 upload as
@@ -292,6 +292,43 @@ gh workflow run promote-rc-to-ga.yml -R wey-gu/mem-releases \
   -f ga_tag=<version> \
   -f push_latest=true
 ```
+
+If an independently deployed emergency Worker is intentionally pausing Desktop
+latest, update, and APT routes, keep it in place while staging the GA. First
+verify the pause and protocol-1 stopped state, then dispatch the core promotion
+with `desktop_upgrade_pause_active=true`. This mode still authenticates and
+uploads the exact RC artifacts, verifies every versioned GA download, and
+creates the draft GA Release, but it does not query mutable latest/update routes
+or publish APT:
+
+```bash
+gh workflow run promote-rc-to-ga.yml -R wey-gu/mem-releases \
+  -f rc_tag=<version>-rcN \
+  -f ga_tag=<version> \
+  -f push_latest=true \
+  -f desktop_upgrade_pause_active=true \
+  -f paused_stable_version=<previous-version>
+```
+
+After core and RPM staging succeeds, remove only the pause Worker's APT route.
+Keep Desktop latest, update, and latest-download routes paused. Confirm that the
+old APT repository is readable, then publish the authenticated DEB from the
+draft GA Release:
+
+```bash
+gh workflow run promote-apt-to-ga.yml -R wey-gu/mem-releases \
+  -f ga_tag=<version> \
+  -f paused_stable_version=<previous-version>
+```
+
+The APT workflow fails before mutation unless the GA Release is still a draft,
+contains exactly one DEB, the Desktop pause remains fail-closed, the APT route
+is open, the live APT version is not newer, and signing credentials are present.
+Do not remove the remaining pause routes until core, RPM, APT, and the controlled
+updater candidate have all passed their exact-version checks. Route removal is
+the final exposure step; retain the pause Worker deployment as the recovery
+baseline and perform the full six-platform legacy and protocol-1 readback
+immediately afterward.
 
 Record the workflow run, the resulting GA release draft, the R2/CDN readback,
 and the updater readback. A core release is not evidence that a deferred RPM
