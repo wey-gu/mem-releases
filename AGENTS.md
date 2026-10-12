@@ -42,6 +42,31 @@ repair PR opened in `nowledge-co/mem` with `severity/critical` to raise merge
 priority. The label does not relax review, CI, or bot-only merge gates and
 must not be used to pull unrelated product work into the release.
 
+# Release version ownership and artifact proof
+
+Treat the App release version as one canonical distribution input, not as a
+reason to advance every internal package version. Derived Desktop, CLI,
+updater, mobile, lockfile, and generated build metadata must be produced from
+that input. Internal libraries should keep independent stable versions unless
+their public compatibility or distribution contract actually changes. A
+single edited source file does not preserve cache reuse if it still changes
+the package version or generated build inputs for every internal crate.
+
+Until the product repository implements this ownership split, update the full
+version set required by its current generator and preflight. Do not omit
+individual version fields ad hoc during a release. Land the ownership and
+cache-boundary refactor as a separately reviewed product change.
+
+After every RC build, run a fail-closed version E2E against the exact built
+artifacts for every shipped packaging path. Install or extract the candidate,
+execute its real App, embedded server, and installed CLI surfaces where
+applicable, and require each observed version and updater/package identity to
+equal the release version. Explicitly reject an empty value, `0`, `0.0.0`, or
+any build-system placeholder. Source consistency tests, manifest inspection,
+and archive listing are not substitutes for executing the packaged binaries.
+Any install, launch, readiness, probe, or response-parsing failure must make
+the version E2E exit nonzero.
+
 Before creating any RC or GA tag or starting package distribution, require
 terminal success for both canonical E2E gates against the exact `RELEASE_SHA`:
 `ci/mem-frontend-e2e` (Web E2E and Web contract tests) and
