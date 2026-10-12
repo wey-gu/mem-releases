@@ -42,6 +42,16 @@ repair PR opened in `nowledge-co/mem` with `severity/critical` to raise merge
 priority. The label does not relax review, CI, or bot-only merge gates and
 must not be used to pull unrelated product work into the release.
 
+Before creating any RC or GA tag or starting package distribution, require
+terminal success for both canonical E2E gates against the exact `RELEASE_SHA`:
+`ci/mem-frontend-e2e` (Web E2E and Web contract tests) and
+`ci/mem-shell-e2e` (desktop shell E2E). Failed, missing, pending, cancelled,
+skipped, superseded, or results for another SHA block the release. A previous
+release's pass, an unchanged-frontend claim, source preflight, artifact smoke,
+or manual inspection is not a substitute. If the normal postsubmit path cannot
+test `RELEASE_SHA`, stop before tags and arrange controlled exact-SHA CI; never
+waive this gate.
+
 1. Fetch `origin/main`, record `RELEASE_BASE_SHA`, and create
    `release/<version>` from that exact commit. The branch is the fixed product
    boundary; never merge moving `main` into it.
@@ -60,11 +70,12 @@ must not be used to pull unrelated product work into the release.
    commit onto `release/<version>` with `git cherry-pick -x`. Never merge
    `main` into the release branch or pick unrelated product commits.
 5. Record the resulting release-branch head as `RELEASE_SHA`. Run every source
-   preflight against `RELEASE_SHA`. Observe the merge-triggered
-   `ci/mem-native-link-arm64` result and stop only if it has failed; do not
-   manually trigger it for a release. Create RC and GA tags only from the
-   resulting commit. A tag does not need to be a Git ancestor of `main`; it
-   must have auditable `-x` provenance to the reviewed `main` metadata.
+   preflight and both mandatory E2E gates against `RELEASE_SHA`. Observe the
+   merge-triggered `ci/mem-native-link-arm64` result and stop only if it has
+   failed; do not manually trigger it for a release. Create RC and GA tags only
+   from the resulting commit. A tag does not need to be a Git ancestor of
+   `main`; it must have auditable `-x` provenance to the reviewed `main`
+   metadata.
 6. After GA, date the Changelog entry and merge its website and parent gitlink
    updates to `main`. Run the release-history check for patch-equivalence and
    `-x` provenance, rather than an ancestor-only check.
