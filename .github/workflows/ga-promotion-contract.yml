@@ -19,6 +19,12 @@ on:
       - scripts/test_verify_upgrade_pause.mjs
       - scripts/open-apt-pause-route.mjs
       - scripts/test_open_apt_pause_route.mjs
+      - scripts/build-desktop-update-manifest.mjs
+      - scripts/desktop-update-operator-worker.mjs
+      - scripts/invoke-desktop-update-operator.mjs
+      - scripts/test_desktop_update_operator.mjs
+      - wrangler.desktop-update-operator.jsonc
+      - .github/workflows/desktop-update-control.yml
       - scripts/upload-draft-release-assets.mjs
       - scripts/test_upload_draft_release_assets.mjs
       - scripts/assert-fresh-r2-version.mjs
@@ -50,6 +56,12 @@ on:
       - scripts/test_verify_upgrade_pause.mjs
       - scripts/open-apt-pause-route.mjs
       - scripts/test_open_apt_pause_route.mjs
+      - scripts/build-desktop-update-manifest.mjs
+      - scripts/desktop-update-operator-worker.mjs
+      - scripts/invoke-desktop-update-operator.mjs
+      - scripts/test_desktop_update_operator.mjs
+      - wrangler.desktop-update-operator.jsonc
+      - .github/workflows/desktop-update-control.yml
       - scripts/upload-draft-release-assets.mjs
       - scripts/test_upload_draft_release_assets.mjs
       - scripts/assert-fresh-r2-version.mjs
@@ -78,7 +90,7 @@ jobs:
       - name: Check GA promotion boundary
         run: python3 -m unittest discover -s scripts -p test_ga_promotion_contract.py
       - name: Check exact GA delivery gate
-        run: node --test scripts/test_verify_ga_delivery.mjs scripts/test_verify_upgrade_pause.mjs scripts/test_open_apt_pause_route.mjs
+        run: node --test scripts/test_verify_ga_delivery.mjs scripts/test_verify_upgrade_pause.mjs scripts/test_open_apt_pause_route.mjs scripts/test_desktop_update_operator.mjs
       - name: Check draft Release asset reconciliation
         run: node --test scripts/test_upload_draft_release_assets.mjs
       - name: Check fresh R2 version gate
