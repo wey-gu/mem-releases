@@ -341,6 +341,38 @@ the final exposure step; retain the pause Worker deployment as the recovery
 baseline and perform the full six-platform legacy and protocol-1 readback
 immediately afterward.
 
+Use `desktop-update-control.yml` for the production authority. It deploys a
+short-lived gateway bound to the canonical Secrets Store document, derives the
+actor from the selected named credential, and deletes the gateway after one
+operation. The CI token for this workflow must be stored as
+`CLOUDFLARE_SECRETS_STORE_API_TOKEN` and have Workers Scripts Write plus Account
+Secrets Store Edit; the ordinary release token is not a substitute. Run
+`status` first. If the authority is stopped, recover the observed stable
+revision before preparing the candidate. Run recover, prepare, and publish as
+separate dispatches with the explicitly observed mode/revision and a distinct
+persisted UUID for each mutation. Never infer the next input from an expected
+increment.
+
+Each successful mutation uploads an authority receipt. After the candidate is
+published in the authority and the GitHub GA Release is public, remove the five
+Desktop pause routes with the exact publish receipt and a fresh route UUID:
+
+```bash
+gh workflow run remove-desktop-upgrade-pause.yml -R wey-gu/mem-releases \
+  -f ga_tag=<version> \
+  -f previous_version=<previous-version> \
+  -f operator_name=<named-operator> \
+  -f authority_publish_run_id=<run-id> \
+  -f authority_publish_operation_id=<uuid-v4> \
+  -f authority_revision=<published-revision> \
+  -f route_operation_id=<uuid-v4>
+```
+
+The workflow rebuilds and compares the six-platform manifest, verifies the
+published GA, APT, direct downloads, and active pause, deletes only the reviewed
+Desktop routes, retains the pause Worker deployment, and requires exact legacy
+plus protocol-1 `allowed` readback before success.
+
 Record the workflow run, the resulting GA release draft, the R2/CDN readback,
 and the updater readback. A core release is not evidence that a deferred RPM
 has been delivered.
