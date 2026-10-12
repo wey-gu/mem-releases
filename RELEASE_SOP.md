@@ -8,8 +8,9 @@ instead of a moving view of `main`.
 
 - A release has one immutable source boundary: `RELEASE_BASE_SHA`.
 - `main` may continue to accept ordinary work after the boundary is cut.
-- Release metadata is reviewed and merged on `main` before it is copied to the
-  release branch with `git cherry-pick -x`.
+- Version fields and parent release metadata are reviewed together in one
+  release-scoped PR to `main`, then copied to the release branch with one
+  `git cherry-pick -x`.
 - No ordinary product change is cherry-picked into the release branch.
 - Every release note, binary, tag, and smoke result names the same release
   branch commit.
@@ -75,16 +76,17 @@ exception: it is reviewed on `main` first, then copied with
 allowed, but it must first be reviewed on `main`, copied with `-x`, and result
 in a new RC number.
 
-## 2. Make the version-only change on `main`
+## 2. Start one release metadata PR with a version-only commit
 
-Create a version-only commit or PR with base `main`. It contains
-only version fields and generated manifests or lockfiles required by the
-version change. It must not contain user-facing prose or a website gitlink
-update.
+Create one release-scoped PR with base `main`. Its first commit contains only
+version fields and generated manifests or lockfiles required by the version
+change. It must not contain user-facing prose or a website gitlink update.
+Keep the PR open until the website child change is reviewed and merged, then
+complete the same PR as described below.
 
-After it merges, record its exact commit as `RELEASE_MAIN_VERSION_SHA`. Do not
-copy it to the release branch yet; the Changelog and its parent metadata must
-first be reviewed and merged on `main`.
+Label the PR `severity/critical` while the release is active so Tide gives the
+fixed release path higher merge priority. The label does not relax review, CI,
+or bot-only merge gates, and it must not be used for unrelated product work.
 
 ## 3. Write, merge, deploy, and verify release notes on `main`
 
@@ -97,11 +99,18 @@ v<previous-version>..RELEASE_BASE_SHA
 Classify only changes in that range. A merged PR outside the range belongs to
 the next release, even if it has a lower PR number or is user-visible.
 
-Prepare two ordered changes, both based on `main`:
+Prepare two ordered changes:
 
 1. a child PR in `nowledge-labs-website` with the `date: "unreleased"` entry;
-2. a parent PR in `nowledge-co/mem` that advances the website gitlink and adds
+2. after the child PR merges, a second commit in the existing
+   `nowledge-co/mem` release PR that advances the website gitlink and adds
    matching engineering history in `nowledge-graph/CHANGELOG.md`.
+
+Keep the two commits separate while the PR is under review so version-only and
+parent-metadata scope remain easy to audit. The final PR head must contain no
+ordinary product code. Tide may squash the PR; the resulting single merged
+`main` commit is the reviewed release-metadata provenance copied to the fixed
+release branch.
 
 ### Website ownership and Vercel deployment
 
@@ -126,29 +135,28 @@ and canonical `main` as the other; its tree should match the canonical source
 unless the deployment repository has an explicitly reviewed deployment-only
 change. Verify the Vercel deployment and cache-bust the API readback. Confirm
 the entry version, `unreleased` state, item count, and representative text
-before creating any package tag. Once the parent PR merges, record its exact
-merge commit as `RELEASE_MAIN_METADATA_SHA`.
+before creating any package tag. Once the combined Mem PR merges, record its
+exact merge commit as `RELEASE_MAIN_METADATA_SHA`.
 
 ## 4. Copy the reviewed release metadata to the release branch
 
-Cherry-pick the two reviewed `main` commits onto the branch in dependency
-order. Always use `-x`; the appended source-commit trailer is release
-provenance and must not be removed.
+Cherry-pick the combined reviewed `main` commit onto the branch. Always use
+`-x`; the appended source-commit trailer is release provenance and must not be
+removed.
 
 ```bash
 git fetch origin main "release/<version>"
 git switch "release/<version>"
-git cherry-pick -x "$RELEASE_MAIN_VERSION_SHA"
 git cherry-pick -x "$RELEASE_MAIN_METADATA_SHA"
 git push origin "release/<version>"
 export RELEASE_SHA="$(git rev-parse HEAD)"
 ```
 
-Before compiling, verify that the copied commits contain only the intended
-version and release metadata, and that each `-x` source SHA is reachable from
-`origin/main`. Do not merge `main` into the branch to resolve a conflict. If a
-cherry-pick conflicts, resolve only the release metadata conflict, preserve the
-`-x` trailer, and record the resolution in the release record.
+Before compiling, verify that the copied commit contains only the intended
+version and release metadata, and that its `-x` source SHA is reachable from
+`origin/main`. Do not merge `main` into the branch to resolve a conflict. If
+the cherry-pick conflicts, resolve only the release metadata conflict, preserve
+the `-x` trailer, and record the resolution in the release record.
 
 Run source preflights and build the native bundles from exactly `RELEASE_SHA`.
 `ci/mem-native-link-arm64` is started by the normal merge path; release work
