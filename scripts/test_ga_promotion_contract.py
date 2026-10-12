@@ -283,6 +283,9 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn('name: Refuse to modify a published GA Release', workflow)
         self.assertIn('node scripts/upload-draft-release-assets.mjs', workflow)
         self.assertIn('VERIFY_SCOPE="$health_scope" timeout', workflow)
+        self.assertIn("desktop_upgrade_pause_active:", workflow)
+        self.assertIn("node ../scripts/verify-upgrade-pause.mjs", workflow)
+        self.assertIn("node ../scripts/verify-ga-delivery.mjs --staged-while-paused", workflow)
 
     def test_direct_ga_keeps_all_artifacts_and_verifies_updater_without_deploy(self):
         workflow = (
@@ -352,6 +355,11 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn("desktop_upgrade_pause_active:", promote)
         self.assertIn("node scripts/verify-upgrade-pause.mjs", promote)
         self.assertIn("node ../scripts/verify-upgrade-pause.mjs", promote)
+        self.assertLess(
+            promote.index('export VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-appimage"',
+                          promote.index("node ../scripts/verify-upgrade-pause.mjs") - 200),
+            promote.index("node ../scripts/verify-upgrade-pause.mjs"),
+        )
         self.assertIn("node ../scripts/verify-ga-delivery.mjs --staged-while-paused", promote)
         self.assertIn(
             "if: ${{ !inputs.allow_newer_desktop_latest && !inputs.desktop_upgrade_pause_active }}",

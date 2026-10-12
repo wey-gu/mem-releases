@@ -505,13 +505,13 @@ jobs:
           set -euo pipefail
           if [[ "${{ inputs.desktop_upgrade_pause_active }}" == "true" ]]; then
             export VERIFY_PREVIOUS_DESKTOP_VERSION="${{ inputs.paused_stable_version }}"
+            export VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-appimage"
             node ../scripts/verify-upgrade-pause.mjs
             attempts=5
             delay=15
             for i in $(seq 1 "$attempts"); do
               echo "::group::Verify staged delivery while upgrades remain paused (attempt $i/$attempts)"
               export VERIFY_RELEASE_VERSION="$GA"
-              export VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-appimage"
               if VERIFY_SCOPE=direct timeout -k 10s 90s node scripts/verify-download-delivery.mjs &&
                  timeout -k 10s 90s node ../scripts/verify-ga-delivery.mjs --staged-while-paused; then
                 echo "::endgroup::"
