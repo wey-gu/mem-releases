@@ -106,6 +106,14 @@ on:
         description: "For an older out-of-band GA only: keep newer desktop latest and skip APT; exact GA downloads are still required"
         type: boolean
         default: false
+      desktop_upgrade_pause_active:
+        description: "Stage exact GA artifacts while the emergency Desktop upgrade pause remains active; APT is promoted separately"
+        type: boolean
+        default: false
+      paused_stable_version:
+        description: "Previous stable Desktop version used for native pause probes (required with desktop_upgrade_pause_active)"
+        type: string
+        default: ""
 
 concurrency:
   group: promote-${{ github.event.inputs.ga_tag }}
@@ -156,6 +164,17 @@ jobs:
             echo "::error::Older desktop GA cannot move Docker :latest; set push_latest=false."
             exit 1
           fi
+          if [[ "${{ inputs.allow_newer_desktop_latest }}" == "true" && "${{ inputs.desktop_upgrade_pause_active }}" == "true" ]]; then
+            echo "::error::The older-patch and emergency-pause promotion modes are mutually exclusive."
+            exit 1
+          fi
+          if [[ "${{ inputs.desktop_upgrade_pause_active }}" == "true" ]]; then
+            PAUSED_STABLE="${{ inputs.paused_stable_version }}"
+            if ! [[ "$PAUSED_STABLE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$PAUSED_STABLE" == "$GA" ]]; then
+              echo "::error::paused_stable_version must be a clean semver different from GA."
+              exit 1
+            fi
+          fi
           echo "rc_tag=$RC" >> "$GITHUB_OUTPUT"
           echo "ga_tag=$GA" >> "$GITHUB_OUTPUT"
 
@@ -165,9 +184,15 @@ jobs:
           GA: ${{ steps.v.outputs.ga_tag }}
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           VERIFY_ALLOW_NEWER_LATEST: ${{ inputs.allow_newer_desktop_latest }}
+          VERIFY_UPGRADE_PAUSE_ACTIVE: ${{ inputs.desktop_upgrade_pause_active }}
+          VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.paused_stable_version }}
           VERIFY_PLATFORMS: mac,mac-intel,win,linux,linux-deb,linux-appimage
         run: |
           set -euo pipefail
+          if [[ "$VERIFY_UPGRADE_PAUSE_ACTIVE" == "true" ]]; then
+            node scripts/verify-upgrade-pause.mjs
+            exit 0
+          fi
           if [[ "$VERIFY_ALLOW_NEWER_LATEST" != "true" && -z "$GPG_PRIVATE_KEY" ]]; then
             echo "::error::GPG_PRIVATE_KEY is required for core GA APT publication."
             exit 1
@@ -358,9 +383,15 @@ jobs:
       - name: Pre-flight desktop version and APT policy
         env:
           VERIFY_ALLOW_NEWER_LATEST: ${{ inputs.allow_newer_desktop_latest }}
+          VERIFY_UPGRADE_PAUSE_ACTIVE: ${{ inputs.desktop_upgrade_pause_active }}
+          VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.paused_stable_version }}
           VERIFY_PLATFORMS: mac,mac-intel,win,linux,linux-deb,linux-appimage
         run: |
           set -euo pipefail
+          if [[ "$VERIFY_UPGRADE_PAUSE_ACTIVE" == "true" ]]; then
+            node scripts/verify-upgrade-pause.mjs
+            exit 0
+          fi
           if [[ "$VERIFY_ALLOW_NEWER_LATEST" != "true" && -z "$GPG_PRIVATE_KEY" ]]; then
             echo "::error::GPG_PRIVATE_KEY is required for core GA APT publication."
             exit 1
@@ -465,13 +496,38 @@ jobs:
 
       - name: Update APT repo
         working-directory: mem-backbone
-        if: ${{ !inputs.allow_newer_desktop_latest }}
+        if: ${{ !inputs.allow_newer_desktop_latest && !inputs.desktop_upgrade_pause_active }}
         run: node scripts/update-apt-repo.cjs "$GA" "${{ steps.rename.outputs.deb }}"
 
       - name: Verify download delivery (R2 + optional APT + Worker)
         working-directory: mem-backbone
         run: |
           set -euo pipefail
+          if [[ "${{ inputs.desktop_upgrade_pause_active }}" == "true" ]]; then
+            export VERIFY_PREVIOUS_DESKTOP_VERSION="${{ inputs.paused_stable_version }}"
+            node ../scripts/verify-upgrade-pause.mjs
+            attempts=5
+            delay=15
+            for i in $(seq 1 "$attempts"); do
+              echo "::group::Verify staged delivery while upgrades remain paused (attempt $i/$attempts)"
+              export VERIFY_RELEASE_VERSION="$GA"
+              export VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-appimage"
+              if VERIFY_SCOPE=direct timeout -k 10s 90s node scripts/verify-download-delivery.mjs &&
+                 timeout -k 10s 90s node ../scripts/verify-ga-delivery.mjs --staged-while-paused; then
+                echo "::endgroup::"
+                echo "Staged delivery verified on attempt $i."
+                exit 0
+              fi
+              echo "::endgroup::"
+              if [[ "$i" -lt "$attempts" ]]; then
+                echo "::warning::Staged verify attempt $i/$attempts failed; retrying in ${delay}s..."
+                sleep "$delay"
+              fi
+            done
+            echo "::error::Staged delivery did not verify after ${attempts} attempts."
+            exit 1
+          fi
+
           scope='latest,latest-redirect,direct,update'
           health_scope='latest'
           if [[ "${{ inputs.allow_newer_desktop_latest }}" != "true" ]]; then
@@ -538,7 +594,7 @@ jobs:
             echo "not roll back after a later failure:"
             echo ""
             echo "- R2 / download page (app/${GA}/ artifacts, if uploaded)"
-            echo "- APT repo (if its update step ran)"
+            echo "- APT repo (if its update step ran; emergency-pause mode defers it)"
             echo "- GH Release draft (if its creation step ran)"
             echo ""
             echo "Still to confirm or finish by hand:"
@@ -556,7 +612,12 @@ jobs:
             echo "### Desktop promoted v${RC} → v${GA}"
             echo "- R2 prefix:      app/${GA}/"
             echo "- GH release tag: v${GA} (draft on ${{ github.repository }})"
-            echo "- Desktop latest: dynamically discovered from R2 (verified)"
+            if [[ "${{ inputs.desktop_upgrade_pause_active }}" == "true" ]]; then
+              echo "- Desktop latest: emergency pause retained; exact GA direct downloads verified"
+              echo "- APT: deferred to promote-apt-to-ga after only the APT pause route is removed"
+            else
+              echo "- Desktop latest: dynamically discovered from R2 (verified)"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
   recap:

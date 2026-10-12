@@ -346,6 +346,28 @@ class GAPromotionContractTest(unittest.TestCase):
                         workflow.index('name: Reconcile RPM in Cloudflare R2'))
         self.assertIn('node scripts/reconcile-rpm-release-asset.mjs "v${GA}"', workflow)
 
+    def test_emergency_pause_stages_core_before_apt_and_unpause(self):
+        promote = (ROOT / ".github" / "workflows" /
+                   "promote-rc-to-ga.yml").read_text()
+        self.assertIn("desktop_upgrade_pause_active:", promote)
+        self.assertIn("node scripts/verify-upgrade-pause.mjs", promote)
+        self.assertIn("node ../scripts/verify-upgrade-pause.mjs", promote)
+        self.assertIn("node ../scripts/verify-ga-delivery.mjs --staged-while-paused", promote)
+        self.assertIn(
+            "if: ${{ !inputs.allow_newer_desktop_latest && !inputs.desktop_upgrade_pause_active }}",
+            promote,
+        )
+        self.assertIn("APT: deferred to promote-apt-to-ga", promote)
+
+        apt = (ROOT / ".github" / "workflows" /
+               "promote-apt-to-ga.yml").read_text()
+        self.assertIn("node scripts/verify-upgrade-pause.mjs --desktop-only", apt)
+        self.assertIn("node scripts/verify-ga-delivery.mjs --apt-preflight", apt)
+        self.assertIn("node scripts/update-apt-repo.cjs \"$GA\" \"$DEB\"", apt)
+        self.assertIn("node scripts/verify-ga-delivery.mjs --apt-only", apt)
+        self.assertLess(apt.index("--apt-preflight"),
+                        apt.index("name: Publish the exact GA DEB to APT"))
+
 
 if __name__ == "__main__":
     unittest.main()
