@@ -1,0 +1,341 @@
+name: desktop-update-control
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Read or mutate the production Desktop update authority"
+        required: true
+        type: choice
+        options: [status, recover, prepare, publish]
+      operator_name:
+        description: "Named operator key in the production Secrets Store document"
+        required: true
+        default: "hawkingrei"
+        type: string
+      expected_mode:
+        description: "Exact authority mode observed before a mutation"
+        required: false
+        type: string
+      expected_revision:
+        description: "Exact authority revision observed before a mutation"
+        required: false
+        type: string
+      expected_stable_version:
+        description: "Known-good stable version that must remain recoverable"
+        required: false
+        type: string
+      operation_id:
+        description: "Fresh UUID v4 for a mutation"
+        required: false
+        type: string
+      reason:
+        description: "Audited mutation reason"
+        required: false
+        type: string
+      ga_tag:
+        description: "Clean candidate version for prepare or publish"
+        required: false
+        type: string
+      source_sha:
+        description: "Exact 40-character Mem release SHA for prepare"
+        required: false
+        type: string
+      release_notes:
+        description: "Public Changelog URL for prepare"
+        required: false
+        type: string
+      pub_date:
+        description: "Persisted ISO publication timestamp for prepare"
+        required: false
+        type: string
+
+concurrency:
+  group: desktop-update-production-control
+  cancel-in-progress: false
+
+permissions:
+  # Draft Releases are hidden from read-only GITHUB_TOKENs.
+  contents: write
+
+jobs:
+  operate:
+    runs-on: ubuntu-22.04
+    environment: release-publish
+    env:
+      ACTION: ${{ inputs.action }}
+      OPERATOR_NAME: ${{ inputs.operator_name }}
+      EXPECTED_MODE: ${{ inputs.expected_mode }}
+      EXPECTED_REVISION: ${{ inputs.expected_revision }}
+      EXPECTED_STABLE_VERSION: ${{ inputs.expected_stable_version }}
+      OPERATION_ID: ${{ inputs.operation_id }}
+      OPERATION_REASON: ${{ inputs.reason }}
+      GA: ${{ inputs.ga_tag }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      RELEASE_NOTES: ${{ inputs.release_notes }}
+      PUB_DATE: ${{ inputs.pub_date }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Validate the explicit operation boundary
+        run: |
+          set -euo pipefail
+          [[ "$OPERATOR_NAME" =~ ^[a-zA-Z0-9_.@-]{1,100}$ ]] || {
+            echo "::error::operator_name is invalid."
+            exit 1
+          }
+          if [[ "$ACTION" == "status" ]]; then
+            exit 0
+          fi
+          [[ "$EXPECTED_MODE" =~ ^(stable|recovered|completed|draft|held|stopped)$ ]] || {
+            echo "::error::expected_mode is required for mutations."
+            exit 1
+          }
+          [[ "$EXPECTED_REVISION" =~ ^(0|[1-9][0-9]*)$ ]] || {
+            echo "::error::expected_revision is required for mutations."
+            exit 1
+          }
+          [[ "$EXPECTED_STABLE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::expected_stable_version must be clean semver."
+            exit 1
+          }
+          [[ "$OPERATION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
+            echo "::error::operation_id must be a lowercase UUID v4."
+            exit 1
+          }
+          [[ -n "$OPERATION_REASON" && ${#OPERATION_REASON} -le 1000 ]] || {
+            echo "::error::reason is required and must not exceed 1000 characters."
+            exit 1
+          }
+          if [[ "$ACTION" == "recover" ]]; then
+            [[ "$EXPECTED_MODE" == "stopped" || "$EXPECTED_MODE" == "held" ]] || {
+              echo "::error::recover requires an observed stopped or held mode."
+              exit 1
+            }
+            exit 0
+          fi
+          [[ "$GA" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$GA" != "$EXPECTED_STABLE_VERSION" ]] || {
+            echo "::error::ga_tag must be clean semver and differ from the stable version."
+            exit 1
+          }
+          if [[ "$ACTION" == "prepare" ]]; then
+            [[ "$EXPECTED_MODE" =~ ^(stable|recovered|completed)$ ]] || {
+              echo "::error::prepare requires an observed stable, recovered, or completed mode."
+              exit 1
+            }
+            [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]] || {
+              echo "::error::source_sha must be 40 lowercase hex characters."
+              exit 1
+            }
+            [[ "$RELEASE_NOTES" =~ ^https:// ]] || {
+              echo "::error::release_notes must be a public HTTPS URL."
+              exit 1
+            }
+            node -e 'if (!Number.isFinite(Date.parse(process.env.PUB_DATE))) process.exit(1)'
+          else
+            [[ "$EXPECTED_MODE" == "draft" ]] || {
+              echo "::error::publish requires an observed draft mode."
+              exit 1
+            }
+          fi
+
+      - name: Build exact candidate manifest
+        if: inputs.action == 'prepare'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "v${GA}" --repo "$REPO" \
+            --json isDraft,isPrerelease,assets > /tmp/ga-release.json
+          jq -e '.isDraft == true and .isPrerelease == false and (.assets | length) == 6' \
+            /tmp/ga-release.json >/dev/null
+          node scripts/build-desktop-update-manifest.mjs \
+            --version "$GA" \
+            --source-sha "$SOURCE_SHA" \
+            --release-notes "$RELEASE_NOTES" \
+            --pub-date "$PUB_DATE" \
+            --release-json /tmp/ga-release.json \
+            --output /tmp/desktop-update-manifest.json
+          VERIFY_RELEASE_VERSION="$GA" node scripts/verify-ga-delivery.mjs --apt-only
+
+      - name: Install pinned Wrangler
+        run: npm install --no-save --ignore-scripts --no-audit --no-fund wrangler@4.131.0
+
+      - name: Prepare short-lived operator Worker
+        run: |
+          set -euo pipefail
+          worker_name="nmem-desktop-update-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          nonce="$(openssl rand -hex 32)"
+          expires_at="$(date -u -d '15 minutes' +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "::add-mask::${nonce}"
+          {
+            printf 'DESKTOP_UPDATE_OPERATOR_NAME=%s\n' "$worker_name"
+            printf 'DESKTOP_UPDATE_INVOCATION_NONCE=%s\n' "$nonce"
+            printf 'DESKTOP_UPDATE_EXPIRES_AT=%s\n' "$expires_at"
+          } >> "$GITHUB_ENV"
+
+      - name: Deploy short-lived operator Worker
+        id: deploy
+        run: |
+          set -euo pipefail
+          npx wrangler deploy \
+            --config wrangler.desktop-update-operator.jsonc \
+            --name "$DESKTOP_UPDATE_OPERATOR_NAME" \
+            --message "Audited ${ACTION} for Desktop ${GA:-authority}" \
+            --var "TARGET_ORIGIN:https://backbone-mem.nowledge.co" \
+            --var "OPERATOR_NAME:${OPERATOR_NAME}" \
+            --var "INVOCATION_NONCE:${DESKTOP_UPDATE_INVOCATION_NONCE}" \
+            --var "EXPIRES_AT:${DESKTOP_UPDATE_EXPIRES_AT}"
+
+      - name: Resolve the isolated operator URL
+        run: |
+          set -euo pipefail
+          subdomain="$(curl -fsS \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain" \
+            | jq -er '.result.subdomain')"
+          printf 'DESKTOP_UPDATE_OPERATOR_URL=https://%s.%s.workers.dev/invoke\n' \
+            "$DESKTOP_UPDATE_OPERATOR_NAME" "$subdomain" >> "$GITHUB_ENV"
+
+      - name: Read and validate exact pre-state
+        env:
+          DESKTOP_UPDATE_INVOCATION_NONCE: ${{ env.DESKTOP_UPDATE_INVOCATION_NONCE }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if node scripts/invoke-desktop-update-operator.mjs --output /tmp/pre-state.json; then
+              break
+            fi
+            [[ "$attempt" -lt 5 ]] || exit 1
+            sleep 2
+          done
+          if [[ "$ACTION" == "status" ]]; then
+            exit 0
+          fi
+          jq -e \
+            --arg mode "$EXPECTED_MODE" \
+            --arg stable "$EXPECTED_STABLE_VERSION" \
+            --argjson revision "$EXPECTED_REVISION" \
+            '.mode == $mode and .revision == $revision and .stable.version == $stable' \
+            /tmp/pre-state.json >/dev/null
+          if [[ "$ACTION" == "recover" || "$ACTION" == "prepare" ]]; then
+            jq -e '.candidate == null' /tmp/pre-state.json >/dev/null
+          else
+            jq -e --arg ga "$GA" '.candidate.version == $ga' /tmp/pre-state.json >/dev/null
+          fi
+
+      - name: Build reviewed operation request
+        if: inputs.action != 'status'
+        run: |
+          set -euo pipefail
+          if [[ "$ACTION" == "prepare" ]]; then
+            jq -n \
+              --arg action "$ACTION" \
+              --argjson expected_revision "$EXPECTED_REVISION" \
+              --arg operation_id "$OPERATION_ID" \
+              --arg reason "$OPERATION_REASON" \
+              --slurpfile manifest /tmp/desktop-update-manifest.json \
+              '{action:$action, expected_revision:$expected_revision, operation_id:$operation_id, reason:$reason, manifest:$manifest[0]}' \
+              > /tmp/operation.json
+          else
+            jq -n \
+              --arg action "$ACTION" \
+              --argjson expected_revision "$EXPECTED_REVISION" \
+              --arg operation_id "$OPERATION_ID" \
+              --arg reason "$OPERATION_REASON" \
+              '{action:$action, expected_revision:$expected_revision, operation_id:$operation_id, reason:$reason}' \
+              > /tmp/operation.json
+          fi
+
+      - name: Apply one audited authority transition
+        if: inputs.action != 'status'
+        env:
+          DESKTOP_UPDATE_INVOCATION_NONCE: ${{ env.DESKTOP_UPDATE_INVOCATION_NONCE }}
+        run: |
+          set -euo pipefail
+          node scripts/invoke-desktop-update-operator.mjs \
+            --input /tmp/operation.json \
+            --output /tmp/operation-receipt.json
+          next_revision="$((EXPECTED_REVISION + 1))"
+          case "$ACTION" in
+            recover) next_mode="recovered" ;;
+            prepare) next_mode="draft" ;;
+            publish) next_mode="published" ;;
+          esac
+          jq -e \
+            --arg action "$ACTION" \
+            --arg actor "$OPERATOR_NAME" \
+            --arg mode "$next_mode" \
+            --arg operation_id "$OPERATION_ID" \
+            --arg stable "$EXPECTED_STABLE_VERSION" \
+            --argjson revision "$next_revision" \
+            '.action == $action and .actor == $actor and .mode == $mode and .operation_id == $operation_id and .stable_version == $stable and .revision == $revision' \
+            /tmp/operation-receipt.json >/dev/null
+          if [[ "$ACTION" == "recover" ]]; then
+            jq -e '.candidate_version == null' /tmp/operation-receipt.json >/dev/null
+          else
+            jq -e --arg ga "$GA" '.candidate_version == $ga' /tmp/operation-receipt.json >/dev/null
+          fi
+
+      - name: Verify exact post-state
+        if: inputs.action != 'status'
+        env:
+          DESKTOP_UPDATE_INVOCATION_NONCE: ${{ env.DESKTOP_UPDATE_INVOCATION_NONCE }}
+        run: |
+          set -euo pipefail
+          node scripts/invoke-desktop-update-operator.mjs --output /tmp/post-state.json
+          next_revision="$((EXPECTED_REVISION + 1))"
+          case "$ACTION" in
+            recover) next_mode="recovered" ;;
+            prepare) next_mode="draft" ;;
+            publish) next_mode="published" ;;
+          esac
+          jq -e \
+            --arg mode "$next_mode" \
+            --arg stable "$EXPECTED_STABLE_VERSION" \
+            --argjson revision "$next_revision" \
+            '.mode == $mode and .revision == $revision and .stable.version == $stable' \
+            /tmp/post-state.json >/dev/null
+          if [[ "$ACTION" == "recover" ]]; then
+            jq -e '.candidate == null' /tmp/post-state.json >/dev/null
+          else
+            jq -e --arg ga "$GA" '.candidate.version == $ga' /tmp/post-state.json >/dev/null
+          fi
+
+      - name: Delete short-lived operator Worker
+        if: always() && steps.deploy.outcome == 'success'
+        run: |
+          npx wrangler delete "$DESKTOP_UPDATE_OPERATOR_NAME" \
+            --config wrangler.desktop-update-operator.jsonc \
+            --force
+
+      - name: Summary
+        if: success()
+        run: |
+          {
+            echo "### Desktop update authority"
+            echo "- Action: ${ACTION}"
+            echo "- Operator: ${OPERATOR_NAME}"
+            if [[ "$ACTION" != "status" ]]; then
+              echo "- Operation: ${OPERATION_ID}"
+              echo "- Previous revision: ${EXPECTED_REVISION}"
+              echo "- Result revision: $((EXPECTED_REVISION + 1))"
+            fi
+            echo "- Temporary operator Worker: deleted"
+            echo "- Operator credential value: never exported"
+          } >> "$GITHUB_STEP_SUMMARY"

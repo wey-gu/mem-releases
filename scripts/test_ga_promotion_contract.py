@@ -287,6 +287,18 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn("node ../scripts/verify-upgrade-pause.mjs", workflow)
         self.assertIn("node ../scripts/verify-ga-delivery.mjs --staged-while-paused", workflow)
 
+    def test_desktop_update_control_uses_named_secret_store_operator(self):
+        workflow = (ROOT / '.github/workflows/desktop-update-control.yml').read_text()
+        worker = (ROOT / 'scripts/desktop-update-operator-worker.mjs').read_text()
+        config = (ROOT / 'wrangler.desktop-update-operator.jsonc').read_text()
+        self.assertIn('environment: release-publish', workflow)
+        self.assertIn('expected_revision', workflow)
+        self.assertIn('operation_id', workflow)
+        self.assertIn('Delete short-lived operator Worker', workflow)
+        self.assertIn('result.actor !== env.OPERATOR_NAME', worker)
+        self.assertIn('DESKTOP_UPDATE_OPERATOR_TOKENS_STORE', worker)
+        self.assertIn('nmem_backbone__production__desktop_update_operators__v1', config)
+
     def test_direct_ga_keeps_all_artifacts_and_verifies_updater_without_deploy(self):
         workflow = (
             ROOT / ".github" / "workflows" / "release-desktop.yml"
