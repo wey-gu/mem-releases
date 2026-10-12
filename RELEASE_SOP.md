@@ -14,6 +14,8 @@ instead of a moving view of `main`.
 - No ordinary product change is cherry-picked into the release branch.
 - Every release note, binary, tag, and smoke result names the same release
   branch commit.
+- Both canonical E2E gates have terminal success against `RELEASE_SHA` before
+  any RC or GA tag is created or package distribution begins.
 - The public Changelog is deployed and read back before package distribution.
 - Core RC artifacts are promoted to GA without rebuilding. A delayed RPM is
   promoted separately from its validated RC asset and never changes the APT
@@ -165,6 +167,28 @@ solely for a release. A completed failure blocks the release. A successful or
 still-running job does not require a separate release-triggered run. The
 native-link gate belongs in the pre-release artifact smoke if it requires a
 built bundle.
+
+### Mandatory exact-SHA E2E gate
+
+Before creating any RC or GA tag or starting package distribution, require
+terminal success for both canonical E2E contexts against the exact
+`RELEASE_SHA`:
+
+- `ci/mem-frontend-e2e`, covering `//nowledge-graph:frontend_web_e2e_test` and
+  `//nowledge-graph:web_contract_tests`;
+- `ci/mem-shell-e2e`, covering `//nowledge-graph:frontend_shell_e2e_test`.
+
+Record the tested commit and the run or context URL for both gates in the
+release record. Only terminal success counts. A failed, missing, pending,
+cancelled, skipped, or superseded run blocks the release, as does a successful
+run for any other commit.
+
+The standard Prow jobs may run as postsubmits of a `main` merge. Such a run is
+not evidence for the cherry-picked release-branch commit unless the job itself
+reports `RELEASE_SHA` as the tested source. If the current CI path cannot test
+the exact release commit, stop before tags and arrange controlled exact-SHA CI.
+Do not replace this gate with a previous release's pass, an unchanged-frontend
+claim, source preflight, artifact smoke, or manual inspection.
 
 If a check fails:
 
