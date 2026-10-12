@@ -1,0 +1,183 @@
+name: remove-desktop-upgrade-pause
+
+on:
+  workflow_dispatch:
+    inputs:
+      ga_tag:
+        description: "Published GA version to expose to Desktop clients"
+        required: true
+        type: string
+      previous_version:
+        description: "Known-good stable Desktop version retained for recovery"
+        required: true
+        type: string
+      operator_name:
+        description: "Named operator recorded in the authority receipt"
+        required: true
+        default: "hawkingrei"
+        type: string
+      authority_publish_run_id:
+        description: "Successful desktop-update-control publish workflow run"
+        required: true
+        type: string
+      authority_publish_operation_id:
+        description: "UUID v4 recorded by the authority publish receipt"
+        required: true
+        type: string
+      authority_revision:
+        description: "Published authority revision expected by all client readbacks"
+        required: true
+        type: string
+      route_operation_id:
+        description: "Fresh UUID v4 for the audited route removal"
+        required: true
+        type: string
+
+concurrency:
+  group: desktop-upgrade-pause-routes
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  unpause:
+    runs-on: ubuntu-22.04
+    environment: release-publish
+    env:
+      GA: ${{ inputs.ga_tag }}
+      PREVIOUS_VERSION: ${{ inputs.previous_version }}
+      OPERATOR_NAME: ${{ inputs.operator_name }}
+      AUTHORITY_PUBLISH_RUN_ID: ${{ inputs.authority_publish_run_id }}
+      AUTHORITY_PUBLISH_OPERATION_ID: ${{ inputs.authority_publish_operation_id }}
+      AUTHORITY_REVISION: ${{ inputs.authority_revision }}
+      ROUTE_OPERATION_ID: ${{ inputs.route_operation_id }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      VERIFY_RELEASE_VERSION: ${{ inputs.ga_tag }}
+      VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.previous_version }}
+      VERIFY_PLATFORMS: mac,mac-intel,win,linux-appimage,linux-deb,linux-rpm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Validate the terminal release boundary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$GA" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::ga_tag must be clean semver."
+            exit 1
+          }
+          [[ "$PREVIOUS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$PREVIOUS_VERSION" != "$GA" ]] || {
+            echo "::error::previous_version must be clean semver and differ from GA."
+            exit 1
+          }
+          [[ "$OPERATOR_NAME" =~ ^[a-zA-Z0-9_.@-]{1,100}$ ]] || {
+            echo "::error::operator_name is invalid."
+            exit 1
+          }
+          [[ "$AUTHORITY_PUBLISH_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::authority_publish_run_id is invalid."
+            exit 1
+          }
+          [[ "$AUTHORITY_REVISION" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::authority_revision must be a positive integer."
+            exit 1
+          }
+          for operation in "$AUTHORITY_PUBLISH_OPERATION_ID" "$ROUTE_OPERATION_ID"; do
+            [[ "$operation" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
+              echo "::error::operation IDs must be lowercase UUID v4 values."
+              exit 1
+            }
+          done
+          release="$(gh release view "v${GA}" --repo "$REPO" --json isDraft,isPrerelease,assets)"
+          jq -e '.isDraft == false and .isPrerelease == false and (.assets | length) == 6' \
+            <<<"$release" >/dev/null
+          printf '%s\n' "$release" > /tmp/ga-release.json
+
+      - name: Download the exact authority publish receipt
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-update-receipt-${{ inputs.authority_publish_operation_id }}
+          path: /tmp/authority-receipt
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.authority_publish_run_id }}
+
+      - name: Validate the published authority receipt
+        run: |
+          set -euo pipefail
+          receipt="/tmp/authority-receipt/operation-receipt.json"
+          jq -e \
+            --arg actor "$OPERATOR_NAME" \
+            --arg operation "$AUTHORITY_PUBLISH_OPERATION_ID" \
+            --arg stable "$PREVIOUS_VERSION" \
+            --arg candidate "$GA" \
+            --argjson revision "$AUTHORITY_REVISION" \
+            '.action == "publish" and .actor == $actor and .operation_id == $operation and .mode == "published" and .stable_version == $stable and .candidate_version == $candidate and .revision == $revision' \
+            "$receipt" >/dev/null
+
+      - name: Rebuild the reviewed candidate manifest
+        run: |
+          set -euo pipefail
+          source_sha="$(jq -r '.source_sha // empty' /tmp/authority-receipt/candidate-manifest.json)"
+          release_notes="$(jq -r '.release_notes // empty' /tmp/authority-receipt/candidate-manifest.json)"
+          pub_date="$(jq -r '.pub_date // empty' /tmp/authority-receipt/candidate-manifest.json)"
+          node scripts/build-desktop-update-manifest.mjs \
+            --version "$GA" \
+            --source-sha "$source_sha" \
+            --release-notes "$release_notes" \
+            --pub-date "$pub_date" \
+            --release-json /tmp/ga-release.json \
+            --output /tmp/desktop-update-manifest.json
+          jq -S . /tmp/authority-receipt/candidate-manifest.json > /tmp/receipt-manifest.sorted.json
+          jq -S . /tmp/desktop-update-manifest.json > /tmp/rebuilt-manifest.sorted.json
+          cmp /tmp/receipt-manifest.sorted.json /tmp/rebuilt-manifest.sorted.json
+
+      - name: Verify published packages and the still-closed Desktop boundary
+        run: |
+          set -euo pipefail
+          node scripts/verify-upgrade-pause.mjs --desktop-only
+          node scripts/verify-ga-delivery.mjs --staged-while-paused
+          node scripts/verify-ga-delivery.mjs --apt-only
+
+      - name: Remove the five exact Desktop pause routes
+        run: node scripts/remove-desktop-pause-routes.mjs
+
+      - name: Verify legacy and protocol-1 delivery after exposure
+        env:
+          VERIFY_SCOPE: latest,latest-redirect,direct,update,apt
+          VERIFY_DESKTOP_MANIFEST: /tmp/desktop-update-manifest.json
+          VERIFY_AUTHORITY_REVISION: ${{ inputs.authority_revision }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-ga-delivery.mjs
+          node scripts/verify-controlled-desktop-update.mjs
+
+      - name: Summary
+        run: |
+          {
+            echo "### Desktop upgrade pause removed"
+            echo "- Route operation: ${ROUTE_OPERATION_ID}"
+            echo "- Published authority revision: ${AUTHORITY_REVISION}"
+            echo "- Exposed candidate: ${GA}"
+            echo "- Retained recovery stable: ${PREVIOUS_VERSION}"
+            echo "- Removed exact Desktop pause routes: 5"
+            echo "- Pause Worker deployment: retained"
+            echo "- Legacy and protocol-1 readback: six platforms verified"
+          } >> "$GITHUB_STEP_SUMMARY"

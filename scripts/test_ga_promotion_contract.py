@@ -298,6 +298,23 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn('result.actor !== env.OPERATOR_NAME', worker)
         self.assertIn('DESKTOP_UPDATE_OPERATOR_TOKENS_STORE', worker)
         self.assertIn('nmem_backbone__production__desktop_update_operators__v1', config)
+        self.assertIn('CLOUDFLARE_SECRETS_STORE_API_TOKEN', workflow)
+        self.assertIn('Upload the authority receipt', workflow)
+
+    def test_desktop_unpause_requires_published_release_and_authority_receipt(self):
+        workflow = (ROOT / '.github/workflows/remove-desktop-upgrade-pause.yml').read_text()
+        routes = (ROOT / 'scripts/remove-desktop-pause-routes.mjs').read_text()
+        protocol = (ROOT / 'scripts/verify-controlled-desktop-update.mjs').read_text()
+        self.assertIn(".isDraft == false", workflow)
+        self.assertIn('desktop-update-receipt-${{ inputs.authority_publish_operation_id }}', workflow)
+        self.assertIn(".action == \"publish\"", workflow)
+        self.assertIn('node scripts/verify-upgrade-pause.mjs --desktop-only', workflow)
+        self.assertLess(workflow.index('verify-upgrade-pause.mjs --desktop-only'),
+                        workflow.index('remove-desktop-pause-routes.mjs'))
+        self.assertIn('node scripts/verify-controlled-desktop-update.mjs', workflow)
+        self.assertIn('nowledge-mem-upgrade-pause', routes)
+        self.assertNotIn('wrangler delete', workflow)
+        self.assertIn("control.status === 'allowed'", protocol)
 
     def test_direct_ga_keeps_all_artifacts_and_verifies_updater_without_deploy(self):
         workflow = (

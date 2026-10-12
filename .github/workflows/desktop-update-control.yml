@@ -75,7 +75,8 @@ jobs:
       RELEASE_NOTES: ${{ inputs.release_notes }}
       PUB_DATE: ${{ inputs.pub_date }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # Binding a Secrets Store secret requires Account Secrets Store Edit.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_SECRETS_STORE_API_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
@@ -316,6 +317,27 @@ jobs:
           else
             jq -e --arg ga "$GA" '.candidate.version == $ga' /tmp/post-state.json >/dev/null
           fi
+
+      - name: Persist the authority receipt
+        if: inputs.action != 'status'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/desktop-update-receipt
+          cp /tmp/operation-receipt.json /tmp/desktop-update-receipt/operation-receipt.json
+          if [[ "$ACTION" == "prepare" ]]; then
+            cp /tmp/desktop-update-manifest.json /tmp/desktop-update-receipt/candidate-manifest.json
+          elif [[ "$ACTION" == "publish" ]]; then
+            jq '.candidate' /tmp/post-state.json > /tmp/desktop-update-receipt/candidate-manifest.json
+          fi
+
+      - name: Upload the authority receipt
+        if: inputs.action != 'status'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-update-receipt-${{ inputs.operation_id }}
+          path: /tmp/desktop-update-receipt
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Delete short-lived operator Worker
         if: always() && steps.deploy.outcome == 'success'
