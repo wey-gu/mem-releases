@@ -35,6 +35,19 @@ test('uses the selected named operator without returning its credential', async 
   assert.deepEqual(JSON.parse(text), { revision: 14, mode: 'stopped' });
 });
 
+test('uses manual redirects supported by the deployed runtime and rejects redirects', async () => {
+  let calls = 0;
+  const fetcher = async (url, init) => {
+    calls++;
+    assert.equal(init.redirect, 'manual');
+    return new Response(null, { status: 302, headers: { Location: 'https://elsewhere.invalid/' } });
+  };
+  const response = await handleOperatorRequest(request(), baseEnv, fetcher);
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error_code, 'operator_upstream_redirect');
+  assert.equal(calls, 1);
+});
+
 test('fails closed for a bad nonce or mismatched receipt actor', async () => {
   assert.equal((await handleOperatorRequest(request(undefined, 'wrong'), baseEnv)).status, 401);
   const response = await handleOperatorRequest(request({

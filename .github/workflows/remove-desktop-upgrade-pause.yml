@@ -11,6 +11,10 @@ on:
         description: "Known-good stable Desktop version retained for recovery"
         required: true
         type: string
+      paused_version:
+        description: "Version blocked by pause routes (defaults to previous_version)"
+        required: false
+        type: string
       operator_name:
         description: "Named operator recorded in the authority receipt"
         required: true
@@ -48,6 +52,7 @@ jobs:
     env:
       GA: ${{ inputs.ga_tag }}
       PREVIOUS_VERSION: ${{ inputs.previous_version }}
+      PAUSED_VERSION: ${{ inputs.paused_version || inputs.previous_version }}
       OPERATOR_NAME: ${{ inputs.operator_name }}
       AUTHORITY_PUBLISH_RUN_ID: ${{ inputs.authority_publish_run_id }}
       AUTHORITY_PUBLISH_OPERATION_ID: ${{ inputs.authority_publish_operation_id }}
@@ -86,6 +91,10 @@ jobs:
           }
           [[ "$PREVIOUS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$PREVIOUS_VERSION" != "$GA" ]] || {
             echo "::error::previous_version must be clean semver and differ from GA."
+            exit 1
+          }
+          [[ "$PAUSED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$PAUSED_VERSION" != "$GA" ]] || {
+            echo "::error::paused_version must be clean semver and differ from GA."
             exit 1
           }
           [[ "$OPERATOR_NAME" =~ ^[a-zA-Z0-9_.@-]{1,100}$ ]] || {
@@ -150,6 +159,8 @@ jobs:
           cmp /tmp/receipt-manifest.sorted.json /tmp/rebuilt-manifest.sorted.json
 
       - name: Verify published packages and the still-closed Desktop boundary
+        env:
+          VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.paused_version || inputs.previous_version }}
         run: |
           set -euo pipefail
           node scripts/verify-upgrade-pause.mjs --desktop-only
@@ -157,6 +168,8 @@ jobs:
           node scripts/verify-ga-delivery.mjs --apt-only
 
       - name: Remove the five exact Desktop pause routes
+        env:
+          PREVIOUS_VERSION: ${{ inputs.paused_version || inputs.previous_version }}
         run: node scripts/remove-desktop-pause-routes.mjs
 
       - name: Verify legacy and protocol-1 delivery after exposure
@@ -177,6 +190,7 @@ jobs:
             echo "- Published authority revision: ${AUTHORITY_REVISION}"
             echo "- Exposed candidate: ${GA}"
             echo "- Retained recovery stable: ${PREVIOUS_VERSION}"
+            echo "- Removed pause route version: ${PAUSED_VERSION}"
             echo "- Removed exact Desktop pause routes: 5"
             echo "- Pause Worker deployment: retained"
             echo "- Legacy and protocol-1 readback: six platforms verified"

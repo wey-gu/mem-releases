@@ -6,6 +6,8 @@ import re
 import shlex
 import subprocess
 import tempfile
+import textwrap
+import json
 import unittest
 
 
@@ -300,6 +302,29 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn('nmem_backbone__production__desktop_update_operators__v1', config)
         self.assertIn('CLOUDFLARE_SECRETS_STORE_API_TOKEN', workflow)
         self.assertIn('Upload the authority receipt', workflow)
+
+    def test_recover_accepts_stopped_authority_with_retained_candidate(self):
+        workflow = (ROOT / '.github/workflows/desktop-update-control.yml').read_text()
+        section = workflow.split('      - name: Read and validate exact pre-state\n', 1)[1]
+        shell = textwrap.dedent(section.split('        run: |\n', 1)[1].split('\n      - name:', 1)[0])
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            state = tmp / 'pre-state.json'
+            state.write_text(json.dumps({'mode': 'stopped', 'revision': 14,
+                                        'stable': {'version': '0.10.98'},
+                                        'candidate': {'version': '0.10.100'}}))
+            node = tmp / 'node'
+            node.write_text('#!/bin/sh\nexit 0\n')
+            node.chmod(0o755)
+            env = dict(os.environ, PATH=str(tmp) + os.pathsep + os.environ['PATH'],
+                       ACTION='recover', EXPECTED_MODE='stopped', EXPECTED_REVISION='14',
+                       EXPECTED_STABLE_VERSION='0.10.98', GA='')
+            result = subprocess.run(['bash', '-c', shell.replace('/tmp/pre-state.json', str(state))],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            env['ACTION'] = 'prepare'
+            self.assertNotEqual(subprocess.run(['bash', '-c', shell.replace('/tmp/pre-state.json', str(state))],
+                                              env=env, capture_output=True).returncode, 0)
 
     def test_desktop_unpause_requires_published_release_and_authority_receipt(self):
         workflow = (ROOT / '.github/workflows/remove-desktop-upgrade-pause.yml').read_text()
