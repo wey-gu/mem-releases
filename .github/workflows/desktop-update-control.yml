@@ -234,9 +234,9 @@ jobs:
             --argjson revision "$EXPECTED_REVISION" \
             '.mode == $mode and .revision == $revision and .stable.version == $stable' \
             /tmp/pre-state.json >/dev/null
-          if [[ "$ACTION" == "recover" || "$ACTION" == "prepare" ]]; then
+          if [[ "$ACTION" == "prepare" ]]; then
             jq -e '.candidate == null' /tmp/pre-state.json >/dev/null
-          else
+          elif [[ "$ACTION" == "publish" ]]; then
             jq -e --arg ga "$GA" '.candidate.version == $ga' /tmp/pre-state.json >/dev/null
           fi
 
@@ -342,9 +342,13 @@ jobs:
       - name: Delete short-lived operator Worker
         if: always() && steps.deploy.outcome == 'success'
         run: |
-          npx wrangler delete "$DESKTOP_UPDATE_OPERATOR_NAME" \
-            --config wrangler.desktop-update-operator.jsonc \
-            --force
+          set -euo pipefail
+          # Wrangler delete also enumerates KV namespaces after deleting the script.
+          # This isolated Worker has no KV resources: use the script API only.
+          curl -fsS -X DELETE \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${DESKTOP_UPDATE_OPERATOR_NAME}" \
+            | jq -e '.success == true' >/dev/null
 
       - name: Summary
         if: success()

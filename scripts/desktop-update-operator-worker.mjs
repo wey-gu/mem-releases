@@ -75,7 +75,7 @@ export async function handleOperatorRequest(request, env, fetcher = fetch) {
     if (history && operation.limit) target.searchParams.set('limit', String(operation.limit));
     const response = await fetcher(target, {
       method: read ? 'GET' : 'POST',
-      redirect: 'error',
+      redirect: 'manual',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
@@ -83,6 +83,9 @@ export async function handleOperatorRequest(request, env, fetcher = fetch) {
       },
       ...(read ? {} : { body: JSON.stringify(operation) }),
     });
+    if (response.status >= 300 && response.status < 400) {
+      return json({ error_code: 'operator_upstream_redirect' }, 502);
+    }
     const result = await response.json();
     if (response.ok && !read && result.actor !== env.OPERATOR_NAME) {
       return json({ error_code: 'operator_identity_mismatch' }, 502);
