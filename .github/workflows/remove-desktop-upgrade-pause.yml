@@ -161,9 +161,13 @@ jobs:
       - name: Verify published packages and the still-closed Desktop boundary
         env:
           VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.paused_version || inputs.previous_version }}
+          VERIFY_DESKTOP_MANIFEST: /tmp/desktop-update-manifest.json
+          VERIFY_AUTHORITY_REVISION: ${{ inputs.authority_revision }}
         run: |
           set -euo pipefail
-          node scripts/verify-upgrade-pause.mjs --desktop-only
+          # Protocol-1 already exposes the audited published candidate; legacy routes remain paused.
+          node scripts/verify-upgrade-pause.mjs --desktop-only --legacy-only
+          node scripts/verify-controlled-desktop-update.mjs
           node scripts/verify-ga-delivery.mjs --staged-while-paused
           node scripts/verify-ga-delivery.mjs --apt-only
 

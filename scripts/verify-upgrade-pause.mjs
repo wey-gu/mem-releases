@@ -51,6 +51,7 @@ export async function verifyUpgradePause({
   baseUrl = 'https://backbone-mem.nowledge.co',
   aptBaseUrl = 'https://download-mem.nowledge.co/apt',
   includeApt = true,
+  includeControlled = true,
   fetcher = fetch,
   requestIdFactory = randomUUID,
 }) {
@@ -76,26 +77,28 @@ export async function verifyUpgradePause({
     await assertPaused(await request(`${base}/download/latest/${platform}`),
       `/download/latest/${platform}`);
 
-    const requestId = requestIdFactory();
-    const controlPlatform = CONTROL_PLATFORMS[platform];
-    const controlled = await request(
-      `${base}/latest?platform=${controlPlatform}&update_control=1&request_id=${requestId}`,
-    );
-    requireCondition(controlled.status === 200,
-      `controlled /latest ${controlPlatform}: expected 200, got ${controlled.status}`);
-    requireCondition((controlled.headers.get('cache-control') || '').toLowerCase().includes('no-store'),
-      `controlled /latest ${controlPlatform}: cache-control must include no-store`);
-    const body = await controlled.json();
-    requireCondition(body?.control?.protocol === 1,
-      `controlled /latest ${controlPlatform}: expected protocol 1`);
-    requireCondition(body?.control?.status === 'stopped',
-      `controlled /latest ${controlPlatform}: expected stopped, got ${body?.control?.status || '<missing>'}`);
-    requireCondition(Number.isSafeInteger(body?.control?.revision) && body.control.revision >= 0,
-      `controlled /latest ${controlPlatform}: invalid revision`);
-    requireCondition(body?.control?.request_id === requestId,
-      `controlled /latest ${controlPlatform}: request ID mismatch`);
-    requireCondition(body.version === '' && body.download_url === '',
-      `controlled /latest ${controlPlatform}: stopped response exposed a release`);
+    if (includeControlled) {
+      const requestId = requestIdFactory();
+      const controlPlatform = CONTROL_PLATFORMS[platform];
+      const controlled = await request(
+        `${base}/latest?platform=${controlPlatform}&update_control=1&request_id=${requestId}`,
+      );
+      requireCondition(controlled.status === 200,
+        `controlled /latest ${controlPlatform}: expected 200, got ${controlled.status}`);
+      requireCondition((controlled.headers.get('cache-control') || '').toLowerCase().includes('no-store'),
+        `controlled /latest ${controlPlatform}: cache-control must include no-store`);
+      const body = await controlled.json();
+      requireCondition(body?.control?.protocol === 1,
+        `controlled /latest ${controlPlatform}: expected protocol 1`);
+      requireCondition(body?.control?.status === 'stopped',
+        `controlled /latest ${controlPlatform}: expected stopped, got ${body?.control?.status || '<missing>'}`);
+      requireCondition(Number.isSafeInteger(body?.control?.revision) && body.control.revision >= 0,
+        `controlled /latest ${controlPlatform}: invalid revision`);
+      requireCondition(body?.control?.request_id === requestId,
+        `controlled /latest ${controlPlatform}: request ID mismatch`);
+      requireCondition(body.version === '' && body.download_url === '',
+        `controlled /latest ${controlPlatform}: stopped response exposed a release`);
+    }
   }
 
   for (const target of new Set(platforms.map((platform) => TARGETS[platform]))) {
@@ -121,6 +124,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     baseUrl: process.env.VERIFY_BASE_URL,
     aptBaseUrl: process.env.VERIFY_APT_BASE_URL,
     includeApt: !process.argv.includes('--desktop-only'),
+    includeControlled: !process.argv.includes('--legacy-only'),
   }).catch((error) => {
     console.error(`Upgrade pause verification failed: ${error.message}`);
     process.exitCode = 1;

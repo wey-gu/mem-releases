@@ -85,3 +85,14 @@ test('rejects a stopped response that exposes release fields', async () => {
   await assert.rejects(verifyUpgradePause(options(fixture({ exposeRelease: true }))),
     /stopped response exposed a release/);
 });
+
+test('legacy-only boundary stays paused after a separately verified candidate is allowed', async () => {
+  const fetcher = async (value) => {
+    const url = new URL(value);
+    assert.notEqual(url.searchParams.get('update_control'), '1');
+    return fixture({ controlStatus: 'allowed', exposeRelease: true })(value);
+  };
+  await verifyUpgradePause(options(fetcher, { includeApt: false, includeControlled: false }));
+  await assert.rejects(verifyUpgradePause(options(fixture({ legacyStatus: 200 }),
+    { includeApt: false, includeControlled: false })), /expected 503/);
+});

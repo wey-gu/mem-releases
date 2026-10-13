@@ -337,6 +337,11 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertLess(workflow.index('verify-upgrade-pause.mjs --desktop-only'),
                         workflow.index('remove-desktop-pause-routes.mjs'))
         self.assertIn('node scripts/verify-controlled-desktop-update.mjs', workflow)
+        closed = workflow.split('      - name: Verify published packages and the still-closed Desktop boundary', 1)[1].split('      - name: Remove the five exact Desktop pause routes', 1)[0]
+        self.assertIn('--desktop-only --legacy-only', closed)
+        self.assertIn('VERIFY_DESKTOP_MANIFEST: /tmp/desktop-update-manifest.json', closed)
+        self.assertIn('VERIFY_AUTHORITY_REVISION:', closed)
+        self.assertIn('node scripts/verify-controlled-desktop-update.mjs', closed)
         self.assertIn('nowledge-mem-upgrade-pause', routes)
         self.assertNotIn('wrangler delete', workflow)
         self.assertIn("control.status === 'allowed'", protocol)
