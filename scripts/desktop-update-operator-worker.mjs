@@ -1,5 +1,5 @@
 const READ_ACTIONS = new Set(['status', 'history']);
-const WRITE_ACTIONS = new Set(['recover', 'prepare', 'publish']);
+const WRITE_ACTIONS = new Set(['recover', 'complete', 'prepare', 'publish']);
 const JSON_HEADERS = {
   'Cache-Control': 'no-store',
   'Content-Type': 'application/json',
