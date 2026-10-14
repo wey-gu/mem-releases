@@ -916,6 +916,8 @@ def meta_context(outputs, extra=None):
         "env.RUSTC_WRAPPER": "sccache",
         "env.CLOUDFLARE_ZONE_ID": "zone", "env.CLOUDFLARE_API_TOKEN": "token",
         "inputs.allow_newer_desktop_latest": False,
+        "inputs.windows_runner_probe": False,
+        "inputs.windows_cache_benchmark": False,
     })
     context.update(extra or {})
     return context
@@ -1060,7 +1062,8 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
             for job in CPU_BUILD_JOBS:
                 with self.subTest(is_nightly=is_nightly, job=job):
                     self.assertNotIn("if", self.jobs[job], "Default platform builds are unconditional")
-                    self.assertEqual(self.jobs[job]["needs"], "meta")
+                    expected_needs = ["meta", "select-windows-runner"] if job == "build-windows" else "meta"
+                    self.assertEqual(self.jobs[job]["needs"], expected_needs)
                     uploads = [s for s in self.jobs[job]["steps"]
                                if str(s.get("uses", "")).startswith("actions/upload-artifact")
                                and s["with"]["name"] in CPU_ARTIFACTS]
