@@ -1531,12 +1531,15 @@ jobs:
 
       # RPM from the binaries above. `tauri bundle` reuses the release shell
       # and the staged rust-backend; it does not rebuild the frontend or the
-      # Rust code. tauri.linux.conf.json sets rpm compression to
-      # { "type": "none" }: rpm-rs compression is slow at every algorithm and
-      # level (tauri-apps/tauri#13273), so the RPM payload is stored
-      # uncompressed. A source ref that predates that setting still bundles
-      # correctly at the old speed (~29 min for gzip level 1 on rc2), which
-      # is why the step timeout keeps headroom above that.
+      # Rust code. rpm-rs compression is slow at every algorithm and level
+      # (tauri-apps/tauri#13273), so the RPM payload is stored uncompressed.
+      # nowledge-co/mem#7113 sets that in tauri.linux.conf.json, but a source
+      # ref cut before it (release/0.10.102 at v0.10.102-rc1) still says gzip
+      # level 1, and that bundling ran past 45 minutes and shipped no RPM.
+      # So this step forces { "type": "none" } with --config (merged last,
+      # over the platform config) whatever the source says; uncompressed it
+      # takes seconds. Even a pre-#7113 payload (every binary twice) stays
+      # under GitHub's 2 GiB release-asset limit uncompressed (~1.5 GB).
       #
       # The RPM steps run after the DEB/AppImage artifact is saved and use
       # continue-on-error, so an RPM failure never blocks the core Linux
@@ -1547,14 +1550,15 @@ jobs:
       - name: Build, locate, and verify native .rpm (Tauri bundle)
         id: rpm
         continue-on-error: true
-        timeout-minutes: 45
+        timeout-minutes: 20
         working-directory: nowledge-graph
         shell: bash
         run: |
           set -euo pipefail
           RPM_DIR=src-tauri/target/release/bundle/rpm
           rm -rf "$RPM_DIR"
-          pnpm run tauri bundle --bundles rpm
+          pnpm run tauri bundle --bundles rpm \
+            --config '{"bundle":{"linux":{"rpm":{"compression":{"type":"none"}}}}}'
           mapfile -t rpms < <(find "$RPM_DIR" -name '*.rpm' -type f)
           if [[ "${#rpms[@]}" != "1" ]]; then
             echo "::error::Expected exactly one .rpm; found ${#rpms[@]}"

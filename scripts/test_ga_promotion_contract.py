@@ -476,6 +476,14 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertLess(rpm_step, rpm_upload)
         rpm = linux[rpm_step:]
         self.assertIn("pnpm run tauri bundle --bundles rpm", rpm)
+        # The release pipeline, not the source ref, decides RPM compression:
+        # a pre-#7113 source says gzip and timed out (v0.10.102-rc1).
+        override = re.search(r"--config '([^']+)'", rpm.split("\n      - ", 1)[0])
+        self.assertIsNotNone(override, "RPM bundling must force its compression")
+        self.assertEqual(
+            json.loads(override.group(1)),
+            {"bundle": {"linux": {"rpm": {"compression": {"type": "none"}}}}},
+        )
         self.assertNotIn("tauri build", rpm, "RPM must reuse the DEB/AppImage build outputs")
         self.assertIn("continue-on-error: true", rpm.split("\n      - ", 1)[0])
         self.assertIn('./scripts/verify-linux-package.sh "$OUT"', rpm)
