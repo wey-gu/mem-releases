@@ -942,9 +942,11 @@ jobs:
           if ((Get-PSDrive C).Free -lt 40GB) { throw 'At least 40 GiB free is required before a Desktop build' }
           $env:CARGO_TARGET_DIR = Join-Path $env:USERPROFILE 'ci-cache\runner-target'
           $env:XDG_CACHE_HOME = Join-Path $env:USERPROFILE 'ci-cache\pdfium'
+          # action-setup recreates PNPM_HOME; keep package downloads outside it.
+          $env:NMEM_PNPM_STORE_DIR = Join-Path $env:USERPROFILE 'ci-cache\pnpm-store'
           foreach ($name in @('RUSTUP_TOOLCHAIN','RUSTC_WRAPPER','SCCACHE_DIR','SCCACHE_CACHE_SIZE','SCCACHE_IDLE_TIMEOUT',
             'SCCACHE_IGNORE_SERVER_IO_ERROR','CMAKE_C_COMPILER_LAUNCHER','CMAKE_CXX_COMPILER_LAUNCHER',
-            'CARGO_TARGET_DIR','XDG_CACHE_HOME')) {
+            'CARGO_TARGET_DIR','XDG_CACHE_HOME','NMEM_PNPM_STORE_DIR')) {
             "$name=$([Environment]::GetEnvironmentVariable($name))" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           }
       # The inline fragment bootstrap is pinned by its exact bytes in the CSP.
@@ -1078,7 +1080,14 @@ jobs:
 
       - name: Install pnpm deps
         working-directory: nowledge-graph
-        run: pnpm install --frozen-lockfile --prefer-offline
+        shell: pwsh
+        run: |
+          $installArgs = @('install', '--frozen-lockfile', '--prefer-offline')
+          if ($env:NMEM_PNPM_STORE_DIR) {
+            $installArgs += @('--store-dir', $env:NMEM_PNPM_STORE_DIR)
+          }
+          & pnpm @installArgs
+          if ($LASTEXITCODE -ne 0) { throw "pnpm install failed ($LASTEXITCODE)" }
 
       # The hosted Windows image already includes LLVM/clang, CMake, and Ninja.
       # Install only protoc from its upstream GitHub release so a Chocolatey

@@ -31,10 +31,18 @@ parallelism to four jobs while local tests can continue.
 | `ci-tools` | Pinned tools, helpers and pre-change user environment backup |
 | `ci-cache/compiler` | Shared local sccache storage, capped at 8 GiB |
 | `ci-cache/runner-target` | Runner-only Cargo artifacts retained across jobs |
+| `ci-cache/pnpm-store` | Persistent pnpm package downloads shared across runner jobs |
 | `.cargo` | Existing shared crate downloads and registry |
 
 **Never clean** `dev/mem/nmem-rs/target`,
 `dev/mem/nowledge-graph/src-tauri/target`, or `dev/mem/.context`.
+The self-hosted job exports `NMEM_PNPM_STORE_DIR` before `pnpm/action-setup`
+and installs with explicit `--store-dir` and `--prefer-offline`. Without this override, pnpm 11 uses the
+store inside the action's `PNPM_HOME`, which the action deletes and recreates on
+the next job. The persistent store is outside checkout and action installation
+paths. Checkout still recreates `node_modules`, so linking and install scripts
+remain; measure a warm run before promising a wall-time reduction.
+
 Developer tests retain their existing targets and incremental settings. Their
 new processes use the same sccache wrapper; existing shells can opt in with:
 

@@ -1089,6 +1089,18 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
         self.assertEqual(rust["if"], "runner.environment != 'self-hosted'")
         self.assertIn("$env:RUSTUP_TOOLCHAIN = '1.98.1'", configure["run"])
 
+    def test_self_hosted_pnpm_store_survives_action_setup_and_checkout(self):
+        steps = self.jobs["build-windows"]["steps"]
+        configure = self.step("build-windows", name="Configure isolated self-hosted Windows build")
+        self.assertEqual(configure["if"], "runner.environment == 'self-hosted'")
+        self.assertIn("$env:NMEM_PNPM_STORE_DIR = Join-Path $env:USERPROFILE 'ci-cache\\pnpm-store'", configure["run"])
+        self.assertIn("'NMEM_PNPM_STORE_DIR'", configure["run"])
+        setup = next(step for step in steps if step.get("uses") == "pnpm/action-setup@v4")
+        self.assertLess(steps.index(configure), steps.index(setup))
+        install = self.step("build-windows", name="Install pnpm deps")
+        self.assertIn("--prefer-offline", install["run"])
+        self.assertIn("$installArgs += @('--store-dir', $env:NMEM_PNPM_STORE_DIR)", install["run"])
+
     def test_windows_miss_parser_reads_real_colored_and_unpunctuated_events(self):
         diag = self.tmp / "sccache-diag"
         diag.mkdir()
