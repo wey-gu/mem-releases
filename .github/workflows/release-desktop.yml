@@ -140,6 +140,7 @@ jobs:
         run: node scripts/select-windows-runner.mjs
 
   windows-runner-probe:
+    needs: select-windows-runner
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows_runner_probe == true || inputs.windows_cache_benchmark == true) }}
     runs-on: windows-book-feasibility
     timeout-minutes: 10
