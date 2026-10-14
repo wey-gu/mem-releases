@@ -1307,6 +1307,17 @@ class ReleaseShapeTriggerContractTest(unittest.TestCase):
             (lambda: write("nowledge-graph/src-tauri/Cargo.toml", "new\n"), True),
             (lambda: gitlink("upstream_forks/ladybug", "5" * 40), True),
             (lambda: gitlink("hawdb", "6" * 40), True),
+            # Files that change every crate's compiler flags without a
+            # manifest change (W14's strip=symbols went cold this way).
+            (lambda: write("rust-toolchain.toml", "v1\n"), True),
+            (lambda: write(".cargo/config.toml", "v1\n"), True),
+            (lambda: write("nowledge-graph/src-tauri/.cargo/config.toml", "v1\n"), True),
+            (lambda: write("integrations/hawdb/prepare-nightly-server.py", "v1\n"), True),
+            (lambda: write("nowledge-graph/scripts/build-rust-bundle.sh", "v1\n"), True),
+            (lambda: write("nowledge-graph/scripts/build-rust-bundle.ps1", "v1\n"), True),
+            (lambda: write("tests/testdata/dependency-locks/prepare-nightly-server.py", "v1\n"), False),
+            (lambda: write("nowledge-graph/scripts/build-rust-bundle.test.mjs", "v1\n"), False),
+            (lambda: write("docs/cargo/config.toml.md", "v1\n"), False),
         ):
             change()
             commit("change")
