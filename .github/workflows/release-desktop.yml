@@ -922,10 +922,29 @@ jobs:
   build-windows:
     needs: [meta, select-windows-runner]
     runs-on: ${{ needs.select-windows-runner.outputs.label }}
-    timeout-minutes: 180
+    # 300, not 180, as for the macOS jobs. A cold-cache build runs past three
+    # hours: the self-hosted run 38557298581 hit the 180-minute limit with
+    # the backend 159 minutes in and still compiling, and the hosted run
+    # 38556301085 (1028 Rust misses, debug-logging sccache daemon) took 134
+    # minutes for the backend and 18 for the Tauri shell. GitHub-hosted jobs
+    # allow up to 360.
+    timeout-minutes: 300
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
+      # Deterministic MSVC links (nowledge-co/mem#7108, W8). sccache cannot
+      # cache proc-macro crates (rustc links them), so every build relinks
+      # them, and link.exe without /Brepro stamps each DLL with a fresh
+      # TimeDateStamp and PDB GUID. sccache hashes the bytes of every
+      # --extern file, so each crate that directly depends on a proc macro
+      # (serde, thiserror, tokio, datafusion-common via paste, ...) missed on
+      # every run: about 110 backend + 60 Tauri units, the ~200-miss Windows
+      # floor. Runs 38555213068 and 38556301085 built 25 proc-macro units
+      # with identical Cargo metadata hashes; all 25 DLLs differed, while 324
+      # of the 325 rlibs both runs built matched byte for byte. link.exe
+      # reads extra options from LINK; the variable also reaches the host
+      # proc-macro links that RUSTFLAGS skips under --target.
+      LINK: /Brepro
     steps:
       - &configure_windows_self_hosted
         name: Configure isolated self-hosted Windows build
@@ -1170,7 +1189,12 @@ jobs:
           diag="$RUNNER_TEMP/sccache-diag"
           mkdir -p "$diag"
           sccache --stop-server >/dev/null 2>&1 || true
-          SCCACHE_LOG=sccache=debug SCCACHE_LOG_MILLIS=1 \
+          # Run 38556301085 had a non-empty daemon log but an empty
+          # events.txt. The likely cause is color: the daemon starts on a
+          # hidden console, so env_logger may add ANSI codes that defeat the
+          # patterns in the collection step. Disable color here; that step
+          # also strips any codes and prints raw counts.
+          RUST_LOG_STYLE=never SCCACHE_LOG=sccache=debug SCCACHE_LOG_MILLIS=1 \
             SCCACHE_ERROR_LOG="$diag/daemon.log" sccache --start-server
 
       - name: Prepare shared sccache diagnostics without restarting (Windows)
@@ -1236,6 +1260,10 @@ jobs:
             sccache --show-stats --stats-format json > "$out/stats-after.json"
           fi
           if [[ -s "$log" ]]; then
+            # Drop ANSI color codes and CRs in case the daemon still colored.
+            perl -pe 's/\e\[[0-9;]*m//g; s/\r$//' "$log" > "$diag/plain.log"
+            log="$diag/plain.log"
+            echo "raw daemon lines: $(wc -l < "$log"); hash keys: $(grep -c ': Hash key: ' "$log"); hits: $(grep -c ': Cache hit in ' "$log"); misses: $(grep -c ': Cache miss in ' "$log")"
             # One line per daemon event, in log order: "<time> <unit> <event>
             # <value>". <unit> is the Rust crate name or the C/C++ object
             # name. For a Rust compile only Cargo's extra-filename is kept
@@ -1555,11 +1583,14 @@ jobs:
     needs: meta
     if: ${{ needs.meta.outputs.run_vulkan == 'true' }}
     runs-on: windows-2022
-    timeout-minutes: 180
+    # 300, not 180: see build-windows.
+    timeout-minutes: 300
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
       IS_DRY_RUN: ${{ needs.meta.outputs.is_dry_run }}
+      # Deterministic MSVC links: see build-windows.
+      LINK: /Brepro
     steps:
       - *preserve_windows_checkout_lf
 
