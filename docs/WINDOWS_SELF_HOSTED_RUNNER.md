@@ -58,3 +58,7 @@ choose the hosted runner; do not delete the protected tests to pass it.
 Initial real cache measurement: `nmem-wire` release 197.866 → 175.122 seconds
 between fresh local-test/runner targets, with 33 Rust hits observed. This is an
 11.5% component improvement, not a measured full Desktop release speedup.
+Retaining the runner target's dependency artifacts and cleaning only our
+`nmem-wire` package before rebuilding took 30.728 seconds, with one Rust
+cache hit observed. That is about 6.4x faster than the initial component build;
+it does not establish the full backend's rebuild cost after a version change.
