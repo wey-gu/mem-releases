@@ -8,10 +8,16 @@
 #     fingerprint covers every Cargo.toml / *Cargo.lock in the tree (including
 #     integrations/hawdb/*-Cargo.lock and the bazel-Cargo.* manifests) and the
 #     hawdb + upstream_forks/* gitlinks, which are compiled into nmem-server
-#     without moving Cargo.lock. On 0.10.101-rc1, dependency bumps compiled
-#     cold inside the release (Windows +50, macOS +43, Linux +52 min against a
-#     warm rc). Building them right after they merge warms sccache and the
-#     Bazel remote cache before the next rc;
+#     without moving Cargo.lock. It also covers the files that change the
+#     compiler flags of every crate without touching a manifest: the
+#     toolchain, .cargo/config.toml, the shipped server manifest generator
+#     (integrations/hawdb/prepare-nightly-server.py) and build-rust-bundle.
+#     W14's `strip = "symbols"` there invalidated every cached crate once
+#     (Rust hit rate 98% -> 37%, macOS +100 min). On 0.10.101-rc1,
+#     dependency bumps compiled cold inside the release (Windows +50,
+#     macOS +43, Linux +52 min against a warm rc). Building them right
+#     after they merge warms sccache and the Bazel remote cache before the
+#     next rc;
 #   - daily: no nightly has been dispatched since 18:00 UTC today (02:00
 #     Beijing), so source-only breakage still surfaces within a day;
 #   - manual: workflow_dispatch with force=true.
@@ -71,7 +77,10 @@ jobs:
           set -euo pipefail
           sha="$(git -C mem rev-parse HEAD)"
           listing="$(git -C mem ls-tree -r HEAD | awk -F '\t' '
-            $2 ~ /Cargo\.(toml|lock)$/ || $2 == "hawdb" || $2 ~ /^upstream_forks\/[^\/]+$/ { print }
+            $2 ~ /Cargo\.(toml|lock)$/ || $2 == "hawdb" || $2 ~ /^upstream_forks\/[^\/]+$/ { print; next }
+            $2 ~ /(^|\/)rust-toolchain(\.toml)?$/ || $2 ~ /(^|\/)\.cargo\/config(\.toml)?$/ { print; next }
+            $2 == "integrations/hawdb/prepare-nightly-server.py" { print; next }
+            $2 ~ /^nowledge-graph\/scripts\/build-rust-bundle\.(sh|ps1)$/ { print }
           ' | LC_ALL=C sort)"
           if [[ -z "$listing" ]]; then
             echo "::error::No Cargo manifests found in nowledge-co/mem@${sha}; refusing an empty fingerprint."
