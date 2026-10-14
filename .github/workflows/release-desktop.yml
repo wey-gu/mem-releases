@@ -97,7 +97,7 @@ env:
 
 jobs:
   windows-runner-probe:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_runner_probe == true }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows_runner_probe == true || inputs.windows_cache_benchmark == true) }}
     runs-on: windows-book-feasibility
     timeout-minutes: 10
     permissions:
@@ -158,7 +158,7 @@ jobs:
   # out the private repo at the right tag.
   # -----------------------------------------------------------------------
   meta:
-    if: ${{ inputs.windows_runner_probe != true }}
+    if: ${{ inputs.windows_runner_probe != true && inputs.windows_cache_benchmark != true }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.resolve.outputs.version }}
