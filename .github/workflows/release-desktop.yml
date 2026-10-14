@@ -120,7 +120,7 @@ on:
 # keeps one pending run per group), and a release dispatched from main shares
 # `refs/heads/main` with the nightly.
 concurrency:
-  group: ${{ inputs.tag == 'nightly' && 'release-desktop-nightly' || format('release-desktop-{0}', github.ref) }}
+  group: ${{ inputs.windows_only == true && format('windows-qualification-{0}', github.run_id) || (inputs.tag == 'nightly' && 'release-desktop-nightly' || format('release-desktop-{0}', github.ref)) }}
   cancel-in-progress: false
 
 permissions:

@@ -1104,8 +1104,13 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
             ("workflow_dispatch", "nightly", "refs/heads/main", "release-desktop-nightly"),
         ):
             with self.subTest(event=event, tag=tag):
-                context = {"github.event_name": event, "inputs.tag": tag, "github.ref": ref}
+                context = {"github.event_name": event, "inputs.tag": tag, "github.ref": ref,
+                           "inputs.windows_only": False, "github.run_id": 100}
                 self.assertEqual(github_expr(group, context), expected)
+        for run_id in (100, 101):
+            self.assertEqual(github_expr(group, {"inputs.windows_only": True, "github.run_id": run_id,
+                                                "inputs.tag": "nightly", "github.ref": "refs/heads/main"}),
+                             f"windows-qualification-{run_id}")
         report_if = self.jobs["nightly-report"]["if"]
         for event, tag, expected in (("workflow_dispatch", "nightly", True),
                                      ("workflow_dispatch", "0.10.102", False), ("push", None, False),
