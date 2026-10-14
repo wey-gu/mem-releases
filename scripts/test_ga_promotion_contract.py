@@ -476,6 +476,30 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertLess(rpm_step, rpm_upload)
         rpm = linux[rpm_step:]
         self.assertIn("pnpm run tauri bundle --bundles rpm", rpm)
+        # The release pipeline, not the source ref, decides RPM compression:
+        # a pre-#7113 source says gzip and timed out (v0.10.102-rc1).
+        override = re.search(r"--config '([^']+)'", rpm.split("\n      - ", 1)[0])
+        self.assertIsNotNone(override, "RPM bundling must force its compression")
+        patch = json.loads(override.group(1))
+        self.assertEqual(
+            patch, {"bundle": {"linux": {"rpm": {"compression": {"type": "none", "level": None}}}}},
+        )
+        # Tauri applies --config as an RFC 7396 merge patch; RpmCompression
+        # denies unknown fields, so the merged value must be exactly
+        # {"type": "none"} over both an old (gzip) and a new (none) source.
+        def merge(target, patch):
+            if not isinstance(patch, dict):
+                return patch
+            target = dict(target) if isinstance(target, dict) else {}
+            for key, value in patch.items():
+                if value is None:
+                    target.pop(key, None)
+                else:
+                    target[key] = merge(target.get(key), value)
+            return target
+        compression = patch["bundle"]["linux"]["rpm"]["compression"]
+        for source in ({"type": "gzip", "level": 1}, {"type": "none"}):
+            self.assertEqual(merge(source, compression), {"type": "none"})
         self.assertNotIn("tauri build", rpm, "RPM must reuse the DEB/AppImage build outputs")
         self.assertIn("continue-on-error: true", rpm.split("\n      - ", 1)[0])
         self.assertIn('./scripts/verify-linux-package.sh "$OUT"', rpm)
