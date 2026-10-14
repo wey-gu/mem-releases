@@ -31,6 +31,11 @@ on:
         description: "GPU image variant: cuda or vulkan."
         required: true
         type: string
+      move_floating:
+        description: "Also move the floating :<X.Y>-<variant> tag (pass push_latest; false for an older out-of-band GA)."
+        required: false
+        type: boolean
+        default: false
       source:
         description: "retag (default): re-tag the rc-built :<rc>-<variant> image. build: rebuild from the rc source ref."
         required: false
@@ -46,6 +51,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write   # cosign keyless signing for the source=build fallback
 
 jobs:
   retag:
@@ -58,7 +64,11 @@ jobs:
       GA: ${{ inputs.ga_tag }}
       VARIANT: ${{ inputs.variant }}
       SOURCE: ${{ inputs.source }}
+      MOVE_FLOATING: ${{ inputs.move_floating }}
+      SIGNER: '^https://github\.com/${{ github.repository }}/\.github/workflows/(release-docker|release-docker-updater|promote-gpu-variant)\.yml@'
     steps:
+      - uses: sigstore/cosign-installer@v3
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -91,11 +101,20 @@ jobs:
             exit 1
           fi
           echo "rc ${SRC} digest: ${RC_DIGEST}"
-          docker buildx imagetools create \
-            -t "${IMAGE}:${GA}-${VARIANT}" \
-            -t "${IMAGE}:${MINOR}-${VARIANT}" \
-            "${IMAGE}@${RC_DIGEST}"
-          for tag in "${GA}-${VARIANT}" "${MINOR}-${VARIANT}"; do
+          if ! cosign verify "${IMAGE}@${RC_DIGEST}" \
+              --certificate-identity-regexp="$SIGNER" \
+              --certificate-oidc-issuer="https://token.actions.githubusercontent.com" >/dev/null; then
+            echo "::error::${SRC} (${RC_DIGEST}) has no valid release signature; refusing to promote."
+            exit 1
+          fi
+          declare -a TAGS=( "${GA}-${VARIANT}" )
+          if [[ "$MOVE_FLOATING" == "true" ]]; then
+            TAGS+=( "${MINOR}-${VARIANT}" )
+          fi
+          declare -a ARGS=()
+          for t in "${TAGS[@]}"; do ARGS+=( -t "${IMAGE}:$t" ); done
+          docker buildx imagetools create "${ARGS[@]}" "${IMAGE}@${RC_DIGEST}"
+          for tag in "${TAGS[@]}"; do
             GA_DIGEST="$(digest_of "${IMAGE}:${tag}")"
             if [[ "$GA_DIGEST" != "$RC_DIGEST" ]]; then
               echo "::error::${IMAGE}:${tag} digest ${GA_DIGEST} != rc digest ${RC_DIGEST}"
@@ -105,9 +124,9 @@ jobs:
           done
           {
             echo "### ${VARIANT} image promoted ${RC} -> ${GA} (re-tag, no rebuild)"
-            echo "- image: ${IMAGE}:${GA}-${VARIANT} and :${MINOR}-${VARIANT} (amd64-only)"
+            echo "- image: ${IMAGE}:${GA}-${VARIANT} (amd64-only); floating :${MINOR}-${VARIANT} moved: ${MOVE_FLOATING}"
             echo "- digest: ${RC_DIGEST} (identical to ${SRC})"
-            echo "- signing: unsigned, matching release-docker GPU jobs"
+            echo "- signing: rc signature verified; inherited by digest"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify image manifest
@@ -124,6 +143,7 @@ jobs:
       RC: ${{ inputs.rc_tag }}
       GA: ${{ inputs.ga_tag }}
       VARIANT: ${{ inputs.variant }}
+      MOVE_FLOATING: ${{ inputs.move_floating }}
     steps:
       - name: Validate variant
         run: |
@@ -189,9 +209,14 @@ jobs:
         run: |
           set -euo pipefail
           MINOR="${GA%.*}"
-          echo "value=${IMAGE}:${GA}-${VARIANT},${IMAGE}:${MINOR}-${VARIANT}" >> "$GITHUB_OUTPUT"
+          if [[ "$MOVE_FLOATING" == "true" ]]; then
+            echo "value=${IMAGE}:${GA}-${VARIANT},${IMAGE}:${MINOR}-${VARIANT}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${IMAGE}:${GA}-${VARIANT}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build and push :<ga>-${{ inputs.variant }}
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -209,6 +234,15 @@ jobs:
           cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:${{ inputs.variant }}-amd64
           cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:${{ inputs.variant }}-amd64,mode=max
 
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign rebuilt GPU image (keyless via OIDC)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
       - name: Verify image manifest
         run: docker buildx imagetools inspect "${IMAGE}:${GA}-${VARIANT}"
 
@@ -218,5 +252,5 @@ jobs:
             echo "### ${VARIANT} image REBUILT for ${GA} (source=build fallback)"
             echo "- source: nowledge-co/mem at v${RC}"
             echo "- image: ${IMAGE}:${GA}-${VARIANT} (amd64-only)"
-            echo "- signing: unsigned, matching release-docker GPU jobs"
+            echo "- signing: cosign keyless (this rebuild)"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -292,18 +292,18 @@ jobs:
         id: tags
         env:
           V: ${{ needs.meta.outputs.version }}
-          IS_PRERELEASE: ${{ needs.meta.outputs.is_prerelease }}
+          PUSH_LATEST: ${{ needs.meta.outputs.push_latest }}
         run: |
           set -euo pipefail
           # GPU images are never :latest (amd64-only + GPU is opt-in). A
           # pre-release version already carries a dash (0.10.0-rc1 ->
-          # 0.10.0-rc1-cuda) and gets ONLY that exact tag: `${V%.*}` of an rc
-          # is the GA minor line (0.10), which an rc must never move.
-          if [[ "$IS_PRERELEASE" == "true" ]]; then
-            echo "list=${IMAGE}:${V}-${VARIANT}" >> "$GITHUB_OUTPUT"
-          else
+          # 0.10.0-rc1-cuda). Only a GA allowed to move :latest moves the floating
+          # :<X.Y>-<variant>; `${V%.*}` of an rc is the GA minor line (0.10).
+          if [[ "$PUSH_LATEST" == "true" ]]; then
             MINOR="${V%.*}"
             echo "list=${IMAGE}:${V}-${VARIANT},${IMAGE}:${MINOR}-${VARIANT}" >> "$GITHUB_OUTPUT"
+          else
+            echo "list=${IMAGE}:${V}-${VARIANT}" >> "$GITHUB_OUTPUT"
           fi
       - id: build
         uses: docker/build-push-action@v6
@@ -322,6 +322,17 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:cuda-amd64
           cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:cuda-amd64,mode=max
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign GPU image (keyless via OIDC)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Sign the digest at build time, like the CPU manifest. GA promotion
+          # re-tags this same digest and verifies this signature first.
+          cosign sign --yes "${IMAGE}@${DIGEST}"
 
   build-vulkan:
     needs: meta
@@ -381,6 +392,17 @@ jobs:
           cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:vulkan-amd64
           cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:vulkan-amd64,mode=max
 
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign GPU image (keyless via OIDC)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Sign the digest at build time, like the CPU manifest. GA promotion
+          # re-tags this same digest and verifies this signature first.
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
   publish:
     needs: [meta, build-amd64, build-arm64]
     runs-on: ubuntu-latest
@@ -399,12 +421,18 @@ jobs:
           set -euo pipefail
           V="${{ needs.meta.outputs.version }}"
           MINOR="${V%.*}"
+          # Floating tags (:latest, :X.Y) are GA pointers. Only a GA that is
+          # allowed to move :latest moves them; an rc (push_latest forced
+          # false in meta) or an older out-of-band GA pushes only its own
+          # immutable :<version>. `${V%.*}` of 0.10.80-rc1 is 0.10, so without
+          # this gate every rc moved :0.10.
           {
             echo "primary=${IMAGE}:${V}"
-            echo "minor=${IMAGE}:${MINOR}"
             if [[ "${{ needs.meta.outputs.push_latest }}" == "true" ]]; then
+              echo "minor=${IMAGE}:${MINOR}"
               echo "latest=${IMAGE}:latest"
             else
+              echo "minor="
               echo "latest="
             fi
           } >> "$GITHUB_OUTPUT"
@@ -416,8 +444,10 @@ jobs:
           ARM="${IMAGE}@${{ needs.build-arm64.outputs.digest }}"
           declare -a TAGS=(
             "${{ steps.tags.outputs.primary }}"
-            "${{ steps.tags.outputs.minor }}"
           )
+          if [[ -n "${{ steps.tags.outputs.minor }}" ]]; then
+            TAGS+=( "${{ steps.tags.outputs.minor }}" )
+          fi
           if [[ -n "${{ steps.tags.outputs.latest }}" ]]; then
             TAGS+=( "${{ steps.tags.outputs.latest }}" )
           fi
