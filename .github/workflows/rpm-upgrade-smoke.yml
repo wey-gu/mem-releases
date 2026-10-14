@@ -65,7 +65,7 @@ jobs:
           sparse-checkout: nowledge-graph
 
       - name: Install rpm tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq rpm cpio jq libarchive-tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq rpm cpio jq libarchive-tools libayatana-appindicator3-dev
 
       - uses: actions/setup-node@v4
         with:
