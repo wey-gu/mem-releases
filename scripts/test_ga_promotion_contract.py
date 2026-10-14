@@ -253,8 +253,13 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn("        shell: bash\n", step)
         script = "\n".join(line[10:] for line in step.split("        run: |\n", 1)[1].splitlines())
         self.assertIn(f"- &{anchor}\n{step}", windows)
+        # Path dependencies must exist before any target-cache restore (if the
+        # job still has one) and before Cargo builds the backend.
+        if "uses: Swatinem/rust-cache@v2" in windows:
+            self.assertLess(windows.index(f"&{anchor}"),
+                            windows.index("uses: Swatinem/rust-cache@v2"))
         self.assertLess(windows.index(f"&{anchor}"),
-                        windows.index("uses: Swatinem/rust-cache@v2"))
+                        windows.index("name: Build Rust backend bundle (Windows)"))
         self.assertLess(windows.index("Initialize Rust path dependencies before cache restore"),
                         windows.index("Resolve or repair the PDFium runtime cache"))
         vulkan = workflow.split("\n  build-windows-vulkan:\n", 1)[1].split("\n  build-linux-vulkan:\n", 1)[0]
