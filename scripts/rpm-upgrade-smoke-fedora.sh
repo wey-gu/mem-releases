@@ -9,7 +9,8 @@ links() {
   done
   echo "$state"
 }
-size() { rpm -q --qf '%{SIZE}' "Nowledge Mem" 2>/dev/null || rpm -qa --qf '%{NAME} %{SIZE}\n' | grep -i nowledge; }
+PKG=nowledge-mem
+size() { rpm -q --qf '%{VERSION} %{SIZE}' "$PKG"; }
 check() { if eval "$2"; then echo "SUMMARY ok:   $1"; else echo "SUMMARY FAIL: $1"; fail=1; fi; }
 
 # Desktop Fedora ships procps-ng (pgrep); the container image does not, and the
@@ -32,7 +33,8 @@ big="$(find /usr/lib/nowledge-mem -type f -size +1M 2>/dev/null | wc -l)"
 check "no full binary copy under /usr/lib/nowledge-mem (found $big)" '[[ "$big" == 0 ]]'
 check "nmem on PATH runs" 'nmem --version >/dev/null 2>&1'
 
-dnf -y -q remove "Nowledge Mem" >/dev/null || rpm -e "$(rpm -qa | grep -i nowledge | head -1)"
+dnf -y -q remove "$PKG" >/dev/null
+check "package removed" '! rpm -q "$PKG" >/dev/null 2>&1'
 L="$(links)"
 check "CLI links removed on uninstall (got: $L)" '[[ "$L" == "nmem=missing browse-now=missing " ]]'
 exit $fail
