@@ -24,6 +24,14 @@ on:
         description: "Source tag to build (e.g. 0.8.4 or 0.8.4-ci1). Bare semver triggers publish; anything with a `-` suffix is a dry-run."
         required: true
         type: string
+      server_codegen_experiment:
+        description: "W4: only isolated arm64 server codegen; never publish"
+        type: boolean
+        default: false
+      server_codegen_source_sha:
+        description: "Frozen private source SHA for W4"
+        type: string
+        default: "23bf078fb0c2f60e3edc003a9d4b60c317bbeb87"
       publish:
         description: "Run publish job (R2 + APT + GH release). Disable for build-only smoke tests."
         required: false
@@ -86,6 +94,7 @@ jobs:
   # out the private repo at the right tag.
   # -----------------------------------------------------------------------
   meta:
+    if: ${{ inputs.server_codegen_experiment != true }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.resolve.outputs.version }}
@@ -2153,3 +2162,86 @@ jobs:
           echo "- R2 prefix:  app/$VERSION/"                     >> "$GITHUB_STEP_SUMMARY"
           echo "- GH release: v$VERSION (draft, on this repo)"   >> "$GITHUB_STEP_SUMMARY"
           echo "- Updater:    latest/update delivery verified"    >> "$GITHUB_STEP_SUMMARY"
+
+  server-codegen-experiment:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.server_codegen_experiment == true }}
+    runs-on: macos-15
+    timeout-minutes: 240
+    env:
+      SOURCE_SHA: ${{ inputs.server_codegen_source_sha }}
+      RUSTUP_TOOLCHAIN: "1.98.1"
+    steps:
+      - name: Validate isolated experiment boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$(uname -m)" == arm64 ]]
+          sysctl hw.memsize hw.ncpu
+      - uses: actions/checkout@v4
+        with:
+          path: release-tools
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+          submodules: false
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: aarch64-apple-darwin
+      - name: Initialize exact dependencies
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          scripts/init-release-rust-submodules.sh --init-desktop-https
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/nmem-pdfium-cache" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          workspaces: source/nmem-rs
+          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
+          key: macos-aarch64-v5-pdfium
+          save-if: false
+      - run: brew install cmake ninja protobuf
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Configure existing compiler cache
+        shell: bash
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            echo "SCCACHE_GHA_ENABLED=false"
+            echo "SCCACHE_BUCKET=nowledge-mem-sccache"
+            echo "SCCACHE_REGION=auto"
+            echo "SCCACHE_ENDPOINT=https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+            echo "AWS_ACCESS_KEY_ID=${R2_KEY}"
+            echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET}"
+          } >> "$GITHUB_ENV"
+      - name: Measure codegen 1, 4 and 16
+        run: python release-tools/scripts/run-server-codegen-experiment.py --repo-root source --results "$RUNNER_TEMP/server-codegen-results"
+      - name: Upload measurements only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-codegen-measurements
+          path: |
+            ${{ runner.temp }}/server-codegen-results/inputs.json
+            ${{ runner.temp }}/server-codegen-results/samples.jsonl
+            ${{ runner.temp }}/server-codegen-results/builds.json
+            ${{ runner.temp }}/server-codegen-results/summary.json
+          if-no-files-found: warn
+          retention-days: 14

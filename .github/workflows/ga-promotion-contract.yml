@@ -12,6 +12,9 @@ on:
       - .github/workflows/promote-apt-to-ga.yml
       - .github/workflows/open-apt-pause-route.yml
       - .github/workflows/ga-promotion-contract.yml
+      - scripts/test_server_codegen_experiment.py
+      - scripts/run-server-codegen-experiment.py
+      - scripts/server-codegen-wrapper.py
       - scripts/test_ga_promotion_contract.py
       - scripts/verify-ga-delivery.mjs
       - scripts/test_verify_ga_delivery.mjs
@@ -54,6 +57,9 @@ on:
       - .github/workflows/promote-apt-to-ga.yml
       - .github/workflows/open-apt-pause-route.yml
       - .github/workflows/ga-promotion-contract.yml
+      - scripts/test_server_codegen_experiment.py
+      - scripts/run-server-codegen-experiment.py
+      - scripts/server-codegen-wrapper.py
       - scripts/test_ga_promotion_contract.py
       - scripts/verify-ga-delivery.mjs
       - scripts/test_verify_ga_delivery.mjs
@@ -99,6 +105,8 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Check GA promotion boundary
         run: python3 -m unittest discover -s scripts -p test_ga_promotion_contract.py
+      - name: Check isolated server codegen experiment
+        run: python3 -m unittest discover -s scripts -p test_server_codegen_experiment.py
       - name: Check exact GA delivery gate
         run: node --test scripts/test_verify_ga_delivery.mjs scripts/test_verify_upgrade_pause.mjs scripts/test_open_apt_pause_route.mjs scripts/test_desktop_update_operator.mjs scripts/test_remove_desktop_pause_routes.mjs scripts/test_verify_controlled_desktop_update.mjs
       - name: Check draft Release asset reconciliation
