@@ -14,13 +14,15 @@
 #     signature was produced during the rc release-docker workflow run.
 #
 #   Docker (GPU):
-#     - BUILDS nowledgelabs/mem:<ga>-cuda and :<ga>-vulkan (amd64-only) from
-#       the SAME rc source ref the CPU images were validated against. GPU
-#       images can't be re-tagged like the CPU manifest because release-docker
-#       skips its GPU jobs on rc tags (gated on push_latest), so no
-#       :<rc>-cuda / :<rc>-vulkan exists to promote. These feature builds are
-#       unsigned, matching release-docker's GPU jobs (only the CPU manifest is
-#       cosign-signed in either path).
+#     - re-tags nowledgelabs/mem:<rc>-cuda / :<rc>-vulkan (amd64-only, built
+#       by release-docker during the rc run) → :<ga>-<variant> and
+#       :<X.Y>-<variant>, and verifies the GA digest equals the rc digest.
+#       Never :latest. GPU images are unsigned, matching release-docker's GPU
+#       jobs (only the CPU manifest is cosign-signed).
+#     - If the rc GPU image is missing (an rc cut before release-docker built
+#       GPU images on rc tags), the variant FAILS rather than silently
+#       rebuilding. Re-run with gpu_source=build (and only GPU selected) to
+#       rebuild from the rc source ref as an explicit fallback.
 #
 #   Desktop:
 #     - downloads .dmg/.exe/.deb/.AppImage from the rc GH Release
@@ -83,17 +85,24 @@ on:
         type: boolean
         default: true
       promote_gpu:
-        description: "Compatibility switch: build both CUDA and Vulkan images from the rc source ref"
+        description: "Promote both CUDA and Vulkan images (see gpu_source)"
         type: boolean
         default: true
       promote_cuda:
-        description: "Build & publish only the CUDA image when promote_gpu is disabled"
+        description: "Promote only the CUDA image when promote_gpu is disabled"
         type: boolean
         default: false
       promote_vulkan:
-        description: "Build & publish only the Vulkan image when promote_gpu is disabled"
+        description: "Promote only the Vulkan image when promote_gpu is disabled"
         type: boolean
         default: false
+      gpu_source:
+        description: "retag: re-tag the rc-built :<rc>-<variant> images (fails if absent). build: explicit fallback that rebuilds from the rc source ref (~1-2h)"
+        type: choice
+        options:
+          - retag
+          - build
+        default: retag
       promote_desktop:
         description: "Promote core desktop bundles (DMG/EXE/deb/AppImage)"
         type: boolean
@@ -308,11 +317,10 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # RC tags do not contain GPU images, so GA still builds each variant from
-  # the exact validated RC source. CUDA and Vulkan are separate reusable
+  # release-docker builds :<rc>-cuda / :<rc>-vulkan during the rc run, so GA
+  # re-tags them (gpu_source=retag). CUDA and Vulkan are separate reusable
   # workflow calls: neither waits for the other, and a failed variant can be
-  # retried without rebuilding the successful one. `promote_gpu` remains the
-  # backwards-compatible switch for operators that want both variants.
+  # retried alone. `promote_gpu` remains the switch for both variants.
   promote-cuda:
     needs: validate
     if: ${{ inputs.promote_gpu || inputs.promote_cuda }}
@@ -321,6 +329,7 @@ jobs:
       rc_tag: ${{ needs.validate.outputs.rc_tag }}
       ga_tag: ${{ needs.validate.outputs.ga_tag }}
       variant: cuda
+      source: ${{ inputs.gpu_source }}
     secrets: inherit
 
   promote-vulkan:
@@ -331,6 +340,7 @@ jobs:
       rc_tag: ${{ needs.validate.outputs.rc_tag }}
       ga_tag: ${{ needs.validate.outputs.ga_tag }}
       variant: vulkan
+      source: ${{ inputs.gpu_source }}
     secrets: inherit
 
   promote-desktop:

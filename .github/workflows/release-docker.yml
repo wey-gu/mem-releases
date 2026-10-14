@@ -65,6 +65,7 @@ jobs:
       source_ref: ${{ steps.v.outputs.source_ref }}
       source_sha: ${{ steps.sha.outputs.source_sha }}
       push_latest: ${{ steps.v.outputs.push_latest }}
+      is_prerelease: ${{ steps.v.outputs.is_prerelease }}
     steps:
       - id: v
         run: |
@@ -83,12 +84,17 @@ jobs:
             exit 1
           fi
           # Pre-release tags must NOT mark :latest.
+          IS_PRERELEASE="false"
           if [[ "$VERSION" == *-* || "$VERSION" == *.dev* ]]; then
             PUSH_LATEST="false"
+            IS_PRERELEASE="true"
           fi
-          echo "version=$VERSION"        >> "$GITHUB_OUTPUT"
-          echo "source_ref=$SOURCE_REF"  >> "$GITHUB_OUTPUT"
-          echo "push_latest=$PUSH_LATEST" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$VERSION"
+            echo "source_ref=$SOURCE_REF"
+            echo "push_latest=$PUSH_LATEST"
+            echo "is_prerelease=$IS_PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
 
       # Resolve the source commit once, so both arch builds bake the same
       # build-provenance sha into nmem-server (the build context has no .git).
@@ -240,13 +246,17 @@ jobs:
   # its `publish` manifest job, so it never blocks or alters the CPU release. The
   # binary's runtime auto-detects the GPU and falls back to CPU, so the image is
   # usable without --gpus, just slower.
+  #
+  # Runs on rc tags too, in parallel with the desktop build, so GA promotion
+  # re-tags `:<rc>-cuda` instead of rebuilding it (promote-gpu-variant.yml).
+  # A pre-release pushes ONLY the exact rc-scoped tag `:<rc>-cuda`; the
+  # floating `:<X.Y>-cuda` tag moves only for a clean GA version. GPU images
+  # are never `:latest`.
   build-cuda:
     needs: meta
-    # Build the ~3GB GPU image only on GA (push_latest=true → non-prerelease tag)
-    # or a manual dispatch — NOT on every rc. rc-stage GPU verification is done
-    # locally on a GPU host; the published `:cuda` tag is reserved for GA/on-demand.
-    if: ${{ needs.meta.outputs.push_latest == 'true' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
+    env:
+      VARIANT: cuda
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -277,14 +287,24 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - id: tags
+      - &gpu_tags
+        name: Resolve GPU image tags
+        id: tags
+        env:
+          V: ${{ needs.meta.outputs.version }}
+          IS_PRERELEASE: ${{ needs.meta.outputs.is_prerelease }}
         run: |
           set -euo pipefail
-          V="${{ needs.meta.outputs.version }}"
-          MINOR="${V%.*}"
-          # CUDA image is never :latest (no arm64 + GPU is opt-in). A pre-release
-          # version already carries a dash (0.10.0-rc1 -> 0.10.0-rc1-cuda).
-          echo "list=${IMAGE}:${V}-cuda,${IMAGE}:${MINOR}-cuda" >> "$GITHUB_OUTPUT"
+          # GPU images are never :latest (amd64-only + GPU is opt-in). A
+          # pre-release version already carries a dash (0.10.0-rc1 ->
+          # 0.10.0-rc1-cuda) and gets ONLY that exact tag: `${V%.*}` of an rc
+          # is the GA minor line (0.10), which an rc must never move.
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            echo "list=${IMAGE}:${V}-${VARIANT}" >> "$GITHUB_OUTPUT"
+          else
+            MINOR="${V%.*}"
+            echo "list=${IMAGE}:${V}-${VARIANT},${IMAGE}:${MINOR}-${VARIANT}" >> "$GITHUB_OUTPUT"
+          fi
       - id: build
         uses: docker/build-push-action@v6
         with:
@@ -305,11 +325,13 @@ jobs:
 
   build-vulkan:
     needs: meta
-    # Vulkan GPU image (AMD/Intel via Mesa, NVIDIA via the Vulkan ICD). Same gate
-    # as :cuda — GA or manual dispatch only, NOT every rc. Independent of the CPU
-    # publish/manifest job (separate :<ver>-vulkan tag, never folded into :latest).
-    if: ${{ needs.meta.outputs.push_latest == 'true' || github.event_name == 'workflow_dispatch' }}
+    # Vulkan GPU image (AMD/Intel via Mesa, NVIDIA via the Vulkan ICD). Same
+    # schedule and tag policy as :cuda — built on rc tags so GA promotion is a
+    # re-tag. Independent of the CPU publish/manifest job (separate
+    # :<ver>-vulkan tag, never folded into :latest).
     runs-on: ubuntu-latest
+    env:
+      VARIANT: vulkan
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -340,14 +362,7 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - id: tags
-        run: |
-          set -euo pipefail
-          V="${{ needs.meta.outputs.version }}"
-          MINOR="${V%.*}"
-          # Vulkan image is never :latest (amd64-only + GPU is opt-in). A
-          # pre-release version already carries a dash (0.10.0-rc1 -> -rc1-vulkan).
-          echo "list=${IMAGE}:${V}-vulkan,${IMAGE}:${MINOR}-vulkan" >> "$GITHUB_OUTPUT"
+      - *gpu_tags
       - id: build
         uses: docker/build-push-action@v6
         with:

@@ -1,6 +1,18 @@
-# Build and publish one GA GPU image from the already-validated RC source.
+# Promote one GA GPU image from the already-validated RC.
 # The caller deliberately invokes this workflow once per variant so CUDA and
 # Vulkan have independent scheduling, status, retries, and failure domains.
+#
+# source=retag (default): release-docker.yml builds `:<rc>-<variant>` during
+# the rc run, in parallel with the desktop build. Promotion re-tags those
+# exact bits to `:<ga>-<variant>` and `:<X.Y>-<variant>` and verifies the GA
+# digest equals the rc digest — the same contract as the CPU manifest. If the
+# rc image does not exist (an rc cut before release-docker built GPU images
+# on rc tags, or a failed rc GPU job), this job FAILS; it never falls back
+# to a rebuild silently, because a silent rebuild publishes bits that were
+# never validated and puts a ~2h build back on the GA critical path.
+#
+# source=build: explicit fallback that rebuilds the variant from the rc
+# source ref at GA time (the pre-rc-build behavior). Choose it deliberately.
 
 name: promote-gpu-variant
 
@@ -8,7 +20,7 @@ on:
   workflow_call:
     inputs:
       rc_tag:
-        description: "RC version whose source ref is used for the build."
+        description: "RC version whose image (retag) or source ref (build) is promoted."
         required: true
         type: string
       ga_tag:
@@ -19,6 +31,11 @@ on:
         description: "GPU image variant: cuda or vulkan."
         required: true
         type: string
+      source:
+        description: "retag (default): re-tag the rc-built :<rc>-<variant> image. build: rebuild from the rc source ref."
+        required: false
+        type: string
+        default: retag
     secrets:
       MEM_REPO_TOKEN:
         required: true
@@ -31,8 +48,74 @@ permissions:
   contents: read
 
 jobs:
-  promote:
-    name: promote-${{ inputs.variant }}
+  retag:
+    name: retag-${{ inputs.variant }}
+    if: ${{ inputs.source != 'build' }}
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: docker.io/nowledgelabs/mem
+      RC: ${{ inputs.rc_tag }}
+      GA: ${{ inputs.ga_tag }}
+      VARIANT: ${{ inputs.variant }}
+      SOURCE: ${{ inputs.source }}
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Re-tag rc GPU image to GA
+        run: |
+          set -euo pipefail
+          case "$VARIANT" in
+            cuda|vulkan) ;;
+            *)
+              echo "::error::Unsupported GPU variant: $VARIANT"
+              exit 1
+              ;;
+          esac
+          if [[ "$SOURCE" != "retag" ]]; then
+            echo "::error::Unsupported GPU promotion source: $SOURCE (expected retag or build)"
+            exit 1
+          fi
+          SRC="${IMAGE}:${RC}-${VARIANT}"
+          MINOR="${GA%.*}"
+          digest_of() {
+            docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' \
+              | python3 -c 'import json,sys;print(json.load(sys.stdin)["digest"])'
+          }
+          if ! RC_DIGEST="$(digest_of "$SRC")" || [[ -z "$RC_DIGEST" ]]; then
+            echo "::error::${SRC} does not exist. release-docker builds GPU images on rc tags; this rc has none (its release-docker build-${VARIANT} job is still running or failed, or the rc predates rc GPU builds). Wait for or re-run that rc job, or re-run promote-rc-to-ga with gpu_source=build and only this variant selected."
+            exit 1
+          fi
+          echo "rc ${SRC} digest: ${RC_DIGEST}"
+          docker buildx imagetools create \
+            -t "${IMAGE}:${GA}-${VARIANT}" \
+            -t "${IMAGE}:${MINOR}-${VARIANT}" \
+            "${IMAGE}@${RC_DIGEST}"
+          for tag in "${GA}-${VARIANT}" "${MINOR}-${VARIANT}"; do
+            GA_DIGEST="$(digest_of "${IMAGE}:${tag}")"
+            if [[ "$GA_DIGEST" != "$RC_DIGEST" ]]; then
+              echo "::error::${IMAGE}:${tag} digest ${GA_DIGEST} != rc digest ${RC_DIGEST}"
+              exit 1
+            fi
+            echo "verified ${IMAGE}:${tag} -> ${GA_DIGEST}"
+          done
+          {
+            echo "### ${VARIANT} image promoted ${RC} -> ${GA} (re-tag, no rebuild)"
+            echo "- image: ${IMAGE}:${GA}-${VARIANT} and :${MINOR}-${VARIANT} (amd64-only)"
+            echo "- digest: ${RC_DIGEST} (identical to ${SRC})"
+            echo "- signing: unsigned, matching release-docker GPU jobs"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify image manifest
+        run: docker buildx imagetools inspect "${IMAGE}:${GA}-${VARIANT}"
+
+  build:
+    name: build-${{ inputs.variant }}
+    if: ${{ inputs.source == 'build' }}
     runs-on: ubuntu-latest
     env:
       IMAGE: docker.io/nowledgelabs/mem
@@ -132,7 +215,7 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "### ${VARIANT} image built for ${GA}"
+            echo "### ${VARIANT} image REBUILT for ${GA} (source=build fallback)"
             echo "- source: nowledge-co/mem at v${RC}"
             echo "- image: ${IMAGE}:${GA}-${VARIANT} (amd64-only)"
             echo "- signing: unsigned, matching release-docker GPU jobs"
