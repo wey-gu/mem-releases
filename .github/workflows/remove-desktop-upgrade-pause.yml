@@ -36,6 +36,33 @@ on:
         description: "Fresh UUID v4 for the audited route removal"
         required: true
         type: string
+  workflow_call:
+    inputs:
+      ga_tag:
+        required: true
+        type: string
+      previous_version:
+        required: true
+        type: string
+      paused_version:
+        required: false
+        type: string
+        default: ""
+      operator_name:
+        required: true
+        type: string
+      authority_publish_run_id:
+        required: true
+        type: string
+      authority_publish_operation_id:
+        required: true
+        type: string
+      authority_revision:
+        required: true
+        type: string
+      route_operation_id:
+        required: true
+        type: string
 
 concurrency:
   group: desktop-upgrade-pause-routes

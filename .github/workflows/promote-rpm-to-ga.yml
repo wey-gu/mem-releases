@@ -13,6 +13,15 @@ on:
         description: "Existing GA version to receive the RPM (e.g. 0.10.92)"
         required: true
         type: string
+  # promote-rc-to-ga runs this as the second half of its Desktop stage.
+  workflow_call:
+    inputs:
+      rc_tag:
+        required: true
+        type: string
+      ga_tag:
+        required: true
+        type: string
 
 concurrency:
   group: promote-rpm-${{ inputs.ga_tag }}

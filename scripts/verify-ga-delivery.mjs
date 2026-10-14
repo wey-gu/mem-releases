@@ -59,7 +59,7 @@ function browserRequest(fetcher) {
   });
 }
 
-function parseAptVersion(packagesText) {
+export function parseAptVersion(packagesText) {
   const stanzas = packagesText.split(/\n\s*\n/);
   const packageStanza = stanzas.find((stanza) => /^Package:\s+nowledge-mem\s*$/m.test(stanza));
   requireCondition(packageStanza, 'APT Packages: nowledge-mem entry missing');

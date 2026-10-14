@@ -1,74 +1,53 @@
-# Promote a release candidate to GA without rebuilding.
+# Promote a smoke-tested release candidate to GA in one resumable dispatch.
 #
-# What this does
-# --------------
-# Given a tested RC (e.g. v0.8.4-rc7) on Docker Hub + the rc GH Release,
-# this workflow publishes the same exact bits under the GA tag
-# (e.g. v0.8.4) across the core distribution surfaces:
+# Inputs: rc_tag (e.g. 0.10.102-rc1) and ga_tag (e.g. 0.10.102). Everything
+# else defaults to the standard release. Dispatching the same pair again is
+# the resume path: the plan reads live state first and every stage either
+# runs, or verifies that its exact expected result is already live and skips.
+# Nothing already public is overwritten; any state that is neither absent nor
+# exactly the RC's bytes/SHA/digest stops the run before the first mutation.
 #
-#   Docker (CPU):
-#     - verifies the rc digest's cosign signature, then re-tags
-#       nowledgelabs/mem:<rc> → :<ga> (and :<X.Y> + :latest when push_latest)
-#     - same for nowledgelabs/mem-updater
-#     Floating tags (:latest, :X.Y, :X.Y-<variant>) move ONLY here (or in a
-#     direct GA build allowed to move :latest); an rc never moves them.
-#     The cosign signatures are bound to the manifest digest, so verification
-#     by `cosign verify nowledgelabs/mem:<ga>` continues to succeed — the
-#     signature was produced during the rc release-docker workflow run.
+# Stages, in order:
 #
-#   Docker (GPU):
-#     - re-tags nowledgelabs/mem:<rc>-cuda / :<rc>-vulkan (amd64-only, built
-#       by release-docker during the rc run) → :<ga>-<variant> (plus the
-#       floating :<X.Y>-<variant> when push_latest=true), after verifying the
-#       rc digest's cosign signature, and checks the GA digest equals the rc
-#       digest. Never :latest. GPU images are signed at build time, like CPU.
-#     - If the rc GPU image is missing (an rc cut before release-docker built
-#       GPU images on rc tags), the variant FAILS rather than silently
-#       rebuilding. Re-run with gpu_source=build (and only GPU selected) to
-#       rebuild from the rc source ref as an explicit fallback.
+#   0. preflight + plan (read-only)
+#      RC/GA Releases, R2 objects (SHA-256), APT, pause routes, the Desktop
+#      update authority status, source tags, and every required credential.
+#      Writes ga-promotion-<ga>-plan-<attempt> (plan, persisted UUIDs, and
+#      publication timestamp) and a stage table to the run summary.
+#   1. Docker CPU (mem, mem-updater) and GPU (cuda, vulkan): verify the rc
+#      digest's cosign signature, re-tag that exact digest, move :X.Y/:latest
+#      only with push_latest. An existing :<ga> at another digest is refused.
+#   2. Desktop: authenticate the six RC packages by SHA-256, upload only the
+#      missing R2 objects, publish APT (normal mode), reconcile the draft GA
+#      Release, then attach the RPM (promote-rpm-to-ga.yml, reused).
+#   3. Emergency pause only (desktop_upgrade_pause_active=true; never the
+#      default): open the APT pause route and publish APT
+#      (open-apt-pause-route.yml, promote-apt-to-ga.yml).
+#   4. Desktop update authority (desktop-update-control.yml, reused), operated
+#      as the dispatching GitHub user: a fresh status read, recover only if
+#      stopped, prepare, then an automated verify-before-expose check (the
+#      candidate names the RC-authenticated bytes and source commit; exact
+#      direct downloads and APT; Docker signatures verified), then publish.
+#      Each transition passes the mode/revision observed by the previous one.
+#      There is no human confirmation inside the run.
+#   5. Publish the GA Release (draft=false), then a SEPARATE make_latest PATCH
+#      (a combined PATCH silently ignores make_latest), and read back
+#      releases/latest. The body links the public Changelog.
+#   6. Emergency pause only: remove the Desktop pause routes with the exact
+#      authority publish receipt (remove-desktop-upgrade-pause.yml, reused).
+#   7. Source tags v<ga> on nowledge-co/mem and nowledge-co/community at the
+#      RC-recorded commits, then cli-publish-v<ga> LAST (fires PyPI), with a
+#      per-run GitHub App token (RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY);
+#      without those secrets the stage is skipped loudly.
+#   8. Mobile: dispatch release-mobile.yml with publish and distribute on
+#      (mobile=false opts out) and report its TestFlight/APK states.
+#   9. Read-only verification of CDN/R2, updater, Docker (incl. arm64), PyPI,
+#      and mobile. The Changelog date flip stays a human step behind the
+#      production website gate; the summary names the exact date to use.
 #
-#   Desktop:
-#     - downloads .dmg/.exe/.deb/.AppImage from the rc GH Release
-#     - renames RC suffix out of every filename (Nowledge Mem_0.8.4-rc7_… → _0.8.4_…)
-#     - uploads to Cloudflare R2 under the GA path (app/<ga>/)
-#     - updates the APT repo with the GA-named .deb
-#     - verifies the auto-updater's dynamic R2 discovery of <ga>
-#     - creates a draft GH Release v<ga> with the renamed assets
-#
-#   RPM:
-#     - is independently attached by promote-rpm-to-ga.yml after the RC RPM
-#       build has completed; it never delays the core GA promotion.
-#
-# Why this exists
-# ---------------
-# A real safety-first release cuts an RC, smoke-tests it on the click rig,
-# and only then publishes GA. Without this workflow that final step requires
-# either a fresh CI rebuild (different image digests, lottery on transient
-# CI flakes) or hand-running buildx imagetools + a half-dozen R2/APT/GH
-# commands locally. Both are error-prone. This is the boring path.
-#
-# How to use
-# ----------
-#   1. Run the rc release workflow on the source tag (push v<x.y.z>-rcN on
-#      this repo, or manual dispatch). Validate the rc.
-#   2. Manual dispatch this workflow with:
-#        rc_tag = "0.8.4-rc7"   (no leading v)
-#        ga_tag = "0.8.4"
-#        push_latest = true
-#      Both docker and desktop promotion run in parallel.
-#   3. After it succeeds, the draft GH Release v<ga> holds the core desktop
-#      bundles. Once the RC RPM is available, run promote-rpm-to-ga.yml to
-#      attach it. Edit notes + publish manually after the intended assets land.
-#
-# Notes
-# -----
-#   * push_latest controls Docker :latest. Desktop latest is discovered from
-#     R2 independently; uploading a numerically newer GA can expose it before
-#     this workflow finishes, even when push_latest=false.
-#   * The release-publish environment gate fires on the desktop job, not
-#     docker — same policy as release-desktop.yml.
-#   * Docs: docs/implementation/RC_TO_GA_PROMOTE_FLOW.md in the parent
-#     repo (private) explains the operator-visible sequence.
+# The standalone stage workflows remain manual recovery tools.
+# Docs: RELEASE_SOP.md section 6 and nowledge-co/mem
+# docs/implementation/RC_TO_GA_PROMOTE_FLOW.md.
 
 name: promote-rc-to-ga
 
@@ -107,7 +86,7 @@ on:
           - build
         default: retag
       promote_desktop:
-        description: "Promote core desktop bundles (DMG/EXE/deb/AppImage)"
+        description: "Run the Desktop chain (packages, APT, updater, GA Release, tags, mobile)"
         type: boolean
         default: true
       push_latest:
@@ -115,48 +94,73 @@ on:
         type: boolean
         default: true
       allow_newer_desktop_latest:
-        description: "For an older out-of-band GA only: keep newer desktop latest and skip APT; exact GA downloads are still required"
+        description: "For an older out-of-band GA only: keep newer desktop latest and skip APT, the updater, and GitHub latest"
         type: boolean
         default: false
       desktop_upgrade_pause_active:
-        description: "Stage exact GA artifacts while the emergency Desktop upgrade pause remains active; APT is promoted separately"
+        description: "EMERGENCY ONLY: stage behind the live upgrade pause, open APT, publish the updater, then remove the Desktop pause routes"
         type: boolean
         default: false
       paused_stable_version:
-        description: "Previous stable Desktop version used for native pause probes (required with desktop_upgrade_pause_active)"
+        description: "Version blocked by the pause routes (blank = read from the live routes)"
         type: string
         default: ""
+      mobile:
+        description: "Dispatch release-mobile with publish+distribute (TestFlight uploads cannot be recalled)"
+        type: boolean
+        default: true
 
 concurrency:
   group: promote-${{ github.event.inputs.ga_tag }}
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  packages: read
-  id-token: write   # reserved for future signed attestations
+  contents: read
+
+env:
+  CHANGELOG_BASE: https://mem.nowledge.co/changelog
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
+  preflight:
+    runs-on: ubuntu-22.04
+    # The Secrets Store token for the authority is an environment secret.
+    environment: release-publish
+    permissions:
+      # Draft Releases are hidden from read-only GITHUB_TOKENs.
+      contents: write
+      actions: read
     outputs:
       rc_tag: ${{ steps.v.outputs.rc_tag }}
       ga_tag: ${{ steps.v.outputs.ga_tag }}
+    env:
+      RC: ${{ inputs.rc_tag }}
+      GA: ${{ inputs.ga_tag }}
+      REPO: ${{ github.repository }}
+      HAS_RELEASE_APP: ${{ secrets.RELEASE_APP_ID != '' && secrets.RELEASE_APP_PRIVATE_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+
       - id: v
+        name: Validate the promotion inputs
+        env:
+          OLDER_PATCH: ${{ inputs.allow_newer_desktop_latest }}
+          PAUSE: ${{ inputs.desktop_upgrade_pause_active }}
+          PUSH_LATEST: ${{ inputs.push_latest }}
+          PAUSED_STABLE: ${{ inputs.paused_stable_version }}
+          # The authority operator is the person who dispatched the promotion.
+          OPERATOR_NAME: ${{ github.actor }}
         run: |
           set -euo pipefail
-          RC="${{ inputs.rc_tag }}"
-          GA="${{ inputs.ga_tag }}"
-          # GA must be a clean release version. We refuse to publish
-          # pre-release tags through this workflow — that's what the
-          # release-docker / release-desktop workflows are for.
+          # GA must be a clean release version. Pre-release tags are built by
+          # the release-docker / release-desktop workflows, never promoted.
           if ! [[ "$GA" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::GA tag '$GA' must be clean semver (no -rc/-ci/-rpmtest suffix)."
             exit 1
@@ -166,92 +170,343 @@ jobs:
             exit 1
           fi
           # The RC base (everything before the first '-') must match GA.
-          # Catches typos like rc_tag=0.8.4-rc7, ga_tag=0.8.5.
-          RC_BASE="${RC%%-*}"
-          if [[ "$RC_BASE" != "$GA" ]]; then
-            echo "::error::RC base '$RC_BASE' does not match GA '$GA'."
+          if [[ "${RC%%-*}" != "$GA" ]]; then
+            echo "::error::RC base '${RC%%-*}' does not match GA '$GA'."
             exit 1
           fi
-          if [[ "${{ inputs.allow_newer_desktop_latest }}" == "true" && "${{ inputs.push_latest }}" == "true" ]]; then
+          if [[ "$OLDER_PATCH" == "true" && "$PUSH_LATEST" == "true" ]]; then
             echo "::error::Older desktop GA cannot move Docker :latest; set push_latest=false."
             exit 1
           fi
-          if [[ "${{ inputs.allow_newer_desktop_latest }}" == "true" && "${{ inputs.desktop_upgrade_pause_active }}" == "true" ]]; then
+          if [[ "$OLDER_PATCH" == "true" && "$PAUSE" == "true" ]]; then
             echo "::error::The older-patch and emergency-pause promotion modes are mutually exclusive."
             exit 1
           fi
-          if [[ "${{ inputs.desktop_upgrade_pause_active }}" == "true" ]]; then
-            PAUSED_STABLE="${{ inputs.paused_stable_version }}"
-            if ! [[ "$PAUSED_STABLE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$PAUSED_STABLE" == "$GA" ]]; then
-              echo "::error::paused_stable_version must be a clean semver different from GA."
-              exit 1
-            fi
+          if [[ -n "$PAUSED_STABLE" ]] && { ! [[ "$PAUSED_STABLE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$PAUSED_STABLE" == "$GA" ]]; }; then
+            echo "::error::paused_stable_version must be a clean semver different from GA."
+            exit 1
           fi
+          [[ "$OPERATOR_NAME" =~ ^[a-zA-Z0-9_.@-]{1,100}$ ]] || {
+            echo "::error::Dispatching actor '${OPERATOR_NAME}' cannot be a Desktop update operator."
+            exit 1
+          }
           echo "rc_tag=$RC" >> "$GITHUB_OUTPUT"
           echo "ga_tag=$GA" >> "$GITHUB_OUTPUT"
 
-      - name: Pre-flight desktop policy before any promotion job
-        if: ${{ inputs.promote_desktop }}
+      # 0.10.101 stalled for 5h26m on a credential discovered mid-release.
+      # Every credential a later stage needs is checked before stage 1 starts.
+      - name: Require every release credential before any mutation
         env:
-          GA: ${{ steps.v.outputs.ga_tag }}
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-          VERIFY_ALLOW_NEWER_LATEST: ${{ inputs.allow_newer_desktop_latest }}
-          VERIFY_UPGRADE_PAUSE_ACTIVE: ${{ inputs.desktop_upgrade_pause_active }}
-          VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.paused_stable_version }}
-          VERIFY_PLATFORMS: mac,mac-intel,win,linux,linux-deb,linux-appimage
+          DOCKER: ${{ inputs.promote_docker || inputs.promote_gpu || inputs.promote_cuda || inputs.promote_vulkan }}
+          DESKTOP: ${{ inputs.promote_desktop }}
+          OLDER_PATCH: ${{ inputs.allow_newer_desktop_latest }}
+          HAS_DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+          HAS_DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+          HAS_MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN != '' }}
+          HAS_MEM_BACKBONE_PAT: ${{ secrets.MEM_BACKBONE_PAT != '' }}
+          HAS_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+          HAS_CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAS_CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID != '' }}
+          HAS_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID != '' }}
+          HAS_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY != '' }}
+          HAS_R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME != '' }}
+          HAS_GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+          HAS_CLOUDFLARE_SECRETS_STORE_API_TOKEN: ${{ secrets.CLOUDFLARE_SECRETS_STORE_API_TOKEN != '' }}
+          HAS_RELEASE_APP: ${{ secrets.RELEASE_APP_ID != '' && secrets.RELEASE_APP_PRIVATE_KEY != '' }}
         run: |
           set -euo pipefail
-          if [[ "$VERIFY_UPGRADE_PAUSE_ACTIVE" == "true" ]]; then
-            node scripts/verify-upgrade-pause.mjs
-            exit 0
+          missing=()
+          need() { local flag="HAS_$1"; [[ "${!flag}" == "true" ]] || missing+=("$1"); }
+          if [[ "$DOCKER" == "true" ]]; then need DOCKERHUB_USERNAME; need DOCKERHUB_TOKEN; need MEM_REPO_TOKEN; fi
+          if [[ "$DESKTOP" == "true" ]]; then
+            for name in MEM_REPO_TOKEN MEM_BACKBONE_PAT CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN \
+                        CLOUDFLARE_ZONE_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET_NAME; do
+              need "$name"
+            done
+            if [[ "$OLDER_PATCH" != "true" ]]; then
+              need GPG_PRIVATE_KEY
+              # The ordinary Cloudflare token cannot bind the Secrets Store.
+              need CLOUDFLARE_SECRETS_STORE_API_TOKEN
+            fi
           fi
-          if [[ "$VERIFY_ALLOW_NEWER_LATEST" != "true" && -z "$GPG_PRIVATE_KEY" ]]; then
-            echo "::error::GPG_PRIVATE_KEY is required for core GA APT publication."
+          if [[ "${#missing[@]}" -gt 0 ]]; then
+            for name in "${missing[@]}"; do echo "::error::Missing release credential: ${name}"; done
             exit 1
           fi
-          VERIFY_RELEASE_VERSION="$GA" node scripts/verify-ga-delivery.mjs --preflight
+          if [[ "$DESKTOP" == "true" && "$HAS_RELEASE_APP" != "true" ]]; then
+            echo "::warning::RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY are not set: source tags (v${GA}, cli-publish-v${GA}), PyPI and mobile will be skipped."
+            echo "- **Release GitHub App missing**: source tags, PyPI and mobile will be skipped; install the release App (Contents: read & write) on nowledge-co/mem and nowledge-co/community and set RELEASE_APP_ID and RELEASE_APP_PRIVATE_KEY." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "All required release credentials are present."
 
-      - name: Refuse an existing GA Release before promotion jobs
+      - name: Mint the release App token to prove its installation
+        id: app
+        if: ${{ inputs.promote_desktop && env.HAS_RELEASE_APP == 'true' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: nowledge-co
+          repositories: mem,community
+
+      - name: Require the release App to reach both source repositories
+        if: ${{ steps.app.outputs.token != '' }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+          for repo in nowledge-co/mem nowledge-co/community; do
+            gh api "repos/${repo}" --jq .full_name >/dev/null || {
+              echo "::error::The release App token cannot read ${repo}; fix its installation before promoting."
+              exit 1
+            }
+          done
+
+      - name: Observe the RC and GA Releases
         if: ${{ inputs.promote_desktop }}
         env:
           GH_TOKEN: ${{ github.token }}
-          GA: ${{ steps.v.outputs.ga_tag }}
         run: |
           set -euo pipefail
-          releases="$(gh release list -R "${{ github.repository }}" --limit 1000 --json tagName)"
+          mkdir -p observed
+          gh release view "v${RC}" -R "$REPO" --json assets > observed/rc-release.json
+          releases="$(gh release list -R "$REPO" --limit 1000 --json tagName)"
           if [[ "$(jq length <<<"$releases")" -ge 1000 ]]; then
             echo "::error::GA Release inventory is truncated; refusing promotion."
             exit 1
           fi
           if jq -e --arg tag "v${GA}" '.[] | select(.tagName == $tag)' <<<"$releases" >/dev/null; then
-            echo "::error::v${GA} already has a Release; use explicit recovery rather than normal promotion."
-            exit 1
+            gh release view "v${GA}" -R "$REPO" --json isDraft,assets > observed/ga-release.json
+          else
+            echo null > observed/ga-release.json
           fi
+          gh api "repos/${REPO}/releases/latest" --jq .tag_name > observed/latest-tag.txt
+          node scripts/ga-promotion-plan.mjs select observed/rc-release.json "$RC" "$GA" > observed/selected.json
 
-      - name: Install release-owned R2 preflight dependency
-        if: ${{ inputs.promote_desktop }}
-        run: npm ci --ignore-scripts --no-audit --no-fund
-
-      - name: Refuse existing R2 GA objects before promotion jobs
+      - name: Observe the six GA objects in R2 by SHA-256
         if: ${{ inputs.promote_desktop }}
         env:
-          GA: ${{ steps.v.outputs.ga_tag }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-        run: node scripts/assert-fresh-r2-version.mjs "$GA" core
+        run: node scripts/reconcile-ga-r2.mjs observe "$GA" observed/selected.json > observed/r2.json
+
+      - name: Observe APT and the upgrade pause routes
+        if: ${{ inputs.promote_desktop }}
+        env:
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          node scripts/read-pause-routes.mjs > observed/pause-routes.json
+          status="$(curl -sS -o observed/apt-packages.txt -w '%{http_code}' \
+            -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/135.0.0.0 Safari/537.36' \
+            -H 'Origin: https://mem.nowledge.co' -H 'Referer: https://mem.nowledge.co/download' \
+            https://download-mem.nowledge.co/apt/dists/stable/main/binary-amd64/Packages)"
+          case "$status" in
+            200)
+              node --input-type=module -e "
+                import { readFileSync } from 'node:fs';
+                import { parseAptVersion } from './scripts/verify-ga-delivery.mjs';
+                console.log(parseAptVersion(readFileSync('observed/apt-packages.txt', 'utf8')).version);
+              " > observed/apt-version.txt
+              ;;
+            503) echo paused > observed/apt-version.txt ;;
+            *)
+              echo "::error::APT Packages returned HTTP ${status}."
+              exit 1
+              ;;
+          esac
+          echo "APT: $(cat observed/apt-version.txt); pause routes: $(cat observed/pause-routes.json)"
+
+      - name: Observe the RC-recorded and GA source tags
+        if: ${{ inputs.promote_desktop }}
+        env:
+          MEM_READ_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+          COMMUNITY_READ_TOKEN: ${{ github.token }}
+        run: node scripts/reconcile-source-tag.mjs observe "$RC" "$GA" > observed/tags.json
+
+      - name: Keep the observation for the plan
+        if: ${{ inputs.promote_desktop }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ga-promotion-${{ inputs.ga_tag }}-observed-${{ github.run_attempt }}
+          path: observed
+          if-no-files-found: error
+          retention-days: 30
+
+  authority-status:
+    needs: preflight
+    if: ${{ inputs.promote_desktop && !inputs.allow_newer_desktop_latest }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/desktop-update-control.yml
+    with:
+      action: status
+      operator_name: ${{ github.actor }}
+    secrets: inherit
+
+  plan:
+    needs: [preflight, authority-status]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && (needs.authority-status.result == 'success' || needs.authority-status.result == 'skipped') }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      stage_desktop: ${{ steps.plan.outputs.stage_desktop }}
+      stage_rpm: ${{ steps.plan.outputs.stage_rpm }}
+      stage_open_apt: ${{ steps.plan.outputs.stage_open_apt }}
+      stage_apt: ${{ steps.plan.outputs.stage_apt }}
+      stage_updater: ${{ steps.plan.outputs.stage_updater }}
+      stage_release: ${{ steps.plan.outputs.stage_release }}
+      stage_unpause: ${{ steps.plan.outputs.stage_unpause }}
+      stage_tag_mem: ${{ steps.plan.outputs.stage_tag_mem }}
+      stage_tag_community: ${{ steps.plan.outputs.stage_tag_community }}
+      stage_tag_cli: ${{ steps.plan.outputs.stage_tag_cli }}
+      paused_version: ${{ steps.plan.outputs.paused_version }}
+      authority_stable: ${{ steps.plan.outputs.authority_stable }}
+      authority_revision: ${{ steps.plan.outputs.authority_revision }}
+      authority_state: ${{ needs.authority-status.outputs.state }}
+      mem_sha: ${{ steps.plan.outputs.mem_sha }}
+      community_sha: ${{ steps.plan.outputs.community_sha }}
+      op_apt_route: ${{ steps.ops.outputs.op_apt_route }}
+      op_recover: ${{ steps.ops.outputs.op_recover }}
+      op_prepare: ${{ steps.ops.outputs.op_prepare }}
+      op_publish: ${{ steps.ops.outputs.op_publish }}
+      op_unpause_route: ${{ steps.ops.outputs.op_unpause_route }}
+      pub_date: ${{ steps.ops.outputs.pub_date }}
+      receipt_run_id: ${{ steps.receipt.outputs.run_id }}
+      receipt_operation_id: ${{ steps.receipt.outputs.operation_id }}
+      receipt_actor: ${{ steps.receipt.outputs.actor }}
+    env:
+      RC: ${{ needs.preflight.outputs.rc_tag }}
+      GA: ${{ needs.preflight.outputs.ga_tag }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download the observation
+        if: ${{ inputs.promote_desktop }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ga-promotion-${{ inputs.ga_tag }}-observed-${{ github.run_attempt }}
+          path: observed
+
+      - name: Reconcile live state into a stage plan
+        id: plan
+        env:
+          AUTHORITY_STATE: ${{ needs.authority-status.outputs.state }}
+          PROMOTE_DESKTOP: ${{ inputs.promote_desktop }}
+          PAUSE: ${{ inputs.desktop_upgrade_pause_active }}
+          OLDER_PATCH: ${{ inputs.allow_newer_desktop_latest }}
+          PUSH_LATEST: ${{ inputs.push_latest }}
+          PAUSED_STABLE: ${{ inputs.paused_stable_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p observed plan
+          if [[ "$PROMOTE_DESKTOP" == "true" ]]; then
+            jq -n \
+              --arg rc "$RC" --arg ga "$GA" \
+              --argjson pause "$PAUSE" --argjson older "$OLDER_PATCH" --argjson latest "$PUSH_LATEST" \
+              --arg paused "$PAUSED_STABLE" \
+              --slurpfile rcRelease observed/rc-release.json \
+              --slurpfile gaRelease observed/ga-release.json \
+              --rawfile latestTag observed/latest-tag.txt \
+              --slurpfile r2 observed/r2.json \
+              --rawfile apt observed/apt-version.txt \
+              --slurpfile routes observed/pause-routes.json \
+              --slurpfile tags observed/tags.json \
+              --argjson authority "${AUTHORITY_STATE:-null}" \
+              '{rc: $rc, ga: $ga,
+                options: {promoteDesktop: true, pause: $pause, olderPatch: $older, pushLatest: $latest,
+                          pausedStableVersion: $paused},
+                rcRelease: $rcRelease[0], gaRelease: $gaRelease[0], latestTag: ($latestTag | rtrimstr("\n")),
+                r2: $r2[0], apt: ($apt | rtrimstr("\n")), pauseRoutes: $routes[0], tags: $tags[0],
+                authority: $authority}' > plan/observed.json
+          else
+            jq -n --arg rc "$RC" --arg ga "$GA" '{rc: $rc, ga: $ga, options: {promoteDesktop: false}}' \
+              > plan/observed.json
+          fi
+          node scripts/ga-promotion-plan.mjs plan plan/observed.json plan/plan.json
+
+      - name: Persist operation IDs and the publication timestamp
+        id: ops
+        run: |
+          set -euo pipefail
+          uuid() { node -e 'console.log(crypto.randomUUID())'; }
+          jq -n \
+            --arg op_apt_route "$(uuid)" --arg op_recover "$(uuid)" --arg op_prepare "$(uuid)" \
+            --arg op_publish "$(uuid)" --arg op_unpause_route "$(uuid)" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg run_id "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            '$ARGS.named' > plan/operations.json
+          jq -r 'to_entries[] | select(.key | test("^(op_|pub_date)")) | "\(.key)=\(.value)"' \
+            plan/operations.json >> "$GITHUB_OUTPUT"
+          cat plan/operations.json
+
+      - name: Locate the publish receipt for an already-published authority
+        id: receipt
+        if: ${{ inputs.desktop_upgrade_pause_active && steps.plan.outputs.stage_updater == 'done' && steps.plan.outputs.stage_unpause == 'todo' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ steps.plan.outputs.authority_revision }}
+          STABLE: ${{ steps.plan.outputs.authority_stable }}
+        run: |
+          set -euo pipefail
+          mkdir -p receipts
+          : > receipt-candidates.txt
+          # Receipts are uploaded only by desktop-update-control runs, directly
+          # or as a reusable call from this workflow.
+          for workflow in desktop-update-control.yml promote-rc-to-ga.yml; do
+            for run_id in $(gh api "repos/${REPO}/actions/workflows/${workflow}/runs?per_page=50" --jq '.workflow_runs[].id'); do
+              gh api "repos/${REPO}/actions/runs/${run_id}/artifacts?per_page=100" \
+                --jq '.artifacts[] | select(.expired == false and (.name | startswith("desktop-update-receipt-"))) | "\(.workflow_run.id) \(.name)"' \
+                >> receipt-candidates.txt
+            done
+          done
+          while read -r run_id name; do
+            gh run download "$run_id" -R "$REPO" -n "$name" -D "receipts/${run_id}/${name}"
+          done < receipt-candidates.txt
+          node scripts/find-authority-receipt.mjs receipts "$GA" "$REVISION" "$STABLE" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Keep the plan and operation IDs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ga-promotion-${{ inputs.ga_tag }}-plan-${{ github.run_attempt }}
+          path: plan
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Summary
+        run: |
+          {
+            echo "## Promotion plan ${RC} -> ${GA}"
+            echo "| stage | plan |"
+            echo "| --- | --- |"
+            jq -r '.stages | to_entries[] | "| \(.key) | \(.value) |"' plan/plan.json
+            echo
+            echo "Operation IDs and the publication timestamp are kept in the ga-promotion-${GA}-plan-${GITHUB_RUN_ATTEMPT} artifact."
+            echo "To resume after a failure, dispatch again with the same inputs; completed stages are verified and skipped."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   promote-docker:
-    needs: validate
+    needs: [preflight, plan]
     if: ${{ inputs.promote_docker }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
     env:
-      RC: ${{ needs.validate.outputs.rc_tag }}
-      GA: ${{ needs.validate.outputs.ga_tag }}
+      RC: ${{ needs.preflight.outputs.rc_tag }}
+      GA: ${{ needs.preflight.outputs.ga_tag }}
       PUSH_LATEST: ${{ inputs.push_latest }}
     steps:
       - uses: docker/setup-buildx-action@v3
@@ -264,18 +519,21 @@ jobs:
       - uses: sigstore/cosign-installer@v3
 
       # One step per image: resolve the rc digest, refuse to promote bits our
-      # release workflows did not sign, re-tag that exact digest, then move
-      # the floating GA pointers (:X.Y and :latest) only when this GA may
-      # move :latest. release-docker no longer moves :X.Y on an rc, so GA
-      # promotion is the only place it moves.
+      # release workflows did not sign, refuse an existing :<ga> at another
+      # digest, then re-tag the exact rc digest unless every target already
+      # points at it. Floating GA pointers (:X.Y and :latest) move only when
+      # this GA may move :latest; release-docker never moves them on an rc.
       - name: Promote nowledgelabs/mem
         env:
           REPO: docker.io/nowledgelabs/mem
           SIGNER: '^https://github\.com/${{ github.repository }}/\.github/workflows/(release-docker|release-docker-updater|promote-gpu-variant)\.yml@'
         run: &promote_cpu_image |
           set -euo pipefail
-          RC_DIGEST="$(docker buildx imagetools inspect "${REPO}:${RC}" --format '{{json .Manifest}}' \
-            | python3 -c 'import json,sys;print(json.load(sys.stdin)["digest"])')"
+          digest_of() {
+            docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' \
+              | python3 -c 'import json,sys;print(json.load(sys.stdin)["digest"])'
+          }
+          RC_DIGEST="$(digest_of "${REPO}:${RC}" || true)"
           if [[ -z "$RC_DIGEST" ]]; then
             echo "::error::${REPO}:${RC} does not exist on Hub."
             exit 1
@@ -286,16 +544,28 @@ jobs:
             echo "::error::${REPO}@${RC_DIGEST} has no valid release signature; refusing to promote."
             exit 1
           fi
+          GA_DIGEST="$(digest_of "${REPO}:${GA}" 2>/dev/null || true)"
+          if [[ -n "$GA_DIGEST" && "$GA_DIGEST" != "$RC_DIGEST" ]]; then
+            echo "::error::${REPO}:${GA} already points at ${GA_DIGEST}, not the rc digest ${RC_DIGEST}; refusing to overwrite it."
+            exit 1
+          fi
           declare -a TAGS=( "${REPO}:${GA}" )
           if [[ "${PUSH_LATEST}" == "true" ]]; then
             TAGS+=( "${REPO}:${GA%.*}" "${REPO}:latest" )
           fi
-          declare -a ARGS=()
-          for t in "${TAGS[@]}"; do ARGS+=( -t "$t" ); done
-          docker buildx imagetools create "${ARGS[@]}" "${REPO}@${RC_DIGEST}"
+          pending=false
           for tag in "${TAGS[@]}"; do
-            GOT="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' \
-              | python3 -c 'import json,sys;print(json.load(sys.stdin)["digest"])')"
+            if [[ "$(digest_of "$tag" 2>/dev/null || true)" != "$RC_DIGEST" ]]; then pending=true; fi
+          done
+          if [[ "$pending" == "true" ]]; then
+            declare -a ARGS=()
+            for t in "${TAGS[@]}"; do ARGS+=( -t "$t" ); done
+            docker buildx imagetools create "${ARGS[@]}" "${REPO}@${RC_DIGEST}"
+          else
+            echo "Every target tag already points at ${RC_DIGEST}; nothing to re-tag."
+          fi
+          for tag in "${TAGS[@]}"; do
+            GOT="$(digest_of "$tag")"
             if [[ "$GOT" != "$RC_DIGEST" ]]; then
               echo "::error::${tag} digest ${GOT} != rc digest ${RC_DIGEST}"
               exit 1
@@ -338,39 +608,51 @@ jobs:
   # release-docker builds :<rc>-cuda / :<rc>-vulkan during the rc run, so GA
   # re-tags them (gpu_source=retag). CUDA and Vulkan are separate reusable
   # workflow calls: neither waits for the other, and a failed variant can be
-  # retried alone. `promote_gpu` remains the switch for both variants.
+  # retried alone. `promote_gpu` remains the switch for both variants. A GPU
+  # failure is a follow-up, not a withhold: it never gates the GA Release.
   promote-cuda:
-    needs: validate
+    needs: [preflight, plan]
     if: ${{ inputs.promote_gpu || inputs.promote_cuda }}
+    permissions:
+      contents: read
+      id-token: write
     uses: ./.github/workflows/promote-gpu-variant.yml
     with:
-      rc_tag: ${{ needs.validate.outputs.rc_tag }}
-      ga_tag: ${{ needs.validate.outputs.ga_tag }}
+      rc_tag: ${{ needs.preflight.outputs.rc_tag }}
+      ga_tag: ${{ needs.preflight.outputs.ga_tag }}
       variant: cuda
       source: ${{ inputs.gpu_source }}
       move_floating: ${{ inputs.push_latest }}
     secrets: inherit
 
   promote-vulkan:
-    needs: validate
+    needs: [preflight, plan]
     if: ${{ inputs.promote_gpu || inputs.promote_vulkan }}
+    permissions:
+      contents: read
+      id-token: write
     uses: ./.github/workflows/promote-gpu-variant.yml
     with:
-      rc_tag: ${{ needs.validate.outputs.rc_tag }}
-      ga_tag: ${{ needs.validate.outputs.ga_tag }}
+      rc_tag: ${{ needs.preflight.outputs.rc_tag }}
+      ga_tag: ${{ needs.preflight.outputs.ga_tag }}
       variant: vulkan
       source: ${{ inputs.gpu_source }}
       move_floating: ${{ inputs.push_latest }}
     secrets: inherit
 
   promote-desktop:
-    needs: validate
-    if: ${{ inputs.promote_desktop }}
+    needs: [preflight, plan]
+    if: ${{ inputs.promote_desktop && (needs.plan.outputs.stage_desktop == 'todo' || (needs.plan.outputs.stage_apt == 'todo' && !inputs.desktop_upgrade_pause_active)) }}
     runs-on: ubuntu-22.04
     environment: release-publish
+    permissions:
+      contents: write
     env:
-      RC: ${{ needs.validate.outputs.rc_tag }}
-      GA: ${{ needs.validate.outputs.ga_tag }}
+      RC: ${{ needs.preflight.outputs.rc_tag }}
+      GA: ${{ needs.preflight.outputs.ga_tag }}
+      REPO: ${{ github.repository }}
+      STAGE_DESKTOP: ${{ needs.plan.outputs.stage_desktop }}
+      STAGE_APT: ${{ needs.plan.outputs.stage_apt }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -385,6 +667,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      - name: Download the reviewed plan
+        uses: actions/download-artifact@v4
+        with:
+          name: ga-promotion-${{ inputs.ga_tag }}-plan-${{ github.run_attempt }}
+          path: plan
 
       - name: Clone mem-backbone (private)
         env:
@@ -406,15 +694,17 @@ jobs:
           # Keep the tested Node version for the mem-backbone publish/verify scripts.
           node-version: "22"
 
-      - name: Install mem-backbone npm deps
-        working-directory: mem-backbone
-        run: npm ci --no-audit --no-fund
+      - name: Install release and mem-backbone npm deps
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm ci --prefix mem-backbone --no-audit --no-fund
 
       - name: Pre-flight desktop version and APT policy
         env:
           VERIFY_ALLOW_NEWER_LATEST: ${{ inputs.allow_newer_desktop_latest }}
           VERIFY_UPGRADE_PAUSE_ACTIVE: ${{ inputs.desktop_upgrade_pause_active }}
-          VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.paused_stable_version }}
+          VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ needs.plan.outputs.paused_version }}
           VERIFY_PLATFORMS: mac,mac-intel,win,linux,linux-deb,linux-appimage
         run: |
           set -euo pipefail
@@ -429,12 +719,9 @@ jobs:
           VERIFY_RELEASE_VERSION="$GA" node scripts/verify-ga-delivery.mjs --preflight
 
       - name: Import GPG signing key
+        if: ${{ !inputs.allow_newer_desktop_latest && !inputs.desktop_upgrade_pause_active && needs.plan.outputs.stage_apt == 'todo' }}
         run: |
           set -euo pipefail
-          if [[ -z "$GPG_PRIVATE_KEY" ]]; then
-            echo "::warning::GPG_PRIVATE_KEY not set — APT repo update will be skipped."
-            exit 0
-          fi
           printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
           mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
           echo "use-agent"              >> ~/.gnupg/gpg.conf
@@ -442,61 +729,65 @@ jobs:
           echo "allow-loopback-pinentry">> ~/.gnupg/gpg-agent.conf
           gpgconf --kill gpg-agent || true
 
-      - name: Download RC assets from this repo's GH Release
+      # Only the five core packages selected by the plan are downloaded; GPU
+      # variants and the RPM (attached by promote-rpm) are never touched here.
+      - name: Download and authenticate the RC core packages
+        id: rename
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p rc-artifacts
-          gh release download "v${RC}" --dir rc-artifacts \
-            --repo "${{ github.repository }}"
+          jq -c '.selected[] | select(.core)' plan/plan.json > core.jsonl
+          while read -r item; do
+            rc_name="$(jq -r .rcName <<<"$item")"
+            ga_name="$(jq -r .gaName <<<"$item")"
+            digest="$(jq -r .digest <<<"$item")"
+            gh release download "v${RC}" --repo "$REPO" --dir rc-artifacts --pattern "$rc_name" --clobber
+            [[ "sha256:$(sha256sum "rc-artifacts/${rc_name}" | awk '{print $1}')" == "$digest" ]] || {
+              echo "::error::${rc_name} does not match the RC Release digest ${digest}."
+              exit 1
+            }
+            if [[ "$rc_name" != "$ga_name" ]]; then mv -v -- "rc-artifacts/${rc_name}" "rc-artifacts/${ga_name}"; fi
+          done < core.jsonl
+          path_of() { echo "$PWD/rc-artifacts/$(jq -r --arg t "$1" '.selected[] | select(.target == $t) | .gaName' plan/plan.json)"; }
+          {
+            echo "dmg_arm=$(path_of aarch64-apple-darwin.dmg)"
+            echo "dmg_x64=$(path_of x86_64-apple-darwin.dmg)"
+            echo "exe_win=$(path_of x86_64-pc-windows-msvc.exe)"
+            echo "deb=$(path_of x86_64-unknown-linux-gnu.deb)"
+            echo "appimg=$(path_of x86_64-unknown-linux-gnu.AppImage)"
+          } >> "$GITHUB_OUTPUT"
           ls -lh rc-artifacts
 
-      - name: Rename RC suffix to GA in every artifact
-        id: rename
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd rc-artifacts
-          for f in *; do
-            new="${f//${RC}/${GA}}"
-            if [[ "$f" != "$new" ]]; then
-              mv -v -- "$f" "$new"
-            fi
-          done
-          ls -lh
-          # Resolve concrete paths for the publish steps. Globs are kept
-          # permissive because tauri/AppImage/rpm filenames vary subtly
-          # (architecture suffix, lowercased/uppercased package names).
-          DMG_ARM="$(find . -maxdepth 1 -type f -iname '*aarch64*.dmg' -print -quit)"
-          DMG_X64="$(find . -maxdepth 1 -type f \( -iname '*x86_64*.dmg' -o -iname '*x64*.dmg' \) -print -quit)"
-          EXE_WIN="$(find . -maxdepth 1 -type f -iname '*.exe' -print -quit)"
-          DEB="$(find . -maxdepth 1 -type f -iname '*.deb' -print -quit)"
-          APPIMG="$(find . -maxdepth 1 -type f -iname '*.AppImage' -print -quit)"
-          for kv in DMG_ARM:"$DMG_ARM" DMG_X64:"$DMG_X64" EXE_WIN:"$EXE_WIN" DEB:"$DEB" APPIMG:"$APPIMG"; do
-            name="${kv%%:*}"; val="${kv#*:}"
-            if [[ -z "$val" || ! -f "$val" ]]; then
-              echo "::error::Missing artifact after rename: $name"
-              exit 1
-            fi
-          done
-          {
-            echo "dmg_arm=$PWD/$DMG_ARM"
-            echo "dmg_x64=$PWD/$DMG_X64"
-            echo "exe_win=$PWD/$EXE_WIN"
-            echo "deb=$PWD/$DEB"
-            echo "appimg=$PWD/$APPIMG"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Upload to Cloudflare R2 (under app/${{ env.GA }}/)
+      # The plan already proved every present object holds the RC bytes; only
+      # absent keys are uploaded, then read back by SHA-256.
+      - name: Upload to Cloudflare R2 (only missing objects under app/${{ env.GA }}/)
         working-directory: mem-backbone
+        env:
+          DMG_ARM: ${{ steps.rename.outputs.dmg_arm }}
+          DMG_X64: ${{ steps.rename.outputs.dmg_x64 }}
+          EXE_WIN: ${{ steps.rename.outputs.exe_win }}
+          DEB: ${{ steps.rename.outputs.deb }}
+          APPIMG: ${{ steps.rename.outputs.appimg }}
         run: |
           set -euo pipefail
-          node scripts/upload-package.cjs "$GA" mac       "${{ steps.rename.outputs.dmg_arm }}"
-          node scripts/upload-package.cjs "$GA" mac-intel "${{ steps.rename.outputs.dmg_x64 }}"
-          node scripts/upload-package.cjs "$GA" win       "${{ steps.rename.outputs.exe_win }}"
-          node scripts/upload-package.cjs "$GA" linux     "${{ steps.rename.outputs.deb }}"
-          node scripts/upload-package.cjs "$GA" linux     "${{ steps.rename.outputs.appimg }}"
+          mapfile -t uploads < <(jq -r '.uploads[] | select(endswith(".rpm") | not)' ../plan/plan.json)
+          for target in "${uploads[@]}"; do
+            case "$target" in
+              aarch64-apple-darwin.dmg) node scripts/upload-package.cjs "$GA" mac "$DMG_ARM" ;;
+              x86_64-apple-darwin.dmg) node scripts/upload-package.cjs "$GA" mac-intel "$DMG_X64" ;;
+              x86_64-pc-windows-msvc.exe) node scripts/upload-package.cjs "$GA" win "$EXE_WIN" ;;
+              x86_64-unknown-linux-gnu.deb) node scripts/upload-package.cjs "$GA" linux "$DEB" ;;
+              x86_64-unknown-linux-gnu.AppImage) node scripts/upload-package.cjs "$GA" linux "$APPIMG" ;;
+              *) echo "::error::Unexpected planned upload ${target}"; exit 1 ;;
+            esac
+          done
+          if [[ "${#uploads[@]}" -gt 0 ]]; then
+            jq '.selected' ../plan/plan.json > ../selected.json
+            node ../scripts/reconcile-ga-r2.mjs verify "$GA" ../selected.json "${uploads[@]}"
+          fi
+          echo "R2 uploads: ${#uploads[@]} (others already held the exact RC bytes)"
 
       - name: Purge Cloudflare edge cache for uploaded keys
         if: ${{ env.CLOUDFLARE_ZONE_ID != '' && env.CLOUDFLARE_API_TOKEN != '' }}
@@ -526,7 +817,7 @@ jobs:
 
       - name: Update APT repo
         working-directory: mem-backbone
-        if: ${{ !inputs.allow_newer_desktop_latest && !inputs.desktop_upgrade_pause_active }}
+        if: ${{ !inputs.allow_newer_desktop_latest && !inputs.desktop_upgrade_pause_active && needs.plan.outputs.stage_apt == 'todo' }}
         run: node scripts/update-apt-repo.cjs "$GA" "${{ steps.rename.outputs.deb }}"
 
       - name: Verify download delivery (R2 + optional APT + Worker)
@@ -534,7 +825,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${{ inputs.desktop_upgrade_pause_active }}" == "true" ]]; then
-            export VERIFY_PREVIOUS_DESKTOP_VERSION="${{ inputs.paused_stable_version }}"
+            export VERIFY_PREVIOUS_DESKTOP_VERSION="${{ needs.plan.outputs.paused_version }}"
             export VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-appimage"
             node ../scripts/verify-upgrade-pause.mjs
             attempts=5
@@ -590,18 +881,24 @@ jobs:
           echo "::error::Download delivery did not verify after ${attempts} attempts."
           exit 1
 
+      # A published GA cannot take new core assets; the plan only reaches this
+      # job with a published GA when it needs APT, and then skips this step.
       - name: Create draft GA GitHub release
+        if: ${{ needs.plan.outputs.stage_desktop == 'todo' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           TAG="v${GA}"
-          REPO="${{ github.repository }}"
+          if [[ "$(gh release view "$TAG" -R "$REPO" --json isDraft --jq .isDraft 2>/dev/null || true)" == "false" ]]; then
+            echo "${TAG} is already public; the plan verified its six assets by SHA-256."
+            exit 0
+          fi
           if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
             gh release create "$TAG" -R "$REPO" \
               --title "Nowledge Mem ${GA}" \
               --draft \
-              --notes "Promoted from v${RC}. Same bits; the rc workflow's cosign signature carries over. Generated by promote-rc-to-ga." \
+              --notes "Release notes: ${CHANGELOG_BASE}#${GA}" \
               || gh release view "$TAG" -R "$REPO" >/dev/null
           fi
           node scripts/upload-draft-release-assets.mjs "$TAG" "$REPO" \
@@ -616,23 +913,18 @@ jobs:
       - name: Report partial promote
         if: failure()
         run: |
-          echo "::error::FAILED PROMOTE for ${GA}. Check which surfaces are already live."
+          echo "::error::FAILED PROMOTE for ${GA}. Dispatch again with the same inputs to resume."
           {
-            echo "### Promote failed; inspect partial state: ${GA}"
+            echo "### Desktop stage failed: ${GA}"
             echo ""
-            echo "Check which steps completed. A successful public upload does"
-            echo "not roll back after a later failure:"
-            echo ""
-            echo "- R2 / download page (app/${GA}/ artifacts, if uploaded)"
-            echo "- APT repo (if its update step ran; emergency-pause mode defers it)"
-            echo "- GH Release draft (if its creation step ran)"
-            echo ""
-            echo "Still to confirm or finish by hand:"
+            echo "Uploads that completed stay public and are not rolled back. A new"
+            echo "dispatch with the same inputs re-reads R2, APT and the draft and"
+            echo "resumes only missing objects; any object with different bytes"
+            echo "stops the plan for manual inspection:"
             echo ""
             echo '```'
-            echo "gh release view v${GA} --repo ${{ github.repository }}"
-            echo "# verify the dynamic auto-updater feed before recovery:"
-            echo "VERIFY_RELEASE_VERSION=${GA} VERIFY_PLATFORMS=mac,mac-intel,win,linux,linux-deb,linux-appimage VERIFY_SCOPE=latest,latest-redirect,direct,update node scripts/verify-download-delivery.mjs"
+            echo "gh release view v${GA} --repo ${REPO}"
+            echo "gh workflow run promote-rc-to-ga.yml -R ${REPO} -f rc_tag=${RC} -f ga_tag=${GA}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -640,8 +932,8 @@ jobs:
         run: |
           {
             echo "### Desktop promoted v${RC} → v${GA}"
-            echo "- R2 prefix:      app/${GA}/"
-            echo "- GH release tag: v${GA} (draft on ${{ github.repository }})"
+            echo "- R2 prefix:      app/${GA}/ ($(jq '[.uploads[] | select(endswith(".rpm") | not)] | length' plan/plan.json) uploaded, others already exact)"
+            echo "- GH release tag: v${GA} (draft on ${REPO})"
             if [[ "${{ inputs.desktop_upgrade_pause_active }}" == "true" ]]; then
               echo "- Desktop latest: emergency pause retained; exact GA direct downloads verified"
               echo "- APT: deferred to promote-apt-to-ga after only the APT pause route is removed"
@@ -650,20 +942,589 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+  promote-rpm:
+    needs: [preflight, plan, promote-desktop]
+    if: ${{ !cancelled() && !failure() && inputs.promote_desktop && needs.plan.outputs.stage_rpm == 'todo' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/promote-rpm-to-ga.yml
+    with:
+      rc_tag: ${{ needs.preflight.outputs.rc_tag }}
+      ga_tag: ${{ needs.preflight.outputs.ga_tag }}
+    secrets: inherit
+
+  open-apt:
+    needs: [preflight, plan, promote-desktop, promote-rpm]
+    if: ${{ !cancelled() && !failure() && inputs.promote_desktop && inputs.desktop_upgrade_pause_active && needs.plan.outputs.stage_open_apt == 'todo' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/open-apt-pause-route.yml
+    with:
+      ga_tag: ${{ needs.preflight.outputs.ga_tag }}
+      previous_version: ${{ needs.plan.outputs.paused_version }}
+      operation_id: ${{ needs.plan.outputs.op_apt_route }}
+    secrets: inherit
+
+  promote-apt:
+    needs: [preflight, plan, promote-desktop, promote-rpm, open-apt]
+    if: ${{ !cancelled() && !failure() && inputs.promote_desktop && inputs.desktop_upgrade_pause_active && needs.plan.outputs.stage_apt == 'todo' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/promote-apt-to-ga.yml
+    with:
+      ga_tag: ${{ needs.preflight.outputs.ga_tag }}
+      paused_stable_version: ${{ needs.plan.outputs.paused_version }}
+    secrets: inherit
+
+  # Stage 4: the authority is re-read immediately before the first mutation.
+  # Every transition receives the mode/revision observed by the previous one;
+  # nothing infers the next revision from an expected increment.
+  updater-read:
+    needs: [preflight, plan, promote-desktop, promote-rpm, promote-apt]
+    if: ${{ !cancelled() && !failure() && inputs.promote_desktop && needs.plan.outputs.stage_updater == 'todo' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/desktop-update-control.yml
+    with:
+      action: status
+      operator_name: ${{ github.actor }}
+    secrets: inherit
+
+  updater-plan:
+    needs: [preflight, updater-read]
+    if: ${{ !cancelled() && !failure() && needs.updater-read.result == 'success' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    outputs:
+      recover: ${{ steps.plan.outputs.recover }}
+      prepare: ${{ steps.plan.outputs.prepare }}
+      publish: ${{ steps.plan.outputs.publish }}
+      mode: ${{ steps.plan.outputs.mode }}
+      revision: ${{ steps.plan.outputs.revision }}
+      stable: ${{ steps.plan.outputs.stable }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - id: plan
+        name: Plan the authority transitions from the status just read
+        env:
+          STATE: ${{ needs.updater-read.outputs.state }}
+          GA: ${{ needs.preflight.outputs.ga_tag }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$STATE" > state.json
+          node scripts/ga-promotion-plan.mjs updater state.json "$GA"
+
+  updater-recover:
+    needs: [preflight, plan, updater-plan]
+    if: ${{ !cancelled() && !failure() && needs.updater-plan.outputs.recover == 'true' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/desktop-update-control.yml
+    with:
+      action: recover
+      operator_name: ${{ github.actor }}
+      expected_mode: ${{ needs.updater-plan.outputs.mode }}
+      expected_revision: ${{ needs.updater-plan.outputs.revision }}
+      expected_stable_version: ${{ needs.updater-plan.outputs.stable }}
+      operation_id: ${{ needs.plan.outputs.op_recover }}
+      reason: "promote-rc-to-ga ${{ needs.preflight.outputs.ga_tag }} run ${{ github.run_id }} by ${{ github.actor }}: recover the stopped authority to its stable release before preparing the candidate"
+    secrets: inherit
+
+  updater-prepare:
+    needs: [preflight, plan, updater-plan, updater-recover]
+    if: ${{ !cancelled() && !failure() && needs.updater-plan.outputs.prepare == 'true' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/desktop-update-control.yml
+    with:
+      action: prepare
+      operator_name: ${{ github.actor }}
+      expected_mode: ${{ needs.updater-recover.outputs.mode || needs.updater-plan.outputs.mode }}
+      expected_revision: ${{ needs.updater-recover.outputs.revision || needs.updater-plan.outputs.revision }}
+      expected_stable_version: ${{ needs.updater-plan.outputs.stable }}
+      operation_id: ${{ needs.plan.outputs.op_prepare }}
+      reason: "promote-rc-to-ga ${{ needs.preflight.outputs.ga_tag }} run ${{ github.run_id }} by ${{ github.actor }}: prepare the exact RC-promoted candidate"
+      ga_tag: ${{ needs.preflight.outputs.ga_tag }}
+      source_sha: ${{ needs.plan.outputs.mem_sha }}
+      # `env` is unavailable in reusable-workflow inputs; keep in sync with CHANGELOG_BASE.
+      release_notes: https://mem.nowledge.co/changelog#${{ needs.preflight.outputs.ga_tag }}
+      pub_date: ${{ needs.plan.outputs.pub_date }}
+    secrets: inherit
+
+  # Verify before expose (no human confirmation): the candidate the authority
+  # holds must name exactly the RC-authenticated bytes and the RC-recorded
+  # source, the exact GA downloads and APT must already serve, and Docker
+  # promotion (which verified the rc cosign signatures) must have passed.
+  # Any failure stops before the updater feed or GitHub latest moves.
+  updater-verify:
+    needs: [preflight, plan, promote-docker, updater-read, updater-plan, updater-prepare]
+    if: ${{ !cancelled() && !failure() && needs.updater-plan.outputs.publish == 'true' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GA: ${{ needs.preflight.outputs.ga_tag }}
+      STATE: ${{ needs.updater-prepare.outputs.state || needs.updater-read.outputs.state }}
+      SOURCE_SHA: ${{ needs.plan.outputs.mem_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download the reviewed plan
+        uses: actions/download-artifact@v4
+        with:
+          name: ga-promotion-${{ inputs.ga_tag }}-plan-${{ github.run_attempt }}
+          path: plan
+
+      - name: The prepared candidate names the exact RC bytes and source
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$STATE" > state.json
+          jq -e --arg ga "$GA" '.mode == "draft" and .candidate.version == $ga' state.json >/dev/null || {
+            echo "::error::The authority does not hold ${GA} as a draft: $(jq -c '{mode, revision}' state.json)"
+            exit 1
+          }
+          node scripts/ga-promotion-plan.mjs candidate state.json plan/plan.json "$SOURCE_SHA" "${CHANGELOG_BASE}#${GA}"
+
+      - name: Exact GA downloads and APT already serve the candidate
+        env:
+          VERIFY_RELEASE_VERSION: ${{ needs.preflight.outputs.ga_tag }}
+          VERIFY_PLATFORMS: mac,mac-intel,win,linux-appimage,linux-deb,linux-rpm
+        run: |
+          set -euo pipefail
+          node scripts/verify-ga-delivery.mjs --staged-while-paused
+          node scripts/verify-ga-delivery.mjs --apt-only
+
+  updater-publish:
+    needs: [preflight, plan, updater-plan, updater-prepare, updater-verify]
+    if: ${{ !cancelled() && !failure() && needs.updater-plan.outputs.publish == 'true' && needs.updater-verify.result == 'success' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/desktop-update-control.yml
+    with:
+      action: publish
+      operator_name: ${{ github.actor }}
+      expected_mode: ${{ needs.updater-prepare.outputs.mode || needs.updater-plan.outputs.mode }}
+      expected_revision: ${{ needs.updater-prepare.outputs.revision || needs.updater-plan.outputs.revision }}
+      expected_stable_version: ${{ needs.updater-plan.outputs.stable }}
+      operation_id: ${{ needs.plan.outputs.op_publish }}
+      reason: "promote-rc-to-ga ${{ needs.preflight.outputs.ga_tag }} run ${{ github.run_id }} by ${{ github.actor }}: publish the prepared candidate"
+      ga_tag: ${{ needs.preflight.outputs.ga_tag }}
+    secrets: inherit
+
+  publish-release:
+    needs: [preflight, plan, promote-docker, promote-desktop, promote-rpm, promote-apt, updater-publish]
+    if: ${{ !cancelled() && !failure() && inputs.promote_desktop && needs.plan.outputs.stage_release == 'todo' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      published_at: ${{ steps.publish.outputs.published_at }}
+    env:
+      RC: ${{ needs.preflight.outputs.rc_tag }}
+      GA: ${{ needs.preflight.outputs.ga_tag }}
+      REPO: ${{ github.repository }}
+      OLDER_PATCH: ${{ inputs.allow_newer_desktop_latest }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Publish the GA Release, then make it latest
+        id: publish
+        run: |
+          set -euo pipefail
+          id="$(gh api "repos/${REPO}/releases?per_page=100" --paginate \
+            --jq ".[] | select(.tag_name == \"v${GA}\") | .id")"
+          [[ "$id" =~ ^[0-9]+$ ]] || {
+            echo "::error::Expected exactly one Release for v${GA}, got '${id}'."
+            exit 1
+          }
+          [[ "$(gh api "repos/${REPO}/releases/${id}" --jq '.assets | length')" == "6" ]] || {
+            echo "::error::v${GA} must hold exactly the six Desktop packages before publication."
+            exit 1
+          }
+          body="$(printf 'Release notes: %s#%s\n\nPromoted from v%s without rebuilding.\n' "$CHANGELOG_BASE" "$GA" "$RC")"
+          gh api -X PATCH "repos/${REPO}/releases/${id}" -f body="$body" -F draft=false >/dev/null
+          # make_latest is silently ignored when sent with draft=false.
+          if [[ "$OLDER_PATCH" != "true" ]]; then
+            gh api -X PATCH "repos/${REPO}/releases/${id}" -f make_latest=true >/dev/null
+            for attempt in 1 2 3 4 5; do
+              latest="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
+              [[ "$latest" == "v${GA}" ]] && break
+              [[ "$attempt" == 5 ]] && {
+                echo "::error::releases/latest reads ${latest}, not v${GA}."
+                exit 1
+              }
+              sleep 5
+            done
+          fi
+          release="$(gh api "repos/${REPO}/releases/${id}")"
+          jq -e '.draft == false and .prerelease == false' <<<"$release" >/dev/null
+          echo "published_at=$(jq -r .published_at <<<"$release")" >> "$GITHUB_OUTPUT"
+          {
+            echo "### GA Release v${GA} published"
+            echo "- published_at: $(jq -r .published_at <<<"$release")"
+            echo "- releases/latest: $([[ "$OLDER_PATCH" == "true" ]] && echo unchanged || echo "v${GA}")"
+            echo "- body: links ${CHANGELOG_BASE}#${GA}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  remove-pause:
+    needs: [preflight, plan, updater-plan, updater-publish, publish-release]
+    if: ${{ !cancelled() && !failure() && inputs.promote_desktop && inputs.desktop_upgrade_pause_active && needs.plan.outputs.stage_unpause == 'todo' }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/remove-desktop-upgrade-pause.yml
+    with:
+      ga_tag: ${{ needs.preflight.outputs.ga_tag }}
+      previous_version: ${{ needs.updater-plan.outputs.stable || needs.plan.outputs.authority_stable }}
+      paused_version: ${{ needs.plan.outputs.paused_version }}
+      operator_name: ${{ needs.updater-publish.result == 'success' && github.actor || needs.plan.outputs.receipt_actor }}
+      authority_publish_run_id: ${{ needs.updater-publish.result == 'success' && github.run_id || needs.plan.outputs.receipt_run_id }}
+      authority_publish_operation_id: ${{ needs.updater-publish.result == 'success' && needs.plan.outputs.op_publish || needs.plan.outputs.receipt_operation_id }}
+      authority_revision: ${{ needs.updater-publish.outputs.revision || needs.plan.outputs.authority_revision }}
+      route_operation_id: ${{ needs.plan.outputs.op_unpause_route }}
+    secrets: inherit
+
+  # Stage 7. Tags are release provenance and cli-publish-v<ga> fires the PyPI
+  # lane, so they are created only after the GA is fully live, at the exact
+  # commits the RC tags named, with cli-publish strictly last.
+  source-tags:
+    needs: [preflight, plan, publish-release, remove-pause]
+    if: ${{ !cancelled() && !failure() && inputs.promote_desktop }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    outputs:
+      created: ${{ steps.tags.outputs.created }}
+    env:
+      GA: ${{ needs.preflight.outputs.ga_tag }}
+      MEM_SHA: ${{ needs.plan.outputs.mem_sha }}
+      COMMUNITY_SHA: ${{ needs.plan.outputs.community_sha }}
+      HAS_RELEASE_APP: ${{ secrets.RELEASE_APP_ID != '' && secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+      PLANNED: ${{ needs.plan.outputs.stage_tag_mem }} ${{ needs.plan.outputs.stage_tag_community }} ${{ needs.plan.outputs.stage_tag_cli }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # A GitHub App installation token (Contents: read & write on mem and
+      # community only). Unlike GITHUB_TOKEN, its tag pushes trigger workflows,
+      # which cli-publish-v<ga> needs to start the PyPI lane.
+      - name: Mint a per-run release App token
+        id: app
+        if: ${{ env.HAS_RELEASE_APP == 'true' && needs.plan.outputs.stage_tag_cli != '' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: nowledge-co
+          repositories: mem,community
+
+      - name: Tag mem and community, then cli-publish last
+        id: tags
+        env:
+          TAG_WRITE_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$PLANNED" == "done done done" ]]; then
+            echo "All three source tags were already at the RC-recorded commits."
+            echo "created=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -z "$TAG_WRITE_TOKEN" ]]; then
+            echo "::warning::The release App (RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY) is not configured; source tags, PyPI and mobile were NOT released."
+            {
+              echo "### Source tags SKIPPED: the release App is not configured"
+              echo "Create these by hand (one call at a time, then read each back), cli-publish last:"
+              echo '```'
+              echo "nowledge-co/mem        v${GA}             -> ${MEM_SHA}"
+              echo "nowledge-co/community  v${GA}             -> ${COMMUNITY_SHA}"
+              echo "nowledge-co/mem        cli-publish-v${GA} -> ${MEM_SHA}   # fires PyPI"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          node scripts/reconcile-source-tag.mjs ensure nowledge-co/mem "v${GA}" "$MEM_SHA" annotated "Nowledge Mem ${GA}"
+          node scripts/reconcile-source-tag.mjs ensure nowledge-co/community "v${GA}" "$COMMUNITY_SHA" annotated "Nowledge Mem ${GA}"
+          # Irreversible: this tag starts the PyPI publish lane.
+          node scripts/reconcile-source-tag.mjs ensure nowledge-co/mem "cli-publish-v${GA}" "$MEM_SHA" lightweight
+          echo "created=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Source tags at the RC-recorded commits"
+            echo "- nowledge-co/mem v${GA} -> ${MEM_SHA}"
+            echo "- nowledge-co/community v${GA} -> ${COMMUNITY_SHA}"
+            echo "- nowledge-co/mem cli-publish-v${GA} -> ${MEM_SHA} (PyPI publish waits for the pypi environment approval)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Stage 8. A TestFlight upload cannot be recalled and Apple rejects a reused
+  # build number, so an earlier publish run for this version is reported, never
+  # dispatched again.
+  mobile:
+    needs: [preflight, plan, source-tags]
+    if: ${{ !cancelled() && !failure() && inputs.promote_desktop && inputs.mobile }}
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: write
+      contents: read
+    outputs:
+      run_id: ${{ steps.dispatch.outputs.run_id }}
+    env:
+      GA: ${{ needs.preflight.outputs.ga_tag }}
+      REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      TITLE: release-mobile ${{ needs.preflight.outputs.ga_tag }} publish
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Require the GA source tags at the RC-recorded commits
+        id: tags
+        env:
+          MEM_READ_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+          COMMUNITY_READ_TOKEN: ${{ github.token }}
+          RC: ${{ needs.preflight.outputs.rc_tag }}
+          MEM_SHA: ${{ needs.plan.outputs.mem_sha }}
+          COMMUNITY_SHA: ${{ needs.plan.outputs.community_sha }}
+        run: |
+          set -euo pipefail
+          node scripts/reconcile-source-tag.mjs observe "$RC" "$GA" > tags.json
+          if jq -e --arg mem "$MEM_SHA" --arg community "$COMMUNITY_SHA" \
+              '.mem.ga == $mem and .community.ga == $community' tags.json >/dev/null; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Mobile not dispatched: v${GA} is not tagged on nowledge-co/mem and nowledge-co/community. Without the community tag the APK step would create one at the community tip."
+            echo "### Mobile NOT dispatched: GA source tags missing" >> "$GITHUB_STEP_SUMMARY"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dispatch release-mobile once per version
+        id: dispatch
+        if: ${{ steps.tags.outputs.ready == 'true' }}
+        run: |
+          set -euo pipefail
+          existing() {
+            gh api "repos/${REPO}/actions/workflows/release-mobile.yml/runs?event=workflow_dispatch&per_page=100" \
+              --jq "[.workflow_runs[] | select(.display_title == \"${TITLE}\")] | sort_by(.created_at) | last // empty"
+          }
+          run="$(existing)"
+          if [[ -n "$run" ]]; then
+            id="$(jq -r .id <<<"$run")"
+            conclusion="$(jq -r '.conclusion // "running"' <<<"$run")"
+            if [[ "$conclusion" != "success" && "$conclusion" != "running" ]]; then
+              echo "::error::An earlier ${TITLE} run (${id}) ended ${conclusion}. Reconcile App Store Connect and the community APK by hand; a rerun can collide with an uploaded build number."
+              exit 1
+            fi
+            echo "Reusing earlier ${TITLE} run ${id} (${conclusion}); not dispatching again."
+          else
+            gh workflow run release-mobile.yml -R "$REPO" --ref "$GITHUB_REF_NAME" \
+              -f tag="$GA" -f ios=true -f android=true -f publish=true -f distribute=true
+            id=""
+            for _ in $(seq 1 24); do
+              sleep 5
+              run="$(existing)"
+              if [[ -n "$run" ]]; then id="$(jq -r .id <<<"$run")"; break; fi
+            done
+            [[ -n "$id" ]] || { echo "::error::Dispatched ${TITLE} but could not find its run."; exit 1; }
+          fi
+          echo "run_id=${id}" >> "$GITHUB_OUTPUT"
+          echo "### Mobile: https://github.com/${REPO}/actions/runs/${id}" >> "$GITHUB_STEP_SUMMARY"
+
+  mobile-report:
+    needs: [preflight, mobile]
+    if: ${{ !cancelled() && needs.mobile.outputs.run_id != '' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    permissions:
+      actions: read
+    env:
+      RUN_ID: ${{ needs.mobile.outputs.run_id }}
+      REPO: ${{ github.repository }}
+      GA: ${{ needs.preflight.outputs.ga_tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Report the iOS and Android delivery states
+        run: |
+          set -euo pipefail
+          until [[ "$(gh run view "$RUN_ID" -R "$REPO" --json status --jq .status)" == "completed" ]]; do
+            sleep 60
+          done
+          gh run view "$RUN_ID" -R "$REPO" --json conclusion,jobs > run.json
+          step() {
+            jq -r --arg job "$1" --arg step "$2" \
+              '[.jobs[] | select(.name == $job) | .steps[] | select(.name == $step) | .conclusion] | first // "not run"' run.json
+          }
+          upload="$(step 'iOS -> TestFlight' 'Build, sign and upload to TestFlight')"
+          distribute="$(step 'iOS -> TestFlight' 'Distribute the build to TestFlight')"
+          apk="$(step 'Android -> APK + AAB' 'Publish APK to nowledge-co/community release')"
+          {
+            echo "### Mobile ${GA} (run ${RUN_ID}: $(jq -r .conclusion run.json))"
+            echo "| state | result |"
+            echo "| --- | --- |"
+            echo "| 1. iOS IPA uploaded to App Store Connect | ${upload} |"
+            echo "| 2. iOS What to Test set, Beta App Review submitted, external group attached | ${distribute} |"
+            echo "| 3. Apple external beta approval | pending (asynchronous Apple state; check App Store Connect) |"
+            echo "| Android APK on nowledge-co/community v${GA} | ${apk} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [[ "$(jq -r .conclusion run.json)" == "success" ]]
+
+  verify:
+    needs: [preflight, plan, promote-docker, promote-cuda, promote-vulkan, promote-desktop, promote-rpm, promote-apt, updater-plan, updater-publish, publish-release, remove-pause, source-tags, mobile]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: read
+    env:
+      RC: ${{ needs.preflight.outputs.rc_tag }}
+      GA: ${{ needs.preflight.outputs.ga_tag }}
+      REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: docker/setup-buildx-action@v3
+        if: ${{ inputs.promote_docker || inputs.promote_gpu || inputs.promote_cuda || inputs.promote_vulkan }}
+
+      - name: Docker digests equal the RC, with linux/arm64 in the CPU lists
+        if: ${{ inputs.promote_docker || inputs.promote_gpu || inputs.promote_cuda || inputs.promote_vulkan }}
+        env:
+          CPU: ${{ inputs.promote_docker && 'cpu' || 'none' }}
+          GPU: ${{ (inputs.promote_gpu || inputs.promote_cuda) && 'cuda' || '' }} ${{ (inputs.promote_gpu || inputs.promote_vulkan) && 'vulkan' || '' }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 # GPU is a space-separated variant list.
+          node scripts/verify-docker-promotion.mjs "$RC" "$GA" "$CPU" $GPU
+
+      - name: CDN, R2, latest, updater feed and APT deliver exactly GA
+        if: ${{ inputs.promote_desktop }}
+        env:
+          VERIFY_RELEASE_VERSION: ${{ needs.preflight.outputs.ga_tag }}
+          VERIFY_PLATFORMS: mac,mac-intel,win,linux,linux-deb,linux-rpm,linux-appimage
+          VERIFY_ALLOW_NEWER_LATEST: ${{ inputs.allow_newer_desktop_latest }}
+          OLDER_PATCH: ${{ inputs.allow_newer_desktop_latest }}
+        run: |
+          set -euo pipefail
+          scope='latest,latest-redirect,direct,update'
+          [[ "$OLDER_PATCH" == "true" ]] || scope="${scope},apt"
+          VERIFY_SCOPE="$scope" node scripts/verify-ga-delivery.mjs
+
+      - name: Protocol-1 Check for Updates serves the published candidate
+        if: ${{ inputs.promote_desktop && !inputs.allow_newer_desktop_latest }}
+        env:
+          STATE: ${{ needs.updater-publish.outputs.state || needs.plan.outputs.authority_state }}
+          VERIFY_DESKTOP_MANIFEST: manifest.json
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$STATE" > state.json
+          if jq -e --arg ga "$GA" '.mode == "published" and .candidate.version == $ga' state.json >/dev/null; then
+            jq '.candidate' state.json > manifest.json
+            previous="$(jq -r .stable.version state.json)"
+          elif jq -e --arg ga "$GA" '(.mode == "completed" or .mode == "stable") and .stable.version == $ga' state.json >/dev/null; then
+            # Already accepted: the GA is the authority's stable release.
+            jq '.stable' state.json > manifest.json
+            previous="$(jq -r '.previous.version // empty' state.json)"
+          else
+            echo "::error::The authority does not serve ${GA}: $(jq -c '{mode, revision, stable: .stable.version, candidate: .candidate.version}' state.json)"
+            exit 1
+          fi
+          VERIFY_AUTHORITY_REVISION="$(jq -r .revision state.json)" \
+          VERIFY_PREVIOUS_DESKTOP_VERSION="$previous" \
+            node scripts/verify-controlled-desktop-update.mjs
+
+      - name: PyPI, mobile, and the Changelog date checklist
+        if: ${{ always() && inputs.promote_desktop }}
+        env:
+          TAGS_CREATED: ${{ needs.source-tags.outputs.created }}
+          CLI_TAG_PLANNED: ${{ needs.plan.outputs.stage_tag_cli }}
+          MOBILE_RUN: ${{ needs.mobile.outputs.run_id }}
+          MOBILE_ENABLED: ${{ inputs.mobile }}
+        run: |
+          set -euo pipefail
+          pypi="$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/nmem-cli/${GA}/json")"
+          if [[ "$pypi" == "200" ]]; then
+            pypi_state="nmem-cli ${GA} is on PyPI"
+          elif [[ "$TAGS_CREATED" == "true" || "$CLI_TAG_PLANNED" == "done" ]]; then
+            pypi_state="pending: cli-publish-v${GA} exists; approve the pypi environment in nowledge-co/mem release-pypi-clis"
+          else
+            pypi_state="NOT STARTED: cli-publish-v${GA} does not exist (see source-tags)"
+          fi
+          if [[ -n "$MOBILE_RUN" ]]; then
+            mobile_state="$(gh run view "$MOBILE_RUN" -R "$REPO" --json status,conclusion --jq '"\(.status) \(.conclusion)"') (https://github.com/${REPO}/actions/runs/${MOBILE_RUN}; see mobile-report)"
+          elif [[ "$MOBILE_ENABLED" == "true" ]]; then
+            mobile_state="NOT DISPATCHED (see the mobile job)"
+          else
+            mobile_state="opted out (mobile=false); record the exclusion in the release issue"
+          fi
+          published_at="$(gh release view "v${GA}" -R "$REPO" --json publishedAt --jq '.publishedAt // empty' || true)"
+          ga_date="${published_at%%T*}"
+          changelog_date="$(curl -fsS https://mem.nowledge.co/api/changelog/entries \
+            | jq -r --arg v "$GA" '[.entries[]? | select(.version == $v) | .date] | first // "missing"' || echo unreadable)"
+          {
+            echo "## GA ${GA} verification"
+            echo "- PyPI: ${pypi_state}"
+            echo "- Mobile: ${mobile_state}"
+            echo "- GA Release publishedAt: ${published_at:-not published}"
+            echo ""
+            echo "### Remaining human steps"
+            if [[ -n "$ga_date" && "$changelog_date" == "$ga_date" ]]; then
+              echo "- [x] Changelog entry ${GA} is dated ${ga_date}"
+            else
+              echo "- [ ] Flip the Changelog entry ${GA} from \`${changelog_date}\` to \`${ga_date:-<GA publishedAt date>}\` (GA publishedAt, UTC) in nowledge-labs-website, then deploy behind the production website gate and read back /api/changelog/release-notes with no ?version="
+            fi
+            echo "- [ ] Apple external beta approval (asynchronous)"
+            echo "- [ ] Date the Changelog in nowledge-co/mem history and run the release-history check (RELEASE_SOP.md section 7)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   recap:
-    needs: [validate, promote-docker, promote-cuda, promote-vulkan, promote-desktop]
+    needs: [preflight, plan, promote-docker, promote-cuda, promote-vulkan, promote-desktop, promote-rpm, open-apt, promote-apt, updater-read, updater-recover, updater-prepare, updater-verify, updater-publish, publish-release, remove-pause, source-tags, mobile, mobile-report, verify]
     if: always()
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
       - name: Overall status
         run: |
           {
-            echo "## Promote ${{ needs.validate.outputs.rc_tag }} → ${{ needs.validate.outputs.ga_tag }}"
-            echo "| job              | result                                   |"
-            echo "| ---------------- | ---------------------------------------- |"
-            echo "| validate         | ${{ needs.validate.result }}             |"
-            echo "| promote-docker   | ${{ needs.promote-docker.result }}       |"
-            echo "| promote-cuda     | ${{ needs.promote-cuda.result }}         |"
-            echo "| promote-vulkan   | ${{ needs.promote-vulkan.result }}       |"
-            echo "| promote-desktop  | ${{ needs.promote-desktop.result }}      |"
+            echo "## Promote ${{ inputs.rc_tag }} → ${{ inputs.ga_tag }}"
+            echo "| job | result |"
+            echo "| --- | --- |"
+            echo "| preflight | ${{ needs.preflight.result }} |"
+            echo "| plan | ${{ needs.plan.result }} |"
+            echo "| promote-docker | ${{ needs.promote-docker.result }} |"
+            echo "| promote-cuda | ${{ needs.promote-cuda.result }} |"
+            echo "| promote-vulkan | ${{ needs.promote-vulkan.result }} |"
+            echo "| promote-desktop | ${{ needs.promote-desktop.result }} (plan: ${{ needs.plan.outputs.stage_desktop }}) |"
+            echo "| promote-rpm | ${{ needs.promote-rpm.result }} (plan: ${{ needs.plan.outputs.stage_rpm }}) |"
+            echo "| open-apt | ${{ needs.open-apt.result }} (plan: ${{ needs.plan.outputs.stage_open_apt }}) |"
+            echo "| promote-apt | ${{ needs.promote-apt.result }} (plan: ${{ needs.plan.outputs.stage_apt }}) |"
+            echo "| updater read/recover/prepare/verify/publish | ${{ needs.updater-read.result }} / ${{ needs.updater-recover.result }} / ${{ needs.updater-prepare.result }} / ${{ needs.updater-verify.result }} / ${{ needs.updater-publish.result }} (plan: ${{ needs.plan.outputs.stage_updater }}) |"
+            echo "| publish-release | ${{ needs.publish-release.result }} (plan: ${{ needs.plan.outputs.stage_release }}) |"
+            echo "| remove-pause | ${{ needs.remove-pause.result }} (plan: ${{ needs.plan.outputs.stage_unpause }}) |"
+            echo "| source-tags | ${{ needs.source-tags.result }} (created: ${{ needs.source-tags.outputs.created }}) |"
+            echo "| mobile / report | ${{ needs.mobile.result }} / ${{ needs.mobile-report.result }} |"
+            echo "| verify | ${{ needs.verify.result }} |"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -49,6 +49,65 @@ on:
         description: "Persisted ISO publication timestamp for prepare"
         required: false
         type: string
+  # The one-click promote-rc-to-ga calls each authority transition as its own
+  # job, passing the mode/revision it just observed. Inputs and validation are
+  # identical to a manual dispatch; `state` exposes the observed result.
+  workflow_call:
+    inputs:
+      action:
+        description: "status, recover, prepare, or publish"
+        required: true
+        type: string
+      operator_name:
+        description: "Named operator key in the production Secrets Store document"
+        required: true
+        type: string
+      expected_mode:
+        required: false
+        type: string
+        default: ""
+      expected_revision:
+        required: false
+        type: string
+        default: ""
+      expected_stable_version:
+        required: false
+        type: string
+        default: ""
+      operation_id:
+        required: false
+        type: string
+        default: ""
+      reason:
+        required: false
+        type: string
+        default: ""
+      ga_tag:
+        required: false
+        type: string
+        default: ""
+      source_sha:
+        required: false
+        type: string
+        default: ""
+      release_notes:
+        required: false
+        type: string
+        default: ""
+      pub_date:
+        required: false
+        type: string
+        default: ""
+    outputs:
+      state:
+        description: "Compact JSON authority state: pre-state for status, verified post-state for a mutation"
+        value: ${{ jobs.operate.outputs.state }}
+      mode:
+        description: "Authority mode in `state`"
+        value: ${{ jobs.operate.outputs.mode }}
+      revision:
+        description: "Authority revision in `state`"
+        value: ${{ jobs.operate.outputs.revision }}
 
 concurrency:
   group: desktop-update-production-control
@@ -62,6 +121,10 @@ jobs:
   operate:
     runs-on: ubuntu-22.04
     environment: release-publish
+    outputs:
+      state: ${{ steps.result.outputs.state }}
+      mode: ${{ steps.result.outputs.mode }}
+      revision: ${{ steps.result.outputs.revision }}
     env:
       ACTION: ${{ inputs.action }}
       OPERATOR_NAME: ${{ inputs.operator_name }}
@@ -95,6 +158,10 @@ jobs:
       - name: Validate the explicit operation boundary
         run: |
           set -euo pipefail
+          [[ "$ACTION" =~ ^(status|recover|prepare|publish)$ ]] || {
+            echo "::error::action must be status, recover, prepare, or publish."
+            exit 1
+          }
           [[ "$OPERATOR_NAME" =~ ^[a-zA-Z0-9_.@-]{1,100}$ ]] || {
             echo "::error::operator_name is invalid."
             exit 1
@@ -317,6 +384,24 @@ jobs:
           else
             jq -e --arg ga "$GA" '.candidate.version == $ga' /tmp/post-state.json >/dev/null
           fi
+
+      - name: Expose the observed authority state
+        id: result
+        run: |
+          set -euo pipefail
+          if [[ "$ACTION" == "status" ]]; then
+            state_file=/tmp/pre-state.json
+          else
+            state_file=/tmp/post-state.json
+          fi
+          state="$(jq -c . "$state_file")"
+          mode="$(jq -er .mode "$state_file")"
+          revision="$(jq -er .revision "$state_file")"
+          {
+            echo "state=${state}"
+            echo "mode=${mode}"
+            echo "revision=${revision}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Persist the authority receipt
         if: inputs.action != 'status'
