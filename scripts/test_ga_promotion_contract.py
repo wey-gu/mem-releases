@@ -918,6 +918,7 @@ def meta_context(outputs, extra=None):
         "inputs.allow_newer_desktop_latest": False,
         "inputs.windows_runner_probe": False,
         "inputs.windows_cache_benchmark": False,
+        "inputs.windows_only": False,
     })
     context.update(extra or {})
     return context
@@ -1061,7 +1062,8 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
                                     "run_publish": "false", "run_vulkan": "false"})
             for job in CPU_BUILD_JOBS:
                 with self.subTest(is_nightly=is_nightly, job=job):
-                    self.assertNotIn("if", self.jobs[job], "Default platform builds are unconditional")
+                    self.assertTrue(github_expr(self.jobs[job].get("if", "true"), context),
+                                    "Default platform builds run without windows_only")
                     expected_needs = ["meta", "select-windows-runner"] if job == "build-windows" else "meta"
                     self.assertEqual(self.jobs[job]["needs"], expected_needs)
                     uploads = [s for s in self.jobs[job]["steps"]
@@ -1072,6 +1074,25 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
                         self.assertEqual(github_expr(upload.get("if", "true"), context), expect_upload,
                                          upload["with"]["name"])
         self.assertEqual(set(self.jobs["nightly-report"]["needs"]), {"meta", *CPU_BUILD_JOBS})
+
+    def test_windows_only_build_is_nightly_and_has_no_publishers(self):
+        result, outputs, _, _ = self.resolve("workflow_dispatch", DISPATCH_TAG="nightly",
+                                             WINDOWS_ONLY="true", DISPATCH_SOURCE_REF=NIGHTLY_SHA)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        extra = {"github.event_name": "workflow_dispatch", "inputs.tag": "nightly",
+                 "inputs.windows_only": True}
+        self.assertEqual(self.side_effect_reachable(outputs, extra), [])
+        context = meta_context(outputs, extra)
+        for job in CPU_BUILD_JOBS:
+            self.assertEqual(github_expr(self.jobs[job].get("if", "true"), context),
+                             job == "build-windows", job)
+        self.assertFalse(github_expr(self.jobs["nightly-report"]["if"], context))
+        self.assertEqual(outputs["source_ref"], NIGHTLY_SHA)
+        for event, tag in (("workflow_dispatch", "0.10.102"), ("push", "nightly"),
+                           ("repository_dispatch", "nightly")):
+            result, outputs, _, _ = self.resolve(event, DISPATCH_TAG=tag, WINDOWS_ONLY="true")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(outputs, {})
 
     def test_nightly_never_shares_a_concurrency_group_with_a_release(self):
         group = self.workflow["concurrency"]["group"]
@@ -1089,7 +1110,7 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
         for event, tag, expected in (("workflow_dispatch", "nightly", True),
                                      ("workflow_dispatch", "0.10.102", False), ("push", None, False),
                                      ("repository_dispatch", None, False)):
-            self.assertEqual(github_expr(report_if, {"github.event_name": event, "inputs.tag": tag}),
+            self.assertEqual(github_expr(report_if, {"github.event_name": event, "inputs.tag": tag, "inputs.windows_only": False}),
                              expected, (event, tag))
         self.assertEqual(self.jobs["nightly-report"]["permissions"], {"issues": "write"})
 

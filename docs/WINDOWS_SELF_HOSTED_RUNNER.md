@@ -75,3 +75,14 @@ Retaining the runner target's dependency artifacts and cleaning only our
 `nmem-wire` package before rebuilding took 30.728 seconds, with one Rust
 cache hit observed. That is about 6.4x faster than the initial component build;
 it does not establish the full backend's rebuild cost after a version change.
+
+## Full Windows qualification
+
+Dispatch `release-desktop` with `tag=nightly`, `source_ref=<mem commit SHA>`,
+`publish=false`, `windows_only=true`, and the desired `windows_runner` mode.
+It runs the same standard Windows release build and NSIS packaging steps;
+macOS/Linux, GPU variants, nightly all-platform reporting, artifact uploads and
+all publishing jobs are skipped. `windows_only` is rejected for release tags.
+Use a fixed SHA when comparing runner timing; hardware and cache state differ.
+The self-hosted shared cache statistics can also include developer clients;
+do not restart that shared daemon to isolate measurements.

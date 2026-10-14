@@ -69,6 +69,11 @@ on:
         required: false
         type: boolean
         default: false
+      windows_only:
+        description: "Only build standard Windows from the pinned source_ref; accepted only with tag=nightly, never publishes."
+        required: false
+        type: boolean
+        default: false
       windows_runner_probe:
         description: "Only run the isolated Windows self-hosted feasibility probe; skip all release jobs."
         required: false
@@ -255,6 +260,7 @@ jobs:
           DISPATCH_PUBLISH: ${{ inputs.publish }}
           DISPATCH_VULKAN: ${{ inputs.build_vulkan }}
           DISPATCH_SOURCE_REF: ${{ inputs.source_ref }}
+          WINDOWS_ONLY: ${{ inputs.windows_only }}
           MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
           PAYLOAD_REF: ${{ github.event.client_payload.ref }}
           PAYLOAD_VERSION: ${{ github.event.client_payload.version }}
@@ -262,6 +268,10 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          if [[ "${WINDOWS_ONLY:-false}" == "true" && ( "$EVENT_NAME" != "workflow_dispatch" || "$DISPATCH_TAG" != "nightly" ) ]]; then
+            echo "::error::windows_only is accepted only for a non-publishing tag=nightly manual build."
+            exit 1
+          fi
           # VULKAN is the OPTIONAL -vulkan GPU variant gate. It is ONLY ever
           # opt-in via the workflow_dispatch `build_vulkan` input; tag-push and
           # repository_dispatch triggers always leave it off, so the normal
@@ -413,6 +423,7 @@ jobs:
   # -----------------------------------------------------------------------
 
   build-macos-arm64:
+    if: ${{ inputs.windows_only != true }}
     needs: meta
     runs-on: macos-15
     # 300, not 180: a cold-cache build (any version bump) runs close to three
@@ -735,6 +746,7 @@ jobs:
           retention-days: 7
 
   build-macos-x86_64:
+    if: ${{ inputs.windows_only != true }}
     needs: meta
     runs-on: macos-15-intel
     # 300, not 180: see build-macos-arm64 (0.10.101-rc1 evidence).
@@ -1241,6 +1253,7 @@ jobs:
           retention-days: 14
 
   build-linux-deb-appimage:
+    if: ${{ inputs.windows_only != true }}
     needs: meta
     # Builds every default Linux artifact (.deb, .AppImage, .rpm) from ONE
     # backend bundle and ONE Tauri shell build, against one explicit runtime
@@ -2423,7 +2436,7 @@ jobs:
       - build-macos-x86_64
       - build-windows
       - build-linux-deb-appimage
-    if: ${{ always() && inputs.tag == 'nightly' }}
+    if: ${{ always() && inputs.tag == 'nightly' && inputs.windows_only != true }}
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     permissions:
