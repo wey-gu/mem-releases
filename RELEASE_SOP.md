@@ -376,6 +376,29 @@ published GA, APT, direct downloads, and active pause, deletes only the reviewed
 Desktop routes, retains the pause Worker deployment, and requires exact legacy
 plus protocol-1 `allowed` readback before success.
 
+Once that exposure workflow succeeds, accept the published candidate as the
+new stable recovery baseline. Use the published authority revision returned by
+the publish receipt, the stable version that was retained during rollout, and a
+fresh persisted UUID:
+
+```bash
+gh workflow run desktop-update-control.yml -R wey-gu/mem-releases \
+  -f action=complete \
+  -f operator_name=<named-operator> \
+  -f expected_mode=published \
+  -f expected_revision=<published-revision> \
+  -f expected_stable_version=<previous-version> \
+  -f operation_id=<uuid-v4> \
+  -f reason='<audited-acceptance-reason>' \
+  -f ga_tag=<version>
+```
+
+The completion operation re-verifies exact GA delivery and six-platform
+protocol-1 delivery before advancing the candidate. It moves the former stable
+release to `previous`, clears `candidate`, and leaves the authority in
+`completed` mode so the next release can be prepared without overwriting an
+unaccepted rollout.
+
 Record the workflow run, the resulting GA release draft, the R2/CDN readback,
 and the updater readback. A core release is not evidence that a deferred RPM
 has been delivered.

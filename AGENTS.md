@@ -31,6 +31,11 @@ previous desktop version's native User-Agent for `mac`, `mac_intel`, `win`,
 file size, SHA-256 and `no-store` cache policy. Ordinary `/latest` and
 `/update.json` readback alone does not verify desktop Check for Updates.
 
+After that six-platform readback succeeds, accept the published candidate with
+the audited `complete` authority operation. This advances the candidate to the
+stable recovery baseline, retains the former stable release as `previous`, and
+is required before preparing the next Desktop release.
+
 # Release candidate integrity
 
 For every Nowledge Mem App release, cut a release branch before release

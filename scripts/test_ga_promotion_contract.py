@@ -394,6 +394,22 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn('CLOUDFLARE_SECRETS_STORE_API_TOKEN', workflow)
         self.assertIn('Upload the authority receipt', workflow)
 
+    def test_desktop_update_control_completes_only_a_verified_published_candidate(self):
+        workflow = (ROOT / '.github/workflows/desktop-update-control.yml').read_text()
+        worker = (ROOT / 'scripts/desktop-update-operator-worker.mjs').read_text()
+        self.assertIn('options: [status, recover, complete, prepare, publish]', workflow)
+        self.assertIn("['recover', 'complete', 'prepare', 'publish']", worker)
+        self.assertIn('complete requires an observed published mode', workflow)
+        self.assertIn("jq '.candidate' /tmp/pre-state.json", workflow)
+        self.assertIn('node scripts/verify-ga-delivery.mjs', workflow)
+        self.assertIn('node scripts/verify-controlled-desktop-update.mjs', workflow)
+        self.assertIn('complete) next_mode="completed"', workflow)
+        self.assertIn("'.stable_version == $ga and .candidate_version == null'", workflow)
+        self.assertIn(
+            "'.stable.version == $ga and .candidate == null and .previous.version == $previous'",
+            workflow,
+        )
+
     def test_recover_accepts_stopped_authority_with_retained_candidate(self):
         workflow = (ROOT / '.github/workflows/desktop-update-control.yml').read_text()
         section = workflow.split('      - name: Read and validate exact pre-state\n', 1)[1]
