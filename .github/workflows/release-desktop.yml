@@ -44,6 +44,11 @@ on:
         required: false
         type: boolean
         default: false
+      windows_runner_probe:
+        description: "Only run the isolated Windows self-hosted feasibility probe; skip all release jobs."
+        required: false
+        type: boolean
+        default: false
   push:
     # Auto-fire on RC-style tags ONLY (anything with a `-` suffix:
     # `-rcN`, `-betaN`, `-ciN`). Clean-semver GA tags like `v0.8.4`
@@ -81,11 +86,54 @@ env:
   GCP_BAZEL_CACHE_WORKLOAD_IDENTITY_PROVIDER: projects/789880242959/locations/global/workloadIdentityPools/github-actions/providers/nowledge-mem
 
 jobs:
+  windows-runner-probe:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_runner_probe == true }}
+    runs-on: windows-book-feasibility
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Verify native Windows runner and compiler
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'native-runner-proof'
+          New-Item -ItemType Directory -Force -Path (Join-Path $root 'src') | Out-Null
+          @'
+          [package]
+          name="windows-runner-native-proof"
+          version="0.1.0"
+          edition="2024"
+          [workspace]
+          [profile.release]
+          strip="symbols"
+          '@ | Set-Content (Join-Path $root 'Cargo.toml') -Encoding ascii
+          'fn main() { println!("windows-runner-native-proof:ok"); }' |
+            Set-Content (Join-Path $root 'src\main.rs') -Encoding ascii
+          $timer = [Diagnostics.Stopwatch]::StartNew()
+          & cargo +1.98.1 build --release --offline --manifest-path (Join-Path $root 'Cargo.toml')
+          if ($LASTEXITCODE -ne 0) { throw 'Native Rust/MSVC build failed' }
+          $result = & (Join-Path $root 'target\release\windows-runner-native-proof.exe')
+          if ($LASTEXITCODE -ne 0 -or $result -ne 'windows-runner-native-proof:ok') {
+            throw 'Native executable did not return the expected result'
+          }
+          $cpu = Get-CimInstance Win32_Processor
+          $memory = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB
+          @"
+          ### Windows runner feasibility
+          - Runner: $env:RUNNER_NAME
+          - CPU: $($cpu.Name); $($cpu.NumberOfCores) cores / $($cpu.NumberOfLogicalProcessors) logical processors
+          - RAM: $([math]::Round($memory, 1)) GiB
+          - Native Rust/MSVC proof: $result ($([math]::Round($timer.Elapsed.TotalSeconds, 2)) seconds)
+          - This small fixture does not measure release build performance.
+          "@ | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
   # -----------------------------------------------------------------------
   # Resolve version + flags. Also exposes `source_ref` so build jobs check
   # out the private repo at the right tag.
   # -----------------------------------------------------------------------
   meta:
+    if: ${{ inputs.windows_runner_probe != true }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.resolve.outputs.version }}
