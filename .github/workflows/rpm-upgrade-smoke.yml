@@ -88,9 +88,11 @@ jobs:
           ROOT="$RUNNER_TEMP/base-root"
           mkdir -p "$ROOT"
           (cd "$ROOT" && rpm2cpio "$RUNNER_TEMP/rpms/base.rpm" | cpio -idm --quiet)
-          MAIN="$(find "$ROOT/usr/bin" -maxdepth 1 -name nowledge-mem -type f | head -1)"
-          RES="$ROOT/usr/lib/Nowledge Mem/_up_/rust-backend"
-          [[ -f "$MAIN" && -d "$RES" ]] || { echo "::error::unexpected base RPM layout"; find "$ROOT" -maxdepth 4 | head -50; exit 1; }
+          echo "Base RPM layout:"; find "$ROOT" -maxdepth 4 | sed "s#^$ROOT##" | head -40
+          MAIN="$(find "$ROOT" -type f -name nowledge-mem -path '*/bin/*' -print -quit || true)"
+          RES="$(find "$ROOT" -type d -name rust-backend -print -quit || true)"
+          [[ -f "$MAIN" && -d "$RES" ]] || { echo "::error::unexpected base RPM layout (main=$MAIN res=$RES)"; exit 1; }
+          echo "main=$MAIN res=$RES"
           mkdir -p src-tauri/target/release
           # Tauri patches a bundle-type marker into the main binary per
           # package and refuses a binary that is already patched; restore the
