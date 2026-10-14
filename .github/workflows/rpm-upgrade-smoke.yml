@@ -65,7 +65,7 @@ jobs:
           sparse-checkout: nowledge-graph
 
       - name: Install rpm tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq rpm cpio jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq rpm cpio jq libarchive-tools
 
       - uses: actions/setup-node@v4
         with:
@@ -87,7 +87,14 @@ jobs:
           set -euo pipefail
           ROOT="$RUNNER_TEMP/base-root"
           mkdir -p "$ROOT"
-          (cd "$ROOT" && rpm2cpio "$RUNNER_TEMP/rpms/base.rpm" | cpio -idm --quiet)
+          # rpm2cpio first; libarchive's bsdtar reads RPMs directly as a fallback.
+          if ! (cd "$ROOT" && rpm2cpio "$RUNNER_TEMP/rpms/base.rpm" > "$RUNNER_TEMP/base.cpio" \
+                && cpio -idm < "$RUNNER_TEMP/base.cpio" 2>&1 | tail -5); then
+            echo "::warning::rpm2cpio/cpio failed; trying bsdtar"
+            rm -rf "$ROOT" && mkdir -p "$ROOT"
+            bsdtar -xf "$RUNNER_TEMP/rpms/base.rpm" -C "$ROOT"
+          fi
+          rm -f "$RUNNER_TEMP/base.cpio"
           echo "Base RPM layout:"; find "$ROOT" -maxdepth 4 | sed "s#^$ROOT##" | head -40
           MAIN="$(find "$ROOT" -type f -name nowledge-mem -path '*/bin/*' -print -quit || true)"
           RES="$(find "$ROOT" -type d -name rust-backend -print -quit || true)"
