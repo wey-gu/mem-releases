@@ -12,6 +12,9 @@ links() {
 size() { rpm -q --qf '%{SIZE}' "Nowledge Mem" 2>/dev/null || rpm -qa --qf '%{NAME} %{SIZE}\n' | grep -i nowledge; }
 check() { if eval "$2"; then echo "SUMMARY ok:   $1"; else echo "SUMMARY FAIL: $1"; fail=1; fi; }
 
+# Desktop Fedora ships procps-ng (pgrep); the container image does not, and the
+# maintainer scripts fail closed without it.
+dnf -y -q install procps-ng >/dev/null
 dnf -y -q install /rpms/base.rpm >/dev/null
 echo "SUMMARY base installed: links [$(links)] size $(size)"
 
