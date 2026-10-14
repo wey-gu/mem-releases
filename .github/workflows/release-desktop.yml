@@ -735,6 +735,29 @@ jobs:
           mv -f "$DMG" "$OUT"
           echo "dmg=$OUT" >> "$GITHUB_OUTPUT"
 
+      # Scriptable rc smoke on the signed, notarized DMG this job built: the
+      # same checks as the human `release-smoke.sh`, minus semantic search
+      # and the headline proof. Runs before upload; a failure withholds the
+      # DMG, so the rc is not promotable. About a minute on this long-pole job.
+      - &smoke_packaged_backend
+        name: Smoke the packaged backend in isolation
+        timeout-minutes: 5
+        shell: bash
+        env:
+          PACKAGE: ${{ steps.locate.outputs.dmg || steps.locate.outputs.deb }}
+        run: |
+          set -euo pipefail
+          # Source refs older than the script cannot run it; say so loudly
+          # instead of failing a historical rebuild.
+          if [[ ! -f scripts/release-smoke-core.sh ]]; then
+            echo "::warning title=Release smoke skipped::This source ref predates scripts/release-smoke-core.sh; run ./scripts/release-smoke.sh by hand before promoting."
+            exit 0
+          fi
+          bash scripts/release-smoke-core.sh \
+            --package "$PACKAGE" \
+            --expect-version "$VERSION" \
+            --expect-sha "$(git rev-parse HEAD)"
+
       # A nightly builds main, which may hold unreleased work: keep it off
       # the public repository's downloadable workflow artifacts.
       - uses: actions/upload-artifact@v4
@@ -1484,6 +1507,15 @@ jobs:
         run: |
           ./scripts/verify-linux-package.sh "${{ steps.locate.outputs.deb }}"
           ./scripts/verify-linux-package.sh "${{ steps.locate.outputs.appimage }}"
+
+      # The scriptable part of the rc smoke, on the artifact this job built:
+      # boot the packaged nmem-server in proven isolation (scratch roots, heal
+      # disabled, open-file proof), assert version + build_sha, write, read
+      # back, lexical search, negative control, restart persistence. It runs
+      # BEFORE the artifact upload, so a failure leaves the rc without its
+      # Linux packages and therefore not promotable. Semantic search and the
+      # release's headline claim stay with the human smoke.
+      - *smoke_packaged_backend
 
       # A nightly builds main, which may hold unreleased work: keep it off
       # the public repository's downloadable workflow artifacts.

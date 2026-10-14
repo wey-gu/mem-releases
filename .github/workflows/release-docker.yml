@@ -495,9 +495,23 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
+      # The scriptable rc smoke probe, from the exact commit the image was
+      # built from. Only this one file: the verify job needs no build tree.
+      - name: Fetch the release smoke probe
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ needs.meta.outputs.source_sha }}
+          path: mem-src
+          fetch-depth: 1
+          sparse-checkout: scripts/release_smoke_probe.py
+          sparse-checkout-cone-mode: false
+
       - name: Pull and smoke-test
         env:
           TAG: ${{ needs.meta.outputs.version }}
+          SOURCE_SHA: ${{ needs.meta.outputs.source_sha }}
         run: |
           set -euo pipefail
           docker pull "${IMAGE}:${TAG}"
@@ -540,6 +554,33 @@ jobs:
           else:
               raise AssertionError(f"version mismatch: binary={v} tag={t}")
           '
+
+          # Scriptable rc smoke: build_sha, write, read back, lexical search,
+          # negative control, then restart the container and read back again.
+          # Isolation is the container itself: freshly created, no host bind
+          # mounts (asserted), so it can only see its own empty data volume.
+          PROBE=mem-src/scripts/release_smoke_probe.py
+          if [[ ! -f "$PROBE" ]]; then
+            echo "::warning title=Release smoke skipped::The source commit predates scripts/release_smoke_probe.py; smoke this image by hand before promoting."
+            exit 0
+          fi
+          BINDS=$(docker inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}} {{end}}{{end}}' "$CID")
+          if [[ -n "$BINDS" ]]; then
+            echo "::error::smoke container has host bind mounts ($BINDS); refusing to write test data"
+            exit 1
+          fi
+          probe() {
+            python3 "$PROBE" "$1" --base-url http://127.0.0.1:14242 \
+              --expect-version "$TAG" --expect-sha "$SOURCE_SHA" \
+              --state "$RUNNER_TEMP/smoke-state.json"
+          }
+          probe write || { echo "::error::release smoke failed (write phase); this image is not promotable"; exit 1; }
+          docker restart "$CID" >/dev/null
+          for _ in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:14242/health >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          probe reread || { echo "::error::release smoke failed after restart; this image is not promotable"; exit 1; }
 
       - uses: sigstore/cosign-installer@v3
       - name: Verify cosign signature
