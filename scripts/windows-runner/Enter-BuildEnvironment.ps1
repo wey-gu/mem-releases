@@ -10,7 +10,7 @@ $settings = @{
     RUSTC_WRAPPER = Join-Path $tools 'bin\sccache.exe'
     SCCACHE_DIR = Join-Path $cache 'compiler'
     SCCACHE_CACHE_SIZE = '8G'
-    SCCACHE_IDLE_TIMEOUT = '600'
+    SCCACHE_IDLE_TIMEOUT = '0'
     SCCACHE_IGNORE_SERVER_IO_ERROR = '1'
     CMAKE_C_COMPILER_LAUNCHER = Join-Path $tools 'bin\sccache.exe'
     CMAKE_CXX_COMPILER_LAUNCHER = Join-Path $tools 'bin\sccache.exe'
@@ -33,4 +33,3 @@ foreach ($name in $settings.Keys) { [Environment]::SetEnvironmentVariable($name,
 $env:Path = (($paths + @($env:Path -split ';') | Select-Object -Unique) -join ';')
 # Do not share Cargo target directories or change developer incremental settings.
 # Rust incremental/check/linker invocations may compile normally without cache hits.
-

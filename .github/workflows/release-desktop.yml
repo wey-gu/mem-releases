@@ -130,7 +130,7 @@ jobs:
           'fn main() { println!("windows-runner-native-proof:ok"); }' |
             Set-Content (Join-Path $root 'src\main.rs') -Encoding ascii
           $timer = [Diagnostics.Stopwatch]::StartNew()
-          & cargo +1.98.1 build --release --offline --manifest-path (Join-Path $root 'Cargo.toml')
+          & cargo +1.98.1 build --release --offline --manifest-path (Join-Path $root 'Cargo.toml') --target-dir (Join-Path $root 'target')
           if ($LASTEXITCODE -ne 0) { throw 'Native Rust/MSVC build failed' }
           $result = & (Join-Path $root 'target\release\windows-runner-native-proof.exe')
           if ($LASTEXITCODE -ne 0 -or $result -ne 'windows-runner-native-proof:ok') {
