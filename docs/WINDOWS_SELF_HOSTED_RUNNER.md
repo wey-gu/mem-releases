@@ -1,10 +1,21 @@
 # Windows self-hosted release runner
 
-`windows-book` is an optional runner for the standard Windows Desktop build.
-Hosted `windows-2022` stays the default; GPU variants stay hosted. Select
-`windows_self_hosted=true` on a manual `release-desktop` dispatch only when the
-machine is available. A self-hosted selection does not automatically fall back
-when the machine is offline.
+The standard Windows Desktop build defaults to `windows_runner=auto`: select
+`windows-book` when GitHub's runner inventory reports this exact labelled machine
+online and idle; otherwise use GitHub-hosted `windows-2022`. Offline, busy,
+missing credentials, API/auth errors and the 10-second query timeout all select
+GitHub. GPU variants remain hosted. Tag and repository dispatch also use auto.
+
+The selector uses the existing `RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY`
+installation, requesting only repository Administration read permission. The
+App must have that permission and be installed on `mem-releases`; if it does not,
+auto safely uses GitHub and token creation reports the configuration error.
+Use `windows_runner=hosted` to force GitHub, or `self-hosted` to force the local
+machine. Legacy `windows_self_hosted=true` forces self-hosted only in auto mode.
+
+This is availability selection before dispatch, not an automatic rebuild after
+failure. A selected machine can go offline between the check and assignment,
+or fail during a build; those cases still require rerunning with `hosted`.
 
 The runner is registered to `wey-gu/mem-releases` with only `windows-book` and
 `windows-book-feasibility` labels. `Nowledge-Mem-Release-Runner` starts it under

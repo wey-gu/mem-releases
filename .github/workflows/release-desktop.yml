@@ -49,8 +49,14 @@ on:
         required: false
         type: boolean
         default: false
+      windows_runner:
+        description: "Standard Windows runner: auto prefers available windows-book, otherwise GitHub; hosted/self-hosted force a choice."
+        required: false
+        type: choice
+        options: [auto, hosted, self-hosted]
+        default: auto
       windows_self_hosted:
-        description: "Use windows-book for the standard Windows build; GPU variants and the default remain hosted."
+        description: "Deprecated: force windows-book; prefer windows_runner selection."
         required: false
         type: boolean
         default: false
@@ -96,6 +102,43 @@ env:
   GCP_BAZEL_CACHE_WORKLOAD_IDENTITY_PROVIDER: projects/789880242959/locations/global/workloadIdentityPools/github-actions/providers/nowledge-mem
 
 jobs:
+  select-windows-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    outputs:
+      label: ${{ steps.select.outputs.label }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: mode
+        env:
+          MODE: ${{ inputs.windows_runner || 'auto' }}
+          LEGACY_SELF_HOSTED: ${{ inputs.windows_self_hosted }}
+          APP_CONFIGURED: ${{ secrets.RELEASE_APP_ID != '' && secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [[ "$LEGACY_SELF_HOSTED" == "true" && "$MODE" == "auto" ]]; then MODE=self-hosted; fi
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "app_configured=$APP_CONFIGURED" >> "$GITHUB_OUTPUT"
+      - id: inventory-token
+        if: ${{ steps.mode.outputs.mode == 'auto' && steps.mode.outputs.app_configured == 'true' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: mem-releases
+          permission-administration: read
+      - id: select
+        name: Prefer available Windows machine, otherwise GitHub
+        env:
+          WINDOWS_RUNNER_MODE: ${{ steps.mode.outputs.mode }}
+          RUNNER_INVENTORY_TOKEN: ${{ steps.inventory-token.outputs.token }}
+        run: node scripts/select-windows-runner.mjs
+
   windows-runner-probe:
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows_runner_probe == true || inputs.windows_cache_benchmark == true) }}
     runs-on: windows-book-feasibility
@@ -805,8 +848,8 @@ jobs:
           retention-days: 7
 
   build-windows:
-    needs: meta
-    runs-on: ${{ inputs.windows_self_hosted == true && 'windows-book' || 'windows-2022' }}
+    needs: [meta, select-windows-runner]
+    runs-on: ${{ needs.select-windows-runner.outputs.label }}
     timeout-minutes: 180
     env:
       VERSION: ${{ needs.meta.outputs.version }}
