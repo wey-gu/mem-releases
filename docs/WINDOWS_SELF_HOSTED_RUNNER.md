@@ -4,7 +4,13 @@ The standard Windows Desktop build defaults to `windows_runner=auto`: select
 `windows-book` when GitHub's runner inventory reports this exact labelled machine
 online and idle; otherwise use GitHub-hosted `windows-2022`. Offline, busy,
 missing credentials, API/auth errors and the 10-second query timeout all select
-GitHub. GPU variants remain hosted. Tag and repository dispatch also use auto.
+GitHub. GPU variants remain hosted.
+
+Only `tag=nightly` builds (including `windows_only` qualification) can use
+`windows-book`. Every release (tag push, repository dispatch, or a dispatch
+with any other tag, rc or GA) builds Windows on GitHub-hosted `windows-2022`,
+whatever `windows_runner` says: promotion re-tags rc bits, so an rc built on
+this machine would ship as GA (nowledge-co/mem#7108).
 
 The selector uses the existing `RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY`
 installation, requesting only repository Administration read permission. The

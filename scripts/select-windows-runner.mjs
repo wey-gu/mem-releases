@@ -10,7 +10,12 @@ export function selectRunner(mode, runners = []) {
     ? 'windows-book' : 'windows-2022';
 }
 
-export async function resolveRunner(mode, token, repository, fetcher = fetch) {
+export async function resolveRunner(mode, token, repository, fetcher = fetch, { release = false } = {}) {
+  // A release (any build that is not tag=nightly) always uses GitHub-hosted
+  // Windows: the self-hosted machine is for qualification and nightly runs
+  // only (nowledge-co/mem#7108). Promotion re-tags rc bits, so an rc built
+  // there would ship as GA.
+  if (release) return selectRunner('hosted');
   if (mode !== 'auto') return selectRunner(mode);
   if (!token) return 'windows-2022';
   try {
@@ -29,9 +34,15 @@ export async function resolveRunner(mode, token, repository, fetcher = fetch) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const label = await resolveRunner(process.env.WINDOWS_RUNNER_MODE || 'auto',
-    process.env.RUNNER_INVENTORY_TOKEN, process.env.GITHUB_REPOSITORY);
+  const mode = process.env.WINDOWS_RUNNER_MODE || 'auto';
+  const release = process.env.WINDOWS_RUNNER_RELEASE === 'true';
+  const label = await resolveRunner(mode, process.env.RUNNER_INVENTORY_TOKEN,
+    process.env.GITHUB_REPOSITORY, fetch, { release });
+  if (release && mode === 'self-hosted') {
+    console.log('::warning::windows_runner=self-hosted ignored: releases always build Windows on GitHub-hosted runners.');
+  }
   appendFileSync(process.env.GITHUB_OUTPUT, `label=${label}\n`);
-  appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Windows runner selection\nSelected: \`${label}\`\n`);
+  appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+    `### Windows runner selection\nSelected: \`${label}\`${release ? ' (release: hosted only)' : ''}\n`);
   console.log(`Selected Windows runner: ${label}`);
 }
