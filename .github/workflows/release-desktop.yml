@@ -765,11 +765,12 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 11.22.0
+      # No `cache: pnpm` here, for the same tag-scope reason as the
+      # rust-cache note below: "pnpm cache is not found" on every sampled
+      # build-windows run, and the save added about a minute after the build.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
@@ -795,22 +796,24 @@ jobs:
       # C++ link) does not expose NASM on PATH, so install it explicitly.
       - uses: ilammy/setup-nasm@v1
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run by
-          # dtolnay/rust-toolchain; caching it once poisoned every later run).
-          cache-bin: false
-          workspaces: |
-            nowledge-graph/src-tauri
-            nmem-rs
-          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
-          # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
-          key: windows-x86_64-v4-pdfium
+      # No Swatinem/rust-cache on the Windows critical path. Releases run on
+      # tag refs, and a GitHub Actions cache written by a tag run is visible
+      # only to that same tag, so a new release tag can only restore a cache
+      # written on main. Restore found nothing on every build-windows run
+      # sampled from 0.10.97-rc1 to 0.10.101-rc1 (jobs 113173922102,
+      # 113748960917, 114111958682, 114472171952, 114574744764, 114624893823,
+      # 114815304503), including 0.10.97-rc1 two days after a main-branch run
+      # (job 112261213691) saved one: 2+ GB entries do not survive the 10 GB
+      # repository cache budget. Each save still uploaded 2.2-2.65 GB and held
+      # the job 2-4.6 minutes after the installer was built. sccache on R2 is
+      # the compile cache that carries across tags.
 
       # A Cargo target cache can restore liteparse-pdfium-sys build output from
       # another runner. Point bundle staging at this runner's restored DLL when
       # it exists; otherwise invalidate only that package so the normal release
-      # build repopulates the exact locked PDFium runtime.
+      # build repopulates the exact locked PDFium runtime. This job no longer
+      # restores a target cache, so it takes the invalidate branch on an empty
+      # target dir (a few seconds); it stays as a guard if a cache returns.
       - name: Resolve or repair the PDFium runtime cache
         working-directory: nmem-rs
         shell: pwsh
@@ -923,6 +926,31 @@ jobs:
           Set-Content -Path $scriptPath -Value $scriptContent -NoNewline -Encoding utf8
           Write-Host "Applied Windows PDFium runtime staging compatibility backport."
 
+      # Diagnostics for the Windows sccache miss floor (nowledge-co/mem#7108,
+      # W8). On 0.10.100-rc2, whose sources differ from rc1 in two crates,
+      # macOS and Linux missed 2 Rust compiles and this job missed 200 (job
+      # 114574744764). No Cargo-built Windows run since 0.10.93-rc3 has missed
+      # fewer than 200. The job log says how many missed, not which.
+      # Starting the daemon here with debug logging records one hit/miss line
+      # and hash key per compile, and the collection step after the build adds
+      # content hashes of the inputs sccache hashes (rlibs, proc-macro DLLs,
+      # native static libs, build-script outputs). Two runs' manifests then
+      # show which artifacts change between runs with unchanged sources.
+      # Only the daemon gets SCCACHE_LOG: compiler wrappers inherit the job
+      # env, and debug output on their stderr would reach Cargo. Remove both
+      # steps once the root cause is fixed.
+      - name: Start sccache daemon with debug logging (Windows miss diagnostics)
+        if: env.RUSTC_WRAPPER == 'sccache'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          diag="$RUNNER_TEMP/sccache-diag"
+          mkdir -p "$diag"
+          sccache --stop-server >/dev/null 2>&1 || true
+          SCCACHE_LOG=sccache=debug SCCACHE_LOG_MILLIS=1 \
+            SCCACHE_ERROR_LOG="$diag/daemon.log" sccache --start-server
+
       - name: Build Rust backend bundle (Windows)
         working-directory: nowledge-graph
         shell: pwsh
@@ -952,6 +980,66 @@ jobs:
           path: ${{ steps.locate.outputs.exe }}
           if-no-files-found: error
           retention-days: 7
+
+      # Collection half of the Windows sccache miss diagnostics above. The
+      # repository is public, so the artifact holds only what the job log
+      # already exposes: unit names, hit/miss, hash keys, and content hashes.
+      # Compiler arguments and the raw daemon log stay on the runner.
+      - name: Collect sccache miss diagnostics (Windows)
+        if: always() && env.RUSTC_WRAPPER == 'sccache'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          diag="$RUNNER_TEMP/sccache-diag"
+          out="$diag/out"
+          mkdir -p "$out"
+          log="$diag/daemon.log"
+          if [[ -s "$log" ]]; then
+            # One line per daemon event, in log order: "<time> <unit> <event>
+            # <value>". <unit> is the Rust crate name or the C/C++ object
+            # name. For a Rust compile only Cargo's extra-filename is kept
+            # from the argument list, to tell feature variants of one crate
+            # apart; the hash key line follows it, then the hit/miss line.
+            sed -nE '
+              s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: get_cached_or_compile: .*"extra-filename=([^"]+)".*/\1 \2 args \3/p
+              t
+              s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: get_cached_or_compile: .*/\1 \2 args -/p
+              t
+              s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: Hash key: ([0-9a-f]+).*/\1 \2 key \3/p
+              t
+              s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: Cache (hit|miss|none|recache) in ([0-9.]+) s.*/\1 \2 \3 \4/p
+              t
+              s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: (Cache read error|Failed to decompress).*/\1 \2 cache-error -/p
+            ' "$log" > "$out/events.txt"
+            echo "events: $(awk '{print $3}' "$out/events.txt" | sort | uniq -c | tr '\n' ' ')"
+            echo "::group::Compile units that missed the cache"
+            awk '$3 == "miss" {print $2}' "$out/events.txt" | sort | uniq -c
+            echo "::endgroup::"
+          else
+            echo "::warning title=sccache diagnostics::No daemon debug log at $log"
+          fi
+          # Content hashes of every input sccache hashes into a Rust key, plus
+          # native objects, so a cross-run diff names the unstable artifact.
+          for root in nmem-rs/target nowledge-graph/src-tauri/target; do
+            [[ -d "$root" ]] || continue
+            find "$root" -type f \( \
+                \( -path '*/deps/*' \( -name '*.rlib' -o -name '*.dll' \) \) -o \
+                \( -path '*/build/*' \( -name '*.lib' -o -name '*.a' -o -name '*.obj' \
+                   -o -name '*.o' -o -name '*.rs' -o -name 'output' \) \) \) -print0 \
+              | xargs -0 -r sha256sum
+          done | sort -k2 > "$out/artifact-sha256.txt"
+          echo "artifact hashes: $(wc -l < "$out/artifact-sha256.txt")"
+
+      - name: Upload sccache miss diagnostics (Windows)
+        if: always() && env.RUSTC_WRAPPER == 'sccache'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-sccache-diagnostics
+          path: ${{ runner.temp }}/sccache-diag/out
+          if-no-files-found: warn
+          retention-days: 14
 
   build-linux-deb-appimage:
     needs: meta
