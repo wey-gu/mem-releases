@@ -819,7 +819,7 @@ elif args[:2] == ["run", "list"]:
     print(os.environ.get("FAKE_GH_RUNS", "[]"))
 elif args[:2] == ["issue", "list"]:
     print(os.environ.get("FAKE_GH_ISSUES", "[]"))
-elif args[:1] == ["issue"]:
+elif args[:1] == ["issue"] or args[:2] == ["workflow", "run"]:
     pass
 else:
     sys.exit(f"unexpected gh call: {args}")
@@ -874,7 +874,6 @@ def meta_context(outputs, extra=None):
     context = {f"needs.meta.outputs.{k}": v for k, v in outputs.items()}
     context.update({f"steps.resolve.outputs.{k}": v for k, v in outputs.items()})
     context.update({
-        "needs.meta.outputs.nightly_yielded": outputs.get("nightly_yielded", ""),
         "steps.rpm.outcome": "success",
         "steps.setup_sccache.outcome": "success",
         "steps.desktop_dependency.outputs.sha": NIGHTLY_SHA,
@@ -960,7 +959,6 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
 
     def test_nightly_pins_one_commit_and_never_publishes(self):
         for event, env, ref in (
-            ("schedule", {}, "main"),
             ("workflow_dispatch", {"DISPATCH_TAG": "nightly"}, "main"),
             ("workflow_dispatch", {"DISPATCH_TAG": "nightly", "DISPATCH_SOURCE_REF": "feat/x",
                                    "DISPATCH_PUBLISH": "true", "DISPATCH_VULKAN": "true"}, "feat/x"),
@@ -980,7 +978,7 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
                 self.assertIn(NIGHTLY_SHA, summary)
         for env in ({"FAKE_GH_SHA": "not-a-sha"}, {"FAKE_GH_PKG": "0.10"}, {"FAKE_GH_FAIL": "1"}):
             with self.subTest(failure=env):
-                result, values, _, _ = self.resolve("schedule", **env)
+                result, values, _, _ = self.resolve("workflow_dispatch", DISPATCH_TAG="nightly", **env)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(values, {})
 
@@ -1005,9 +1003,8 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
     def test_nightly_outputs_reach_no_publishing_job_or_step(self):
         nightly = {"version": "0.10.102-nightly.20261014", "is_dry_run": "false",
                    "run_publish": "false", "run_vulkan": "false", "is_nightly": "true"}
-        for event, tag in (("schedule", None), ("workflow_dispatch", "nightly")):
-            self.assertEqual(self.side_effect_reachable(
-                nightly, {"github.event_name": event, "inputs.tag": tag}), [], event)
+        self.assertEqual(self.side_effect_reachable(
+            nightly, {"github.event_name": "workflow_dispatch", "inputs.tag": "nightly"}), [])
         # The evaluator is not vacuous: the release shapes do reach their writers.
         push = {"github.event_name": "push", "inputs.tag": None}
         rc = dict(nightly, version="0.10.102-rc1", is_dry_run="true", is_nightly="false")
@@ -1020,17 +1017,14 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
         self.assertIn("build-linux-vulkan: Attach -vulkan bundles to GH Release (manual download only)",
                       self.side_effect_reachable(vulkan_rc, push))
 
-    def test_nightly_uploads_no_binaries_and_yield_only_skips_nightly_builds(self):
-        for outputs, expect_upload, expect_build in (
-            ({"is_nightly": "true", "nightly_yielded": ""}, False, True),
-            ({"is_nightly": "true", "nightly_yielded": "true"}, False, False),
-            ({"is_nightly": "false", "nightly_yielded": ""}, True, True),
-        ):
-            context = meta_context(dict(outputs, is_dry_run="false", run_publish="false",
-                                        run_vulkan="false"))
+    def test_nightly_uploads_no_binaries_and_builds_every_default_platform(self):
+        for is_nightly, expect_upload in (("true", False), ("false", True)):
+            context = meta_context({"is_nightly": is_nightly, "is_dry_run": "false",
+                                    "run_publish": "false", "run_vulkan": "false"})
             for job in CPU_BUILD_JOBS:
-                with self.subTest(outputs=outputs, job=job):
-                    self.assertEqual(github_expr(self.jobs[job]["if"], context), expect_build)
+                with self.subTest(is_nightly=is_nightly, job=job):
+                    self.assertNotIn("if", self.jobs[job], "Default platform builds are unconditional")
+                    self.assertEqual(self.jobs[job]["needs"], "meta")
                     uploads = [s for s in self.jobs[job]["steps"]
                                if str(s.get("uses", "")).startswith("actions/upload-artifact")
                                and s["with"]["name"] in CPU_ARTIFACTS]
@@ -1038,6 +1032,7 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
                     for upload in uploads:
                         self.assertEqual(github_expr(upload.get("if", "true"), context), expect_upload,
                                          upload["with"]["name"])
+        self.assertEqual(set(self.jobs["nightly-report"]["needs"]), {"meta", *CPU_BUILD_JOBS})
 
     def test_nightly_never_shares_a_concurrency_group_with_a_release(self):
         group = self.workflow["concurrency"]["group"]
@@ -1046,40 +1041,18 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
             ("push", None, "refs/tags/v0.10.102-rc1", "release-desktop-refs/tags/v0.10.102-rc1"),
             ("workflow_dispatch", "0.10.102", "refs/heads/main", "release-desktop-refs/heads/main"),
             ("repository_dispatch", None, "refs/heads/main", "release-desktop-refs/heads/main"),
-            ("schedule", None, "refs/heads/main", "release-desktop-nightly"),
             ("workflow_dispatch", "nightly", "refs/heads/main", "release-desktop-nightly"),
         ):
             with self.subTest(event=event, tag=tag):
                 context = {"github.event_name": event, "inputs.tag": tag, "github.ref": ref}
                 self.assertEqual(github_expr(group, context), expected)
         report_if = self.jobs["nightly-report"]["if"]
-        for event, tag, expected in (("schedule", None, True), ("workflow_dispatch", "nightly", True),
+        for event, tag, expected in (("workflow_dispatch", "nightly", True),
                                      ("workflow_dispatch", "0.10.102", False), ("push", None, False),
                                      ("repository_dispatch", None, False)):
             self.assertEqual(github_expr(report_if, {"github.event_name": event, "inputs.tag": tag}),
                              expected, (event, tag))
         self.assertEqual(self.jobs["nightly-report"]["permissions"], {"issues": "write"})
-
-    def test_scheduled_nightly_yields_to_any_active_release_run(self):
-        step = self.step("meta", step_id="yield")
-        self.assertEqual(step["if"], "${{ github.event_name == 'schedule' }}")
-        runs = lambda *rs: json.dumps([{"databaseId": i, "event": e, "status": s}
-                                        for i, (e, s) in enumerate(rs, start=10)])
-        for listing, fail, yielded in (
-            (runs(("push", "in_progress")), "0", True),
-            (runs(("workflow_dispatch", "queued")), "0", True),
-            (runs(("repository_dispatch", "waiting")), "0", True),
-            (runs(("push", "completed"), ("schedule", "in_progress")), "0", False),
-            (json.dumps([{"databaseId": 99, "event": "push", "status": "in_progress"}]), "0", False),
-            ("[]", "1", False),
-        ):
-            with self.subTest(listing=listing, fail=fail):
-                result, values, calls, _ = self.run_script(step["run"], {
-                    "FAKE_GH_RUNS": listing, "FAKE_GH_FAIL": fail, "GITHUB_RUN_ID": "99",
-                    "GITHUB_REPOSITORY": "wey-gu/mem-releases"})
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(values.get("nightly_yielded") == "true", yielded)
-                self.assertEqual(calls[0]["args"][:2], ["run", "list"])
 
     def test_nightly_report_tracks_one_issue(self):
         script = self.jobs["nightly-report"]["steps"][0]["run"]
@@ -1087,7 +1060,7 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
         green = {f"RESULT_{k}": "success" for k in ("META", "MACOS_ARM64", "MACOS_X86_64",
                                                      "WINDOWS", "LINUX")}
         base = dict(green, REPO="wey-gu/mem-releases", RUN_URL="https://example.invalid/run/1",
-                    VERSION="0.10.102-nightly.20261014", SOURCE_REF=NIGHTLY_SHA, YIELDED="")
+                    VERSION="0.10.102-nightly.20261014", SOURCE_REF=NIGHTLY_SHA)
         open_issue = json.dumps([{"number": 7, "title": title}])
         other_issue = json.dumps([{"number": 8, "title": title + " (old)"}])
         for env, expected in (
@@ -1096,7 +1069,6 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
             ({"RESULT_LINUX": "cancelled", "FAKE_GH_ISSUES": open_issue}, [["issue", "comment", "7"]]),
             ({"FAKE_GH_ISSUES": open_issue}, [["issue", "comment", "7"], ["issue", "close", "7"]]),
             ({}, []),
-            ({"YIELDED": "true", "RESULT_WINDOWS": "skipped"}, None),
         ):
             with self.subTest(env=env):
                 result, _, calls, summary = self.run_script(script, dict(base, **env))
@@ -1104,10 +1076,7 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
                 self.assertIn("Nightly release-shape result", summary)
                 writes = [c["args"][:3] if c["args"][1] != "create" else c["args"][:2]
                           for c in calls if c["args"][:2] != ["issue", "list"]]
-                if expected is None:
-                    self.assertEqual(calls, [])
-                else:
-                    self.assertEqual(writes, expected)
+                self.assertEqual(writes, expected)
                 for call in calls:
                     if call["args"][:2] == ["issue", "create"]:
                         self.assertEqual(call["args"][call["args"].index("--title") + 1], title)
@@ -1119,6 +1088,149 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
                     self.assertFalse(str(step.get("uses", "")).startswith("Swatinem/rust-cache"))
                     self.assertNotIn("cache", (step.get("with") or {}) if str(step.get("uses", "")).startswith(
                         "actions/setup-node") else {})
+
+
+
+class ReleaseShapeTriggerContractTest(unittest.TestCase):
+    """release-shape-nightly.yml decides when to dispatch the nightly."""
+
+    def setUp(self):
+        import yaml
+        self.workflow = yaml.safe_load(workflow_text("release-shape-nightly.yml"))
+        self.steps = {s.get("id") or s["name"]: s for s in self.workflow["jobs"]["decide"]["steps"]}
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(self.tmp)])
+        gh = self.tmp / "bin" / "gh"
+        gh.parent.mkdir()
+        gh.write_text(FAKE_GH)
+        gh.chmod(0o755)
+        self.log = self.tmp / "gh.log"
+
+    def run_step(self, step, env, cwd=None):
+        self.log.write_text("")
+        output, summary = self.tmp / "output", self.tmp / "summary"
+        output.write_text("")
+        summary.write_text("")
+        result = subprocess.run(
+            ["bash", "-e", "-c", step["run"]], cwd=cwd or self.tmp, capture_output=True, text=True,
+            check=False,
+            env={"PATH": str(self.tmp / "bin") + os.pathsep + os.environ["PATH"],
+                 "FAKE_GH_LOG": str(self.log), "GITHUB_OUTPUT": str(output),
+                 "GITHUB_STEP_SUMMARY": str(summary), "GITHUB_REPOSITORY": "wey-gu/mem-releases",
+                 "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, **env},
+        )
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines() if "=" in line)
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        return result, values, calls
+
+    def test_polls_hourly_and_only_reads_the_source(self):
+        self.assertEqual(self.workflow[True]["schedule"], [{"cron": "17 * * * *"}])
+        self.assertEqual(self.workflow["permissions"], {"contents": "read", "actions": "write"})
+        checkout = self.steps["Fetch nowledge-co/mem main (trees only)"]["with"]
+        self.assertEqual((checkout["repository"], checkout["ref"], checkout["filter"],
+                          checkout["persist-credentials"]), ("nowledge-co/mem", "main", "blob:none", False))
+        self.assertIn("secrets.MEM_REPO_TOKEN", checkout["token"])
+
+    def test_fingerprint_tracks_cargo_manifests_lockfiles_and_compiled_gitlinks(self):
+        repo = self.tmp / "mem"
+        repo.mkdir()
+
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True,
+                                  env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1",
+                                       "GIT_CONFIG_GLOBAL": os.devnull})
+
+        def write(path, text):
+            (repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (repo / path).write_text(text)
+            git("add", path)
+
+        def commit(message):
+            git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit",
+                "--no-gpg-sign", "-qm", message)
+
+        def gitlink(path, sha):
+            git("update-index", "--add", "--cacheinfo", f"160000,{sha},{path}")
+
+        git("init", "-q")
+        for path in ("nmem-rs/Cargo.toml", "nmem-rs/Cargo.lock", "nmem-rs/bazel-Cargo.lock",
+                     "integrations/hawdb/kuzu-Cargo.lock", "integrations/hawdb/nightly-server.Cargo.lock",
+                     "nowledge-graph/package.json", "nmem-rs/src/lib.rs"):
+            write(path, "v1\n")
+        gitlink("hawdb", "1" * 40)
+        gitlink("upstream_forks/ladybug", "2" * 40)
+        gitlink("community", "3" * 40)
+        commit("base")
+        step = self.steps["fingerprint"]
+
+        def fingerprint():
+            result, values, _ = self.run_step(step, {})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(values["sha"], git("rev-parse", "HEAD").stdout.strip())
+            self.assertIn(values["after_daily_slot"], ("true", "false"))
+            self.assertRegex(values["day"], r"^\d{8}$")
+            return values["deps"]
+
+        base = fingerprint()
+        for change, expect_changed in (
+            (lambda: write("nmem-rs/src/lib.rs", "v2\n"), False),
+            (lambda: write("nowledge-graph/package.json", "v2\n"), False),
+            (lambda: gitlink("community", "4" * 40), False),
+            (lambda: write("nmem-rs/Cargo.lock", "v2\n"), True),
+            (lambda: write("integrations/hawdb/kuzu-Cargo.lock", "v2\n"), True),
+            (lambda: write("nmem-rs/Cargo.toml", "v2\n"), True),
+            (lambda: write("nowledge-graph/src-tauri/Cargo.toml", "new\n"), True),
+            (lambda: gitlink("upstream_forks/ladybug", "5" * 40), True),
+            (lambda: gitlink("hawdb", "6" * 40), True),
+        ):
+            change()
+            commit("change")
+            current = fingerprint()
+            with self.subTest(fingerprint=current, expect_changed=expect_changed):
+                self.assertEqual(current != base, expect_changed)
+            base = current
+
+    def test_decide_dispatches_on_new_dependencies_daily_or_force_but_never_beside_a_release(self):
+        step = self.steps["decide"]
+        idle = json.dumps([{"databaseId": 1, "status": "completed"}])
+        busy = json.dumps([{"databaseId": 1, "status": "completed"}, {"databaseId": 2, "status": "queued"}])
+        for force, deps_seen, day_seen, after, runs, expected in (
+            ("", "true", "true", "true", idle, None),
+            ("", "true", "", "false", idle, None),
+            ("", "", "true", "false", idle, "dependencies"),
+            ("", "", "", "true", idle, "dependencies"),
+            ("", "true", "", "true", idle, "daily"),
+            ("true", "true", "true", "false", idle, "manual"),
+            ("", "", "", "true", busy, None),
+            ("true", "true", "true", "true", busy, None),
+        ):
+            with self.subTest(force=force, deps_seen=deps_seen, day_seen=day_seen, after=after, runs=runs):
+                result, values, calls = self.run_step(step, {
+                    "FORCE": force, "DEPS_SEEN": deps_seen, "DAY_SEEN": day_seen,
+                    "AFTER_DAILY_SLOT": after, "FAKE_GH_RUNS": runs, "GH_TOKEN": "t"})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(values["build"], "true" if expected else "false")
+                self.assertEqual(values.get("reason"), expected)
+        result, values, _ = self.run_step(step, {"DEPS_SEEN": "", "FAKE_GH_FAIL": "1", "GH_TOKEN": "t"})
+        self.assertNotEqual(result.returncode, 0, "An unknown release state must not dispatch")
+        self.assertNotIn("build", values)
+
+    def test_markers_and_dispatch_follow_the_decision(self):
+        steps = self.workflow["jobs"]["decide"]["steps"]
+        names = [s.get("name") for s in steps]
+        dispatch = self.steps["Dispatch the nightly release-shape build"]
+        # Markers are saved only for a dispatched nightly, before the dispatch.
+        for name in ("Mark this dependency fingerprint as built", "Mark today's daily nightly as dispatched",
+                     "Prepare marker"):
+            self.assertIn("steps.decide.outputs.build == 'true'", self.steps[name]["if"])
+            self.assertLess(names.index(name), names.index(dispatch["name"]))
+        self.assertEqual(dispatch["if"], "steps.decide.outputs.build == 'true'")
+        result, _, calls = self.run_step(dispatch, {"SOURCE_SHA": NIGHTLY_SHA, "REASON": "daily",
+                                                    "DEPS": "abc", "GH_TOKEN": "t"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c["args"] for c in calls], [[
+            "workflow", "run", "release-desktop.yml", "-R", "wey-gu/mem-releases", "--ref", "main",
+            "-f", "tag=nightly", "-f", f"source_ref={NIGHTLY_SHA}"]])
 
 
 if __name__ == "__main__":

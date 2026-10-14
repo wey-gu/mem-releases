@@ -12,23 +12,26 @@
 #   push tags v*       — auto-trigger when a tag is pushed to THIS repo.
 #   repository_dispatch [type: release] — for automation where the source
 #                        repo's tag-push fires a dispatch here.
-#   schedule (daily)   — NIGHTLY release-shape build of nowledge-co/mem main.
-#                        Also dispatchable with `tag: nightly` (+ optional
-#                        `source_ref`). See "Nightly release-shape build" below.
+#   workflow_dispatch with `tag: nightly` — NIGHTLY release-shape build of a
+#                        nowledge-co/mem commit (`source_ref`, default main).
+#                        release-shape-nightly.yml dispatches it daily and
+#                        whenever main's Cargo manifests/lockfiles change.
 #
-# Nightly release-shape build (nowledge-co/mem#7108, W5):
+# Nightly release-shape build (nowledge-co/mem#7108, W5/W17):
 #   Platform breakage (Windows NSIS, submodule init, PDFium, timeouts) used to
-#   surface only 1.5-3 h into a release. The nightly builds the five default
-#   desktop platforms from one pinned nowledge-co/mem commit with the exact
-#   release build steps, including macOS signing + notarization, so the same
-#   breakage turns a nightly red instead of a release. It has NO side effects:
-#   `meta` resolves it to is_dry_run=false AND run_publish=false, so the
-#   prerelease, -vulkan attach, and publish jobs (the only jobs that write a
-#   GH Release, R2, APT, or the updater feed) are all skipped; Vulkan is
-#   forced off; build artifacts are not uploaded (an unreleased main build
-#   must not become a public download). It runs in its own concurrency group,
-#   so it can never queue behind, replace, or cancel a release run, and a
-#   scheduled nightly skips its builds while any release run is active.
+#   surface only 1.5-3 h into a release, and dependency bumps compiled cold
+#   inside the release. The nightly builds the five default desktop platforms
+#   from one pinned nowledge-co/mem commit with the exact release build
+#   steps, including macOS signing + notarization, so the same breakage turns
+#   a nightly red instead of a release and the compile caches are warm. It has
+#   NO side effects: `meta` resolves it to is_dry_run=false AND
+#   run_publish=false, so the prerelease, -vulkan attach, and publish jobs
+#   (the only jobs that write a GH Release, R2, APT, or the updater feed) are
+#   all skipped; Vulkan is forced off; build artifacts are not uploaded (an
+#   unreleased main build must not become a public download). It runs in its
+#   own concurrency group, so it can never queue behind, replace, or cancel a
+#   release run; release-shape-nightly.yml does not dispatch it while a
+#   release run is in flight.
 #
 # First-time setup: see docs/SETUP.md.
 
@@ -85,18 +88,13 @@ on:
       - "!v*-rpmtest*"
   repository_dispatch:
     types: [release]
-  # Nightly release-shape build. 18:00 UTC is 02:00 in Beijing, outside the
-  # release window, so it rarely shares the account's macOS runners with a
-  # release.
-  schedule:
-    - cron: "0 18 * * *"
 
 # Releases keep the group `release-desktop-<ref>`. A nightly gets its own
 # group: a run in a shared group would replace a PENDING release run (GitHub
 # keeps one pending run per group), and a release dispatched from main shares
 # `refs/heads/main` with the nightly.
 concurrency:
-  group: ${{ (github.event_name == 'schedule' || inputs.tag == 'nightly') && 'release-desktop-nightly' || format('release-desktop-{0}', github.ref) }}
+  group: ${{ inputs.tag == 'nightly' && 'release-desktop-nightly' || format('release-desktop-{0}', github.ref) }}
   cancel-in-progress: false
 
 permissions:
@@ -125,10 +123,6 @@ jobs:
       run_publish: ${{ steps.resolve.outputs.run_publish }}
       run_vulkan: ${{ steps.resolve.outputs.run_vulkan }}
       is_nightly: ${{ steps.resolve.outputs.is_nightly }}
-      # 'true' only when a scheduled nightly found a release run in flight.
-      # Build jobs run unless this is exactly 'true', so a release (where it is
-      # always empty) can never skip a build through it.
-      nightly_yielded: ${{ steps.yield.outputs.nightly_yielded }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -185,10 +179,6 @@ jobs:
               SOURCE_REF="$PAYLOAD_REF"
               PUBLISH="true"
               ;;
-            schedule)
-              NIGHTLY="true"
-              NIGHTLY_REF="main"
-              ;;
             *)
               echo "::error::Unsupported event: $EVENT_NAME"
               exit 1
@@ -243,33 +233,6 @@ jobs:
           echo "run_vulkan=$VULKAN"      >> "$GITHUB_OUTPUT"
           echo "is_nightly=$NIGHTLY"     >> "$GITHUB_OUTPUT"
           echo "Resolved: version=$VERSION source_ref=$SOURCE_REF dry=$DRY publish=$PUBLISH vulkan=$VULKAN nightly=$NIGHTLY"
-
-      # A scheduled nightly yields to releases: it skips its builds while any
-      # non-scheduled release-desktop run is queued or running, so it never
-      # competes with a release for the account's five macOS runners.
-      # Manual nightly dispatches are deliberate and do not yield. A failed
-      # lookup does not block the nightly (fail open; the nightly is the
-      # only thing it gates).
-      - name: Yield a scheduled nightly to an active release run
-        id: yield
-        if: ${{ github.event_name == 'schedule' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if ! runs="$(gh run list -R "$GITHUB_REPOSITORY" --workflow release-desktop.yml \
-                --limit 100 --json databaseId,status,event)"; then
-            echo "::warning::Could not list release-desktop runs; building the nightly anyway."
-            exit 0
-          fi
-          active="$(jq --argjson self "$GITHUB_RUN_ID" \
-            '[.[] | select(.databaseId != $self and .event != "schedule" and .status != "completed")] | length' \
-            <<<"$runs")"
-          if (( active > 0 )); then
-            echo "nightly_yielded=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::${active} release-desktop run(s) in flight; this nightly skips its builds."
-            echo "Nightly skipped: ${active} release-desktop run(s) in flight." >> "$GITHUB_STEP_SUMMARY"
-          fi
 
       - name: Pre-flight GA policy before build and optional Vulkan jobs
         if: ${{ steps.resolve.outputs.run_publish == 'true' }}
@@ -334,8 +297,6 @@ jobs:
 
   build-macos-arm64:
     needs: meta
-    # Skipped only when a scheduled nightly yields to a release (see meta).
-    if: needs.meta.outputs.nightly_yielded != 'true'
     runs-on: macos-15
     # 300, not 180: a cold-cache build (any version bump) runs close to three
     # hours. On 0.10.101-rc1 (run 38250505560) build-macos-x86_64 finished its
@@ -657,8 +618,6 @@ jobs:
 
   build-macos-x86_64:
     needs: meta
-    # Skipped only when a scheduled nightly yields to a release (see meta).
-    if: needs.meta.outputs.nightly_yielded != 'true'
     runs-on: macos-15-intel
     # 300, not 180: see build-macos-arm64 (0.10.101-rc1 evidence).
     timeout-minutes: 300
@@ -832,8 +791,6 @@ jobs:
 
   build-windows:
     needs: meta
-    # Skipped only when a scheduled nightly yields to a release (see meta).
-    if: needs.meta.outputs.nightly_yielded != 'true'
     runs-on: windows-2022
     timeout-minutes: 180
     env:
@@ -1148,8 +1105,6 @@ jobs:
 
   build-linux-deb-appimage:
     needs: meta
-    # Skipped only when a scheduled nightly yields to a release (see meta).
-    if: needs.meta.outputs.nightly_yielded != 'true'
     # Builds every default Linux artifact (.deb, .AppImage, .rpm) from ONE
     # backend bundle and ONE Tauri shell build, against one explicit runtime
     # floor. Ubuntu 22.04 gives all three packages the supported GLIBC 2.35
@@ -2331,7 +2286,7 @@ jobs:
       - build-macos-x86_64
       - build-windows
       - build-linux-deb-appimage
-    if: ${{ always() && (github.event_name == 'schedule' || inputs.tag == 'nightly') }}
+    if: ${{ always() && inputs.tag == 'nightly' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     permissions:
@@ -2342,7 +2297,6 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
-      YIELDED: ${{ needs.meta.outputs.nightly_yielded }}
       RESULT_META: ${{ needs.meta.result }}
       RESULT_MACOS_ARM64: ${{ needs.build-macos-arm64.result }}
       RESULT_MACOS_X86_64: ${{ needs.build-macos-x86_64.result }}
@@ -2370,10 +2324,6 @@ jobs:
             echo
             echo "$table"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$YIELDED" == "true" ]]; then
-            echo "Nightly yielded to a release run; nothing to report."
-            exit 0
-          fi
           open_issue="$(gh issue list -R "$REPO" --state open --search "in:title \"${TITLE}\"" \
             --json number,title | jq -r --arg t "$TITLE" '[.[] | select(.title == $t)][0].number // empty')"
           body="Nightly release-shape build of nowledge-co/mem @ \`${SOURCE_REF:-unresolved}\` (\`${VERSION:-unresolved}\`): ${RUN_URL}"$'\n\n'"${table}"
