@@ -223,7 +223,15 @@ jobs:
   build-macos-arm64:
     needs: meta
     runs-on: macos-15
-    timeout-minutes: 180
+    # 300, not 180: a cold-cache build (any version bump) runs close to three
+    # hours. On 0.10.101-rc1 (run 38250505560) build-macos-x86_64 finished its
+    # build and uploaded the DMG at minute 175, then the 180-minute limit
+    # killed it while saving the Rust cache; the job was marked cancelled and
+    # the DMG never reached the prerelease (run 38191442711 died the same way
+    # at minute 172). x86_64 also hit the limit mid-build in runs 36888959814,
+    # 36939292858 and 37900837027; arm64 has reached 167 minutes.
+    # GitHub-hosted jobs allow up to 360.
+    timeout-minutes: 300
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
@@ -387,7 +395,31 @@ jobs:
       # (ladybug + llama.cpp via cmake, which reads CMAKE_<LANG>_COMPILER_LAUNCHER
       # from env — no source patch). Degrades gracefully: if R2 is unreachable
       # sccache compiles locally, the build still succeeds.
-      - name: Setup sccache
+      # Setting up sccache downloads the sccache binary from GitHub Releases.
+      # That download is the only part of the cache that could fail the job:
+      # on 0.10.101-rc1 (run 38250505560) the then-separate RPM job died after 1.9 min
+      # on an HTTP 504 here, and because GitHub only reruns a failed job after
+      # the WHOLE run finishes, the 2-minute flake cost about 3 hours of wall
+      # clock. So: try once, wait, try again, and if sccache is still missing
+      # build uncached (slower, identical output). `continue-on-error` is also
+      # inherited by the action's post step (the stats summary), which
+      # otherwise fails the job with "Unable to locate executable file:
+      # undefined" when setup never installed the binary.
+      - &setup_sccache
+        name: Setup sccache
+        id: setup_sccache
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - &wait_before_sccache_retry
+        name: Wait before retrying sccache setup
+        if: steps.setup_sccache.outcome == 'failure'
+        shell: bash
+        run: sleep 30
+      - &retry_setup_sccache
+        name: Retry sccache setup
+        id: retry_setup_sccache
+        if: steps.setup_sccache.outcome == 'failure'
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.9
       - name: Point sccache at R2
         shell: bash
@@ -396,7 +428,14 @@ jobs:
           R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
         run: |
+          # Export the compiler wrappers only when sccache actually runs;
+          # a wrapper that does not exist would fail every compile.
+          if ! sccache --version; then
+            echo "::warning title=sccache unavailable::sccache setup failed twice; building without the compile cache (slower, identical output)."
+            exit 0
+          fi
           {
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -512,7 +551,8 @@ jobs:
   build-macos-x86_64:
     needs: meta
     runs-on: macos-15-intel
-    timeout-minutes: 180
+    # 300, not 180: see build-macos-arm64 (0.10.101-rc1 evidence).
+    timeout-minutes: 300
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
@@ -577,8 +617,9 @@ jobs:
           key: macos-x86_64-v4-pdfium
 
       # sccache → R2 (see build-macos-arm64 for rationale).
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+      - *setup_sccache
+      - *wait_before_sccache_retry
+      - *retry_setup_sccache
       - name: Point sccache at R2
         shell: bash
         env:
@@ -586,7 +627,14 @@ jobs:
           R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
         run: |
+          # Export the compiler wrappers only when sccache actually runs;
+          # a wrapper that does not exist would fail every compile.
+          if ! sccache --version; then
+            echo "::warning title=sccache unavailable::sccache setup failed twice; building without the compile cache (slower, identical output)."
+            exit 0
+          fi
           {
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -782,8 +830,9 @@ jobs:
 
       # sccache → R2 (see build-macos-arm64 for rationale). MSVC + cmake are
       # both sccache-cacheable; graceful local fallback on any backend error.
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+      - *setup_sccache
+      - *wait_before_sccache_retry
+      - *retry_setup_sccache
       - name: Point sccache at R2
         shell: bash
         env:
@@ -791,7 +840,14 @@ jobs:
           R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
         run: |
+          # Export the compiler wrappers only when sccache actually runs;
+          # a wrapper that does not exist would fail every compile.
+          if ! sccache --version; then
+            echo "::warning title=sccache unavailable::sccache setup failed twice; building without the compile cache (slower, identical output)."
+            exit 0
+          fi
           {
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -990,8 +1046,9 @@ jobs:
           key: linux-deb-appimage-v4-pdfium
 
       # sccache → R2 (see build-macos-arm64 for rationale).
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+      - *setup_sccache
+      - *wait_before_sccache_retry
+      - *retry_setup_sccache
       - name: Point sccache at R2
         shell: bash
         env:
@@ -999,7 +1056,14 @@ jobs:
           R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
         run: |
+          # Export the compiler wrappers only when sccache actually runs;
+          # a wrapper that does not exist would fail every compile.
+          if ! sccache --version; then
+            echo "::warning title=sccache unavailable::sccache setup failed twice; building without the compile cache (slower, identical output)."
+            exit 0
+          fi
           {
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -1210,8 +1274,9 @@ jobs:
           # must not share/poison the CPU build cache.
           key: windows-x86_64-vulkan-v3-pdfium
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+      - *setup_sccache
+      - *wait_before_sccache_retry
+      - *retry_setup_sccache
       - name: Point sccache at R2
         shell: bash
         env:
@@ -1219,7 +1284,30 @@ jobs:
           R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
         run: |
+          # Force the Ninja generator for ALL CMake invocations from the
+          # `cmake` Rust crate (llama-cpp-sys-2). This is the load-bearing fix
+          # for the -vulkan build: ggml-vulkan builds `vulkan-shaders-gen` as a
+          # nested ExternalProject_Add, and an ExternalProject inherits the
+          # PARENT's generator. With the default Visual Studio generator the
+          # nested host-tool TryCompile runs parallel CL.exe writing one shared
+          # vc145.pdb -> `error C1041 ... please use /FS` -> CMake declares the
+          # C compiler "broken" -> no cmake_install.cmake -> "Not a file". Ninja
+          # writes per-object PDBs and runs no MSBuild PDB race, so both the
+          # parent and the inherited nested build configure cleanly. Ninja with
+          # MSVC needs the dev environment active (cl.exe + INCLUDE/LIB), set up
+          # by the ilammy/msvc-dev-cmd step below. Scoped to this -vulkan job;
+          # the CPU windows job is untouched.
+          # Exported before the sccache check: this job needs Ninja with or
+          # without the compile cache.
+          echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
+          # Export the compiler wrappers only when sccache actually runs;
+          # a wrapper that does not exist would fail every compile.
+          if ! sccache --version; then
+            echo "::warning title=sccache unavailable::sccache setup failed twice; building without the compile cache (slower, identical output)."
+            exit 0
+          fi
           {
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -1230,20 +1318,6 @@ jobs:
             echo "SCCACHE_ENDPOINT=https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
             echo "AWS_ACCESS_KEY_ID=${R2_KEY}"
             echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET}"
-            # Force the Ninja generator for ALL CMake invocations from the
-            # `cmake` Rust crate (llama-cpp-sys-2). This is the load-bearing fix
-            # for the -vulkan build: ggml-vulkan builds `vulkan-shaders-gen` as a
-            # nested ExternalProject_Add, and an ExternalProject inherits the
-            # PARENT's generator. With the default Visual Studio generator the
-            # nested host-tool TryCompile runs parallel CL.exe writing one shared
-            # vc145.pdb -> `error C1041 ... please use /FS` -> CMake declares the
-            # C compiler "broken" -> no cmake_install.cmake -> "Not a file". Ninja
-            # writes per-object PDBs and runs no MSBuild PDB race, so both the
-            # parent and the inherited nested build configure cleanly. Ninja with
-            # MSVC needs the dev environment active (cl.exe + INCLUDE/LIB), set up
-            # by the ilammy/msvc-dev-cmd step below. Scoped to this -vulkan job;
-            # the CPU windows job is untouched.
-            echo "CMAKE_GENERATOR=Ninja"
           } >> "$GITHUB_ENV"
 
       - name: Install pnpm deps
@@ -1473,8 +1547,9 @@ jobs:
           # compiled artifacts; must not poison the CPU build cache).
           key: linux-vulkan-v3-pdfium
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+      - *setup_sccache
+      - *wait_before_sccache_retry
+      - *retry_setup_sccache
       - name: Point sccache at R2
         shell: bash
         env:
@@ -1482,7 +1557,14 @@ jobs:
           R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
         run: |
+          # Export the compiler wrappers only when sccache actually runs;
+          # a wrapper that does not exist would fail every compile.
+          if ! sccache --version; then
+            echo "::warning title=sccache unavailable::sccache setup failed twice; building without the compile cache (slower, identical output)."
+            exit 0
+          fi
           {
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_IDLE_TIMEOUT=0"
