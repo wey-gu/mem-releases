@@ -48,6 +48,14 @@ on:
         required: true
       DOCKERHUB_TOKEN:
         required: true
+      # Optional compile cache for the source=build fallback (see the build
+      # step). Missing values only mean an uncached, slower build.
+      CLOUDFLARE_ACCOUNT_ID:
+        required: false
+      SCCACHE_R2_ACCESS_KEY_ID:
+        required: false
+      SCCACHE_R2_SECRET_ACCESS_KEY:
+        required: false
 
 permissions:
   contents: read
@@ -224,6 +232,13 @@ jobs:
           platforms: linux/amd64
           build-args: |
             NMEM_BUILD_SHA_FULL=${{ steps.sha.outputs.source_sha }}
+          # Same sccache R2 compile cache and secret contract as
+          # release-docker.yml: BuildKit secrets, never build args.
+          secrets: |
+            sccache_bucket=nowledge-mem-sccache
+            sccache_endpoint=https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+            sccache_access_key_id=${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+            sccache_secret_access_key=${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
           push: true
           provenance: mode=max
           sbom: true

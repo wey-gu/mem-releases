@@ -769,6 +769,42 @@ class GAPromotionContractTest(unittest.TestCase):
         result, _, _ = self.run_cpu_promote({}, "true")
         self.assertNotEqual(result.returncode, 0)
 
+    def test_docker_rust_builds_pass_compile_cache_only_as_buildkit_secrets(self):
+        ids = ("sccache_bucket=nowledge-mem-sccache",
+               "sccache_endpoint=https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com",
+               "sccache_access_key_id=${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}",
+               "sccache_secret_access_key=${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}")
+
+        def build_step(section):
+            return section.split("uses: docker/build-push-action@v6\n", 1)[1]
+
+        def build_args(step):
+            block = step.split("          build-args: |\n", 1)[1]
+            return re.split(r"\n {10}(?! )", block, 1)[0]
+
+        docker = workflow_text("release-docker.yml")
+        amd64 = build_step(job_section(docker, "build-amd64"))
+        self.assertIn("          secrets: &sccache_secrets |\n", amd64)
+        for line in ids:
+            self.assertIn(f"            {line}\n", amd64)
+        sections = {job: build_step(job_section(docker, job))
+                    for job in ("build-amd64", "build-arm64", "build-cuda", "build-vulkan")}
+        rebuild = build_step(job_section(workflow_text("promote-gpu-variant.yml"), "build"))
+        for line in ids:
+            self.assertIn(f"            {line}\n", rebuild)
+        sections["promote-gpu-variant/build"] = rebuild
+        for job, step in sections.items():
+            with self.subTest(job=job):
+                if job not in ("build-amd64", "promote-gpu-variant/build"):
+                    self.assertIn("          secrets: *sccache_secrets\n", step)
+                # Build args are recorded in the mode=max provenance attestation;
+                # credentials must never travel that way.
+                args = build_args(step)
+                self.assertNotIn("secrets.", args)
+                self.assertNotIn("sccache", args.lower())
+                self.assertIn("provenance: mode=max", step)
+                self.assertIn("sbom: true", step)
+
     def test_gpu_images_are_signed_where_they_are_built(self):
         docker = workflow_text("release-docker.yml")
         for variant in ("cuda", "vulkan"):
