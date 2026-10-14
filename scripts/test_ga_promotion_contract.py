@@ -86,7 +86,7 @@ else:
 class GAPromotionContractTest(unittest.TestCase):
     def test_release_bundle_commands_select_public_production_channel(self):
         for name, expected_bash, expected_powershell in (
-            ("release-desktop.yml", 5, 2),
+            ("release-desktop.yml", 4, 2),
             ("test-windows-bazel.yml", 1, 0),
         ):
             workflow = (ROOT / ".github" / "workflows" / name).read_text()
@@ -407,7 +407,8 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn('Deprecated compatibility input', workflow)
         self.assertNotIn("update-latest-version.js", publish)
         self.assertNotIn("wrangler deploy", publish)
-        self.assertIn("- build-linux-rpm", publish)
+        self.assertIn("- build-linux-deb-appimage", publish)
+        self.assertIn("RPM=\"$(find artifacts/linux-rpm -name '*.rpm' -print -quit)\"", publish)
         self.assertIn('node scripts/upload-package.cjs "$VERSION" linux     "${{ steps.paths.outputs.rpm }}"', publish)
         self.assertIn('"${{ steps.paths.outputs.rpm }}"', publish)
         self.assertIn('VERIFY_RELEASE_VERSION="$VERSION" VERIFY_SCOPE="$scope"', publish)
@@ -418,6 +419,34 @@ class GAPromotionContractTest(unittest.TestCase):
         )
         self.assertIn("node ../scripts/verify-ga-delivery.mjs", publish)
         self.assertIn("uses: actions/checkout@v4", publish)
+
+    def test_rpm_is_bundled_from_the_deb_appimage_build(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "release-desktop.yml"
+        ).read_text()
+        self.assertNotIn("\n  build-linux-rpm:\n", workflow)
+        self.assertNotIn("build-linux-rpm", workflow)
+        linux = workflow.split("\n  build-linux-deb-appimage:\n", 1)[1].split(
+            "\n  build-windows-vulkan:\n", 1
+        )[0]
+        self.assertEqual(linux.count("./scripts/build-rust-bundle.sh "), 1)
+        self.assertIn(" rpm cpio\n", linux)
+        core_upload = linux.index("          name: linux-deb-appimage\n")
+        rpm_step = linux.index("      - name: Build, locate, and verify native .rpm (Tauri bundle)\n")
+        rpm_upload = linux.index("          name: linux-rpm\n")
+        self.assertLess(core_upload, rpm_step, "RPM must not delay or block DEB/AppImage")
+        self.assertLess(rpm_step, rpm_upload)
+        rpm = linux[rpm_step:]
+        self.assertIn("pnpm run tauri bundle --bundles rpm", rpm)
+        self.assertNotIn("tauri build", rpm, "RPM must reuse the DEB/AppImage build outputs")
+        self.assertIn("continue-on-error: true", rpm.split("\n      - ", 1)[0])
+        self.assertIn('./scripts/verify-linux-package.sh "$OUT"', rpm)
+        self.assertLess(rpm.index("verify-linux-package.sh"), rpm.index('echo "rpm=$OUT"'))
+        self.assertIn("if: steps.rpm.outcome == 'success'", rpm)
+        self.assertIn("if: steps.rpm.outcome != 'success'", rpm)
+        upload = workflow.split("\n  prerelease-upload-linux-rpm:\n", 1)[1].split("\n  prerelease-recap:\n", 1)[0]
+        self.assertIn("needs: [meta, prerelease-prepare, build-linux-deb-appimage]", upload)
+        self.assertIn("artifact_name: linux-rpm", upload)
 
     def test_optional_vulkan_attachments_never_replace_existing_assets(self):
         workflow = (
