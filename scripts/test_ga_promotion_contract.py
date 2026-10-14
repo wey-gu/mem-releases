@@ -347,15 +347,22 @@ class GAPromotionContractTest(unittest.TestCase):
                 self.assertIn("node scripts/verify-ga-delivery.mjs --preflight", publish)
                 self.assertIn('VERIFY_SCOPE="$health_scope" timeout', publish)
                 self.assertIn("health_scope='latest'", publish)
-                self.assertIn('name: Refuse an existing GA Release', workflow)
+                if name == "release-desktop.yml":
+                    self.assertIn('name: Refuse an existing GA Release', workflow)
 
+        # One-click promotion reconciles instead of refusing: the read-only
+        # preflight observes every surface before any mutation job starts.
         promote = (ROOT / ".github" / "workflows" / "promote-rc-to-ga.yml").read_text()
-        validate = promote.split("\n  validate:\n", 1)[1].split("\n  promote-docker:\n", 1)[0]
-        self.assertIn('Pre-flight desktop policy before any promotion job', validate)
-        self.assertIn('node scripts/verify-ga-delivery.mjs --preflight', validate)
-        self.assertIn('Older desktop GA cannot move Docker :latest', validate)
-        self.assertIn('node scripts/assert-fresh-r2-version.mjs "$GA" core', validate)
-        self.assertIn('gh release list -R', validate)
+        preflight = job_section(promote, "preflight")
+        self.assertIn('Older desktop GA cannot move Docker :latest', preflight)
+        self.assertIn('gh release list -R', preflight)
+        self.assertIn('node scripts/reconcile-ga-r2.mjs observe "$GA" observed/selected.json', preflight)
+        self.assertIn('node scripts/read-pause-routes.mjs', preflight)
+        self.assertIn('node scripts/reconcile-source-tag.mjs observe', preflight)
+        self.assertNotIn('assert-fresh-r2-version', promote)
+        self.assertIn('node scripts/ga-promotion-plan.mjs plan', job_section(promote, "plan"))
+        for job in ("promote-docker", "promote-desktop", "promote-cuda", "promote-vulkan"):
+            self.assertRegex(job_section(promote, job), r"needs: \[preflight, plan\]")
 
         direct = (ROOT / ".github" / "workflows" / "release-desktop.yml").read_text()
         meta = direct.split("\n  meta:\n", 1)[1].split("\n  build-macos-arm64:\n", 1)[0]
@@ -508,9 +515,8 @@ class GAPromotionContractTest(unittest.TestCase):
                               workflow)
                 self.assertIn('|| gh release view "$TAG" -R "$REPO" >/dev/null',
                               workflow)
-                if name != "finish-ga-release.yml":
-                    gate = workflow.split("\n  validate:\n" if name.startswith("promote") else "\n  meta:\n", 1)[1]
-                    gate = gate.split("\n  promote-docker:\n" if name.startswith("promote") else "\n  build-macos-arm64:\n", 1)[0]
+                if name == "release-desktop.yml":
+                    gate = workflow.split("\n  meta:\n", 1)[1].split("\n  build-macos-arm64:\n", 1)[0]
                     self.assertIn('node scripts/assert-fresh-r2-version.mjs', gate)
                     self.assertIn('gh release list -R', gate)
 
@@ -538,7 +544,8 @@ class GAPromotionContractTest(unittest.TestCase):
         )
         self.assertIn("node ../scripts/verify-ga-delivery.mjs --staged-while-paused", promote)
         self.assertIn(
-            "if: ${{ !inputs.allow_newer_desktop_latest && !inputs.desktop_upgrade_pause_active }}",
+            "if: ${{ !inputs.allow_newer_desktop_latest && !inputs.desktop_upgrade_pause_active"
+            " && needs.plan.outputs.stage_apt == 'todo' }}",
             promote,
         )
         self.assertIn("APT: deferred to promote-apt-to-ga", promote)
@@ -817,6 +824,411 @@ class GAPromotionContractTest(unittest.TestCase):
         promote = workflow_text("promote-rc-to-ga.yml")
         for job in ("promote-cuda", "promote-vulkan"):
             self.assertIn("      move_floating: ${{ inputs.push_latest }}\n", job_section(promote, job))
+
+
+# Stand-in for `gh`: logs every call, answers the REST reads the one-click
+# promotion makes from a JSON state file, and applies --jq with the real jq.
+FAKE_GH = r"""#!/usr/bin/env python3
+import json, os, subprocess, sys
+args = sys.argv[1:]
+state_path = os.environ["FAKE_GH_STATE"]
+state = json.load(open(state_path))
+with open(os.environ["FAKE_GH_LOG"], "a") as log:
+    log.write(json.dumps(args) + "\n")
+
+def emit(value):
+    if "--jq" in args:
+        expr = args[args.index("--jq") + 1]
+        out = subprocess.run(["jq", "-r", expr], input=json.dumps(value), capture_output=True, text=True)
+        sys.stdout.write(out.stdout)
+        sys.exit(out.returncode)
+    print(json.dumps(value))
+
+if args[:2] == ["workflow", "run"]:
+    state["runs"].append({"id": 9000 + len(state["runs"]), "display_title": state["dispatch_title"],
+                          "conclusion": None, "created_at": "2026-10-14T00:00:00Z"})
+    json.dump(state, open(state_path, "w"))
+    sys.exit(0)
+if args[0] != "api":
+    sys.exit(3)
+method = args[args.index("-X") + 1] if "-X" in args else "GET"
+path = next(a for a in args[1:] if a.startswith("repos/"))
+if method == "PATCH":
+    fields = [args[i + 1] for i, a in enumerate(args) if a in ("-f", "-F")]
+    state.setdefault("patches", []).append(fields)
+    if any(f == "draft=false" for f in fields):
+        state["release"]["draft"] = False
+    if any(f == "make_latest=true" for f in fields) and state.get("latest_follows", True):
+        state["latest"] = state["release"]["tag_name"]
+    json.dump(state, open(state_path, "w"))
+    print("{}")
+    sys.exit(0)
+if "/environments/" in path:
+    if state.get("environment") is None:
+        sys.stderr.write("HTTP 404\n")
+        print(json.dumps({"message": "Not Found"}))
+        sys.exit(1)
+    emit(state["environment"])
+elif path.endswith("/releases/latest"):
+    emit({"tag_name": state["latest"]})
+elif "/releases?" in path:
+    emit([state["release"]])
+elif "/releases/" in path:
+    emit(state["release"])
+elif "/actions/workflows/release-mobile.yml/runs" in path:
+    emit({"workflow_runs": state["runs"]})
+else:
+    sys.exit(4)
+"""
+
+
+def fake_gh(test, state):
+    tmp = Path(tempfile.mkdtemp())
+    test.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)])
+    for name, body in (("gh", FAKE_GH), ("sleep", "#!/bin/sh\nexit 0\n")):
+        tool = tmp / name
+        tool.write_text(body)
+        tool.chmod(0o755)
+    (tmp / "state.json").write_text(json.dumps(state))
+    (tmp / "gh.log").write_text("")
+    env = dict(os.environ, PATH=str(tmp) + os.pathsep + os.environ["PATH"],
+               FAKE_GH_STATE=str(tmp / "state.json"), FAKE_GH_LOG=str(tmp / "gh.log"),
+               GITHUB_OUTPUT=str(tmp / "output"), GITHUB_STEP_SUMMARY=str(tmp / "summary"),
+               REPO="wey-gu/mem-releases")
+    (tmp / "output").write_text("")
+    (tmp / "summary").write_text("")
+    return tmp, env
+
+
+def read_fake(tmp):
+    calls = [json.loads(line) for line in (tmp / "gh.log").read_text().splitlines()]
+    return json.loads((tmp / "state.json").read_text()), calls
+
+
+def needs_of(workflow, job):
+    section = job_section(workflow, job)
+    match = re.search(r"^    needs: (\[.*\]|[A-Za-z0-9_-]+)$", section, re.MULTILINE)
+    if not match:
+        return set()
+    return {name.strip() for name in match.group(1).strip("[]").split(",")}
+
+
+def ancestors(workflow, job):
+    seen = set()
+    stack = list(needs_of(workflow, job))
+    while stack:
+        name = stack.pop()
+        if name not in seen:
+            seen.add(name)
+            stack.extend(needs_of(workflow, name))
+    return seen
+
+
+class OneClickPromotionTest(unittest.TestCase):
+    workflow = workflow_text("promote-rc-to-ga.yml")
+
+    def test_stages_run_in_release_order(self):
+        order = [
+            ("plan", {"preflight", "authority-status"}),
+            ("promote-desktop", {"plan"}),
+            ("promote-docker", {"plan"}),
+            ("promote-rpm", {"promote-desktop"}),
+            ("open-apt", {"promote-rpm"}),
+            ("promote-apt", {"open-apt", "promote-rpm"}),
+            ("updater-read", {"promote-apt", "promote-rpm", "promote-desktop"}),
+            ("updater-plan", {"updater-read"}),
+            ("updater-recover", {"updater-plan"}),
+            ("updater-prepare", {"updater-recover"}),
+            ("updater-verify", {"updater-prepare", "promote-docker", "promote-rpm", "promote-apt"}),
+            ("updater-publish", {"updater-verify", "updater-prepare"}),
+            ("publish-release", {"updater-publish", "promote-docker", "promote-rpm", "promote-apt"}),
+            ("remove-pause", {"publish-release", "updater-publish"}),
+            ("source-tags", {"publish-release", "remove-pause"}),
+            ("mobile", {"source-tags"}),
+            ("verify", {"mobile", "source-tags", "remove-pause", "promote-cuda", "promote-vulkan"}),
+        ]
+        for job, required in order:
+            with self.subTest(job=job):
+                self.assertLessEqual(required, ancestors(self.workflow, job))
+        # A GPU variant is a follow-up, never a withhold of the GA Release.
+        self.assertNotIn("promote-cuda", ancestors(self.workflow, "publish-release"))
+        self.assertNotIn("promote-vulkan", ancestors(self.workflow, "publish-release"))
+        for job in ("promote-rpm", "open-apt", "promote-apt", "updater-read", "updater-recover",
+                    "updater-prepare", "updater-verify", "updater-publish", "publish-release",
+                    "remove-pause", "source-tags", "mobile"):
+            with self.subTest(job=job):
+                self.assertIn("!cancelled() && !failure()", job_section(self.workflow, job))
+
+    def test_stage_workflows_are_reused_not_duplicated(self):
+        for job, reused in (("promote-rpm", "promote-rpm-to-ga.yml"), ("open-apt", "open-apt-pause-route.yml"),
+                            ("promote-apt", "promote-apt-to-ga.yml"), ("authority-status", "desktop-update-control.yml"),
+                            ("updater-read", "desktop-update-control.yml"), ("updater-recover", "desktop-update-control.yml"),
+                            ("updater-prepare", "desktop-update-control.yml"), ("updater-publish", "desktop-update-control.yml"),
+                            ("remove-pause", "remove-desktop-upgrade-pause.yml")):
+            with self.subTest(job=job):
+                section = job_section(self.workflow, job)
+                self.assertIn(f"uses: ./.github/workflows/{reused}", section)
+                self.assertIn("secrets: inherit", section)
+                target = workflow_text(reused)
+                self.assertIn("  workflow_dispatch:\n", target, "manual recovery must remain")
+                self.assertIn("  workflow_call:\n", target)
+                dispatch = target.split("  workflow_dispatch:\n", 1)[1].split("  workflow_call:\n", 1)[0]
+                call = target.split("  workflow_call:\n", 1)[1]
+                for name in re.findall(r"^      ([a-z_]+):\n", dispatch, re.MULTILINE):
+                    self.assertIn(f"      {name}:\n", call, f"{reused} input {name} is not callable")
+        self.assertNotIn("update-apt-repo.cjs", job_section(self.workflow, "promote-apt"))
+        self.assertNotIn("remove-desktop-pause-routes.mjs", self.workflow)
+        self.assertNotIn("open-apt-pause-route.mjs", self.workflow)
+
+    def test_authority_transitions_chain_observed_revisions(self):
+        for job, action, revision in (
+            ("updater-recover", "recover", "${{ needs.updater-plan.outputs.revision }}"),
+            ("updater-prepare", "prepare",
+             "${{ needs.updater-recover.outputs.revision || needs.updater-plan.outputs.revision }}"),
+            ("updater-publish", "publish",
+             "${{ needs.updater-prepare.outputs.revision || needs.updater-plan.outputs.revision }}"),
+        ):
+            with self.subTest(job=job):
+                section = job_section(self.workflow, job)
+                self.assertIn(f"      action: {action}\n", section)
+                self.assertIn(f"      expected_revision: {revision}\n", section)
+                self.assertIn("      operation_id: ${{ needs.plan.outputs.op_", section)
+        self.assertIn("if: ${{ !cancelled() && !failure() && needs.updater-plan.outputs.recover == 'true' }}",
+                      job_section(self.workflow, "updater-recover"))
+        # Owner ruling (D2): no human confirmation inside the run. Safety is the
+        # automated verify-before-expose stage, which publish requires.
+        self.assertNotIn("updater_gate", self.workflow)
+        self.assertNotIn("\n    environment: desktop-update-publish-approval", self.workflow)
+        verify = job_section(self.workflow, "updater-verify")
+        self.assertIn("node scripts/ga-promotion-plan.mjs candidate state.json plan/plan.json", verify)
+        self.assertIn("node scripts/verify-ga-delivery.mjs --staged-while-paused", verify)
+        self.assertIn("node scripts/verify-ga-delivery.mjs --apt-only", verify)
+        self.assertIn("needs.updater-verify.result == 'success'", job_section(self.workflow, "updater-publish"))
+        # The operator is the person who dispatched the promotion.
+        self.assertNotIn("inputs.operator_name", self.workflow)
+        for job in ("authority-status", "updater-read", "updater-recover", "updater-prepare", "updater-publish"):
+            self.assertIn("      operator_name: ${{ github.actor }}\n", job_section(self.workflow, job))
+        control = workflow_text("desktop-update-control.yml")
+        self.assertIn('echo "state=${state}"', control)
+        self.assertIn("value: ${{ jobs.operate.outputs.revision }}", control)
+        # The updater status consumed by the mutations is read right before them.
+        self.assertIn("node scripts/ga-promotion-plan.mjs updater state.json", job_section(self.workflow, "updater-plan"))
+
+    def run_step(self, job, step, env, extra_tools=()):
+        script = step_script(job_section(self.workflow, job), step)
+        tmp = Path(env["FAKE_GH_STATE"]).parent
+        for name, body in extra_tools:
+            tool = tmp / name
+            tool.write_text(body)
+            tool.chmod(0o755)
+        return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+
+    def credential_env(self, **flags):
+        tmp, env = fake_gh(self, {})
+        env.update(DOCKER="true", DESKTOP="true", OLDER_PATCH="false", GA="0.10.102")
+        for name in ("DOCKERHUB_USERNAME", "DOCKERHUB_TOKEN", "MEM_REPO_TOKEN", "MEM_BACKBONE_PAT",
+                     "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ZONE_ID", "R2_ACCESS_KEY_ID",
+                     "R2_SECRET_ACCESS_KEY", "R2_BUCKET_NAME", "GPG_PRIVATE_KEY",
+                     "CLOUDFLARE_SECRETS_STORE_API_TOKEN", "RELEASE_APP"):
+            env[f"HAS_{name}"] = "true"
+        env.update(flags)
+        return tmp, env
+
+    def test_preflight_requires_every_credential_before_any_mutation(self):
+        step = "Require every release credential before any mutation"
+        tmp, env = self.credential_env()
+        result = self.run_step("preflight", step, env)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        # The 0.10.101 stall: a missing Secrets Store token must fail up front.
+        tmp, env = self.credential_env(HAS_CLOUDFLARE_SECRETS_STORE_API_TOKEN="false", HAS_GPG_PRIVATE_KEY="false")
+        result = self.run_step("preflight", step, env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Missing release credential: GPG_PRIVATE_KEY", result.stdout)
+        self.assertIn("Missing release credential: CLOUDFLARE_SECRETS_STORE_API_TOKEN", result.stdout)
+        # The release App is optional: missing means a loud warning, not a failure.
+        tmp, env = self.credential_env(HAS_RELEASE_APP="false")
+        result = self.run_step("preflight", step, env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("::warning::RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY are not set", result.stdout)
+        self.assertIn("Release GitHub App missing", (tmp / "summary").read_text())
+        # An older out-of-band patch never touches APT or the authority.
+        tmp, env = self.credential_env(OLDER_PATCH="true", HAS_GPG_PRIVATE_KEY="false",
+                                       HAS_CLOUDFLARE_SECRETS_STORE_API_TOKEN="false")
+        self.assertEqual(self.run_step("preflight", step, env).returncode, 0)
+
+    def test_tags_use_a_per_run_app_token_scoped_to_mem_and_community(self):
+        for job in ("preflight", "source-tags"):
+            with self.subTest(job=job):
+                section = job_section(self.workflow, job)
+                mint = section.split("uses: actions/create-github-app-token@v1\n", 1)[1].split("\n      - ", 1)[0]
+                self.assertIn("app-id: ${{ secrets.RELEASE_APP_ID }}", mint)
+                self.assertIn("private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}", mint)
+                self.assertIn("owner: nowledge-co", mint)
+                self.assertIn("repositories: mem,community", mint)
+        self.assertIn("TAG_WRITE_TOKEN: ${{ steps.app.outputs.token }}", job_section(self.workflow, "source-tags"))
+        self.assertNotIn("RELEASE_TAG_TOKEN", self.workflow)
+        self.assertNotIn("MEM_REPO_TOKEN", job_section(self.workflow, "source-tags"))
+
+    def publish_state(self, latest_follows=True, assets=6):
+        return {"release": {"id": 77, "tag_name": "v0.10.102", "draft": True, "prerelease": False,
+                            "assets": [{}] * assets, "published_at": "2026-10-14T01:02:03Z"},
+                "latest": "v0.10.101", "latest_follows": latest_follows}
+
+    def test_release_is_published_then_made_latest_in_a_separate_patch(self):
+        tmp, env = fake_gh(self, self.publish_state())
+        env.update(GA="0.10.102", RC="0.10.102-rc1", OLDER_PATCH="false",
+                   CHANGELOG_BASE="https://mem.nowledge.co/changelog")
+        result = self.run_step("publish-release", "Publish the GA Release, then make it latest", env)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        state, _ = read_fake(tmp)
+        self.assertEqual(len(state["patches"]), 2)
+        first, second = state["patches"]
+        self.assertIn("draft=false", first)
+        self.assertNotIn("make_latest=true", first, "combined PATCH silently ignores make_latest")
+        self.assertIn("body=Release notes: https://mem.nowledge.co/changelog#0.10.102\n\n"
+                      "Promoted from v0.10.102-rc1 without rebuilding.", first)
+        self.assertEqual(second, ["make_latest=true"])
+        self.assertIn("published_at=2026-10-14T01:02:03Z", (tmp / "output").read_text())
+
+        # Negative controls: latest that does not move, an incomplete asset set,
+        # and an older patch (which must never claim latest).
+        tmp, env2 = fake_gh(self, self.publish_state(latest_follows=False))
+        env2.update({k: env[k] for k in ("GA", "RC", "OLDER_PATCH", "CHANGELOG_BASE")})
+        result = self.run_step("publish-release", "Publish the GA Release, then make it latest", env2)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("releases/latest reads v0.10.101", result.stdout)
+        tmp, env3 = fake_gh(self, self.publish_state(assets=5))
+        env3.update({k: env[k] for k in ("GA", "RC", "OLDER_PATCH", "CHANGELOG_BASE")})
+        result = self.run_step("publish-release", "Publish the GA Release, then make it latest", env3)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("patches", read_fake(tmp)[0])
+        tmp, env4 = fake_gh(self, self.publish_state())
+        env4.update({k: env[k] for k in ("GA", "RC", "CHANGELOG_BASE")}, OLDER_PATCH="true")
+        result = self.run_step("publish-release", "Publish the GA Release, then make it latest", env4)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(read_fake(tmp)[0]["patches"]), 1)
+
+    def test_source_tags_are_skipped_loudly_or_created_with_cli_publish_last(self):
+        node_log = r"""#!/bin/sh
+printf '%s\n' "$*" >> "$(dirname "$0")/node.log"
+if [ -n "$FAKE_NODE_FAIL" ] && printf '%s' "$*" | grep -q "$FAKE_NODE_FAIL"; then exit 1; fi
+exit 0
+"""
+        step = "Tag mem and community, then cli-publish last"
+        base = dict(GA="0.10.102", MEM_SHA="a" * 40, COMMUNITY_SHA="b" * 40, PLANNED="todo todo todo")
+        tmp, env = fake_gh(self, {})
+        env.update(base, TAG_WRITE_TOKEN="")
+        result = self.run_step("source-tags", step, env, (("node", node_log),))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("::warning::The release App (RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY) is not configured", result.stdout)
+        self.assertIn("created=false", (tmp / "output").read_text())
+        self.assertIn("Source tags SKIPPED", (tmp / "summary").read_text())
+        self.assertFalse((tmp / "node.log").exists(), "no tag call without the token")
+
+        tmp, env = fake_gh(self, {})
+        env.update(base, TAG_WRITE_TOKEN="token")
+        result = self.run_step("source-tags", step, env, (("node", node_log),))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (tmp / "node.log").read_text().splitlines()
+        self.assertEqual([c.split()[3] for c in calls], ["v0.10.102", "v0.10.102", "cli-publish-v0.10.102"])
+        self.assertEqual([c.split()[2] for c in calls],
+                         ["nowledge-co/mem", "nowledge-co/community", "nowledge-co/mem"])
+        self.assertEqual([c.split()[4] for c in calls], ["a" * 40, "b" * 40, "a" * 40])
+
+        # Already tagged (e.g. by hand): no token needed, nothing written.
+        tmp, env = fake_gh(self, {})
+        env.update(base, TAG_WRITE_TOKEN="", PLANNED="done done done")
+        result = self.run_step("source-tags", step, env, (("node", node_log),))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("created=true", (tmp / "output").read_text())
+        self.assertFalse((tmp / "node.log").exists())
+
+        # A refused community tag (e.g. existing at another SHA) must stop
+        # before the irreversible PyPI tag.
+        tmp, env = fake_gh(self, {})
+        env.update(base, TAG_WRITE_TOKEN="token", FAKE_NODE_FAIL="nowledge-co/community")
+        result = self.run_step("source-tags", step, env, (("node", node_log),))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("cli-publish", (tmp / "node.log").read_text())
+
+    def mobile_env(self, runs):
+        tmp, env = fake_gh(self, {"runs": runs, "dispatch_title": "release-mobile 0.10.102 publish"})
+        env.update(GA="0.10.102", TITLE="release-mobile 0.10.102 publish", GITHUB_REF_NAME="main")
+        return tmp, env
+
+    def test_mobile_is_dispatched_once_per_version(self):
+        step = "Dispatch release-mobile once per version"
+        tmp, env = self.mobile_env([{"id": 1, "display_title": "release-mobile 0.10.101 publish",
+                                     "conclusion": "success", "created_at": "2026-10-01T00:00:00Z"}])
+        result = self.run_step("mobile", step, env)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        _, calls = read_fake(tmp)
+        dispatches = [c for c in calls if c[:2] == ["workflow", "run"]]
+        self.assertEqual(len(dispatches), 1)
+        for flag in ("tag=0.10.102", "ios=true", "android=true", "publish=true", "distribute=true"):
+            self.assertIn(flag, dispatches[0])
+        self.assertIn("run_id=9001", (tmp / "output").read_text())
+
+        earlier = {"id": 5, "display_title": "release-mobile 0.10.102 publish", "created_at": "2026-10-14T00:00:00Z"}
+        for conclusion, code in ((None, 0), ("success", 0), ("failure", 1), ("cancelled", 1)):
+            with self.subTest(conclusion=conclusion):
+                tmp, env = self.mobile_env([dict(earlier, conclusion=conclusion)])
+                result = self.run_step("mobile", step, env)
+                self.assertEqual(result.returncode != 0, bool(code), result.stderr + result.stdout)
+                _, calls = read_fake(tmp)
+                self.assertEqual([c for c in calls if c[:2] == ["workflow", "run"]], [],
+                                 "an earlier publish run must never be dispatched again")
+        self.assertIn('run-name: "release-mobile ${{ inputs.tag }}${{ inputs.publish && \' publish\' || \'\' }}"',
+                      workflow_text("release-mobile.yml"))
+
+    def run_cpu_reconcile(self, registry):
+        return GAPromotionContractTest.run_cpu_promote(self, registry, "true")
+
+    def test_cpu_promotion_reconciles_by_digest(self):
+        rc = {"docker.io/nowledgelabs/mem:0.10.80-rc2": "sha256:rc"}
+        done = {**rc, **{f"docker.io/nowledgelabs/mem:{t}": "sha256:rc" for t in ("0.10.80", "0.10", "latest")}}
+        result, registry, calls = self.run_cpu_reconcile(dict(done))
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual([c for c in calls if c[0] == "buildx" and c[2] == "create"], [])
+        self.assertIn("nothing to re-tag", result.stdout)
+        partial = {**rc, "docker.io/nowledgelabs/mem:0.10.80": "sha256:rc",
+                   "docker.io/nowledgelabs/mem:latest": "sha256:old"}
+        result, registry, calls = self.run_cpu_reconcile(partial)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(registry["docker.io/nowledgelabs/mem:latest"], "sha256:rc")
+        conflict = {**rc, "docker.io/nowledgelabs/mem:0.10.80": "sha256:other"}
+        result, registry, calls = self.run_cpu_reconcile(dict(conflict))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refusing to overwrite", result.stdout)
+        self.assertEqual(registry, conflict)
+        self.assertEqual([c for c in calls if c[0] == "buildx" and c[2] == "create"], [])
+
+    def test_gpu_promotion_reconciles_by_digest(self):
+        rc = {"docker.io/nowledgelabs/mem:0.10.80-rc2-cuda": "sha256:rc"}
+        done = {**rc, "docker.io/nowledgelabs/mem:0.10.80-cuda": "sha256:rc",
+                "docker.io/nowledgelabs/mem:0.10-cuda": "sha256:rc"}
+        result, _, calls = GAPromotionContractTest.run_gpu_retag(self, dict(done))
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual([c for c in calls if c[0] == "buildx" and c[2] == "create"], [])
+        conflict = {**rc, "docker.io/nowledgelabs/mem:0.10.80-cuda": "sha256:other"}
+        result, registry, calls = GAPromotionContractTest.run_gpu_retag(self, dict(conflict))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(registry, conflict)
+
+    def test_verify_covers_every_surface_and_leaves_the_changelog_to_a_human(self):
+        verify = job_section(self.workflow, "verify")
+        self.assertIn("node scripts/verify-docker-promotion.mjs", verify)
+        self.assertIn("VERIFY_PLATFORMS: mac,mac-intel,win,linux,linux-deb,linux-rpm,linux-appimage", verify)
+        self.assertIn("node scripts/verify-controlled-desktop-update.mjs", verify)
+        self.assertIn("https://pypi.org/pypi/nmem-cli/${GA}/json", verify)
+        self.assertIn("Flip the Changelog entry", verify)
+        self.assertNotIn("nowledge-labs-website.git", verify)
+        self.assertNotIn("deploy.yml", verify)
+        for job in ("verify", "plan", "preflight"):
+            section = job_section(self.workflow, job)
+            for mutation in ("-X PATCH", "-X POST", "-X DELETE", "imagetools create", "upload-package.cjs",
+                             "ensure nowledge-co"):
+                self.assertNotIn(mutation, section, f"{job} must stay read-only")
 
 
 if __name__ == "__main__":

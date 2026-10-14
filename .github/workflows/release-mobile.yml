@@ -20,6 +20,7 @@
 # run with publish=false, which builds and signs but uploads nothing.
 
 name: release-mobile
+run-name: "release-mobile ${{ inputs.tag }}${{ inputs.publish && ' publish' || '' }}"
 
 on:
   workflow_dispatch:

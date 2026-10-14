@@ -115,13 +115,27 @@ jobs:
             echo "::error::${SRC} (${RC_DIGEST}) has no valid release signature; refusing to promote."
             exit 1
           fi
+          # A resumed promotion accepts an existing GA tag only at the rc digest.
+          EXISTING="$(digest_of "${IMAGE}:${GA}-${VARIANT}" 2>/dev/null || true)"
+          if [[ -n "$EXISTING" && "$EXISTING" != "$RC_DIGEST" ]]; then
+            echo "::error::${IMAGE}:${GA}-${VARIANT} already points at ${EXISTING}, not ${RC_DIGEST}; refusing to overwrite it."
+            exit 1
+          fi
           declare -a TAGS=( "${GA}-${VARIANT}" )
           if [[ "$MOVE_FLOATING" == "true" ]]; then
             TAGS+=( "${MINOR}-${VARIANT}" )
           fi
-          declare -a ARGS=()
-          for t in "${TAGS[@]}"; do ARGS+=( -t "${IMAGE}:$t" ); done
-          docker buildx imagetools create "${ARGS[@]}" "${IMAGE}@${RC_DIGEST}"
+          pending=false
+          for t in "${TAGS[@]}"; do
+            if [[ "$(digest_of "${IMAGE}:$t" 2>/dev/null || true)" != "$RC_DIGEST" ]]; then pending=true; fi
+          done
+          if [[ "$pending" == "true" ]]; then
+            declare -a ARGS=()
+            for t in "${TAGS[@]}"; do ARGS+=( -t "${IMAGE}:$t" ); done
+            docker buildx imagetools create "${ARGS[@]}" "${IMAGE}@${RC_DIGEST}"
+          else
+            echo "Every ${VARIANT} target tag already points at ${RC_DIGEST}; nothing to re-tag."
+          fi
           for tag in "${TAGS[@]}"; do
             GA_DIGEST="$(digest_of "${IMAGE}:${tag}")"
             if [[ "$GA_DIGEST" != "$RC_DIGEST" ]]; then

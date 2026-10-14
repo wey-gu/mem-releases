@@ -13,6 +13,14 @@ on:
         description: "Previous stable Desktop version used for native pause probes"
         required: true
         type: string
+  workflow_call:
+    inputs:
+      ga_tag:
+        required: true
+        type: string
+      paused_stable_version:
+        required: true
+        type: string
 
 concurrency:
   group: promote-apt-${{ inputs.ga_tag }}

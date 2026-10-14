@@ -275,6 +275,57 @@ post-build proof.
 
 ## 6. Promote the tested RC to GA
 
+### 6.0 One dispatch (standard path)
+
+`promote-rc-to-ga.yml` runs the whole promotion as one resumable dispatch:
+
+```bash
+gh workflow run promote-rc-to-ga.yml -R wey-gu/mem-releases \
+  -f rc_tag=<version>-rcN -f ga_tag=<version>
+```
+
+A read-only plan observes the RC/GA Releases, the six R2 objects by
+SHA-256, APT, the upgrade-pause routes, the Desktop update authority, and the
+RC-recorded source tags, and checks every credential before any mutation.
+Each stage then either runs, or proves its exact expected result is already
+live and skips: Docker and GPU re-tags, Desktop packages plus RPM and APT,
+authority status/recover/prepare, an automated verify-before-expose check,
+authority publish, the GA Release (draft=false, then a separate make_latest
+PATCH and a `releases/latest` readback), source tags with
+`cli-publish-v<version>` last, the mobile dispatch, and a final read-only
+verification. Anything that is neither absent nor exactly equal (different
+R2 bytes, a tag at another commit, a Docker tag at another digest, an
+authority holding another candidate) stops the plan before any mutation.
+
+There is no human confirmation inside the run. The authority operator is the
+dispatching GitHub user (`github.actor`), so that login must be a named
+operator in the production Secrets Store document; the preflight status read
+fails before any mutation otherwise. The updater publishes only after the
+automated check proves that the prepared candidate names the RC-authenticated
+bytes and source commit, the exact GA downloads and APT already serve, and the
+Docker promotion verified the RC signatures. Desktop clients on the legacy,
+R2-discovered `/latest` still see a newer GA as soon as its objects are
+uploaded (issue #67); protocol-1 Check for Updates and GitHub `latest` move
+only after verification.
+
+The upgrade pause is emergency-only. The default path never opens or removes
+pause routes; `desktop_upgrade_pause_active=true` (with the live routes in
+place) stages behind the pause, opens the APT route, publishes APT, and removes
+the Desktop pause routes only after the authority and GA Release are public.
+
+To resume after a failure, dispatch again with the same inputs. `mobile=true`
+(default) dispatches `release-mobile.yml` with publish and distribute on; opt
+out explicitly and record why. Source tags and PyPI use a per-run GitHub App
+token (`RELEASE_APP_ID`, `RELEASE_APP_PRIVATE_KEY`; App permission Contents:
+read & write, installed on `nowledge-co/mem` and `nowledge-co/community`);
+without those secrets the tag stage and mobile are skipped with a warning and
+the summary lists the exact tags to create by hand. The authority must not
+still serve an unaccepted earlier candidate; accept it outside release
+automation first. The Changelog date flip remains a human step behind the
+production website gate: the summary prints the GA `publishedAt` date to use.
+
+The sections below describe each stage and its standalone recovery workflow.
+
 ### 6.1 Promote the core release
 
 Once the core RC artifacts have passed their smoke gates, run
@@ -380,20 +431,21 @@ Record the workflow run, the resulting GA release draft, the R2/CDN readback,
 and the updater readback. A core release is not evidence that a deferred RPM
 has been delivered.
 
-If Docker, R2, and APT succeeded but the GA draft is missing, use
-`finish-ga-release.yml` only after checking the exact partial state. It
-verifies the core platforms and APT before creating the draft; it does not
-deploy the Backbone Worker or promote the separately staged RPM. Do not
-repeat the full promote merely to create the missing draft.
+If a promotion stopped part-way, dispatch `promote-rc-to-ga.yml` again with
+the same inputs: it reconciles the partial state and runs only the missing
+stages. `finish-ga-release.yml` remains a manual recovery tool when Docker,
+R2, and APT succeeded but the GA draft is missing. It verifies the core
+platforms and APT before creating the draft; it does not deploy the Backbone
+Worker or promote the separately staged RPM.
 For a pause-aware promotion that stopped after the exact R2 uploads but before
 the draft was created, use the same recovery with
 `desktop_upgrade_pause_active=true` and the reviewed
 `paused_stable_version`. It re-verifies the active pause and every exact GA
 download, leaves APT deferred, and creates the draft from the original RC
 assets without rewriting R2.
-If any core R2 object or the APT candidate is missing or wrong, withhold that
-GA: `finish-ga-release` will reject it, and normal promote refuses the occupied
-R2 keys. Record the exact keys, the updater response, and the failed run;
+If any core R2 object or the APT candidate is wrong, withhold that GA:
+`finish-ga-release` will reject it, and the promotion plan refuses an R2 key
+whose bytes differ from the RC asset. Record the exact keys, the updater response, and the failed run;
 prepare a higher-version RC from the corrected source, smoke its published
 artifacts, then promote that version. Do not reuse the incomplete GA tag or
 publish its draft. A release operator must decide how to clean up the
@@ -475,8 +527,9 @@ draft and reconcile partial attachments by SHA-256. Core GA attachment uses
 the same rule:
 identical existing bytes are skipped, missing files are uploaded, and
 different bytes stop the run. Inspect a partial draft and its assets before
-any retry. Normal RC promotion and direct GA require their target R2 keys and
-GA Release tag to be unused before any parallel publication job starts. If a
+any retry. Direct GA requires its target R2 keys and GA Release tag to be
+unused before any parallel publication job starts; RC promotion accepts only
+keys and assets that already hold the exact RC bytes. If a
 direct GA partially wrote R2, withhold its draft and cut a higher-version RC
 after inspection; `finish-ga-release` is for a validated RC promotion, not a
 direct rebuild.

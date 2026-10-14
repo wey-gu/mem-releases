@@ -43,6 +43,15 @@ on:
       - scripts/test_reconcile_rpm_release_asset.mjs
       - scripts/reconcile-rpm-r2.mjs
       - scripts/test_reconcile_rpm_r2.mjs
+      - .github/workflows/release-mobile.yml
+      - scripts/ga-promotion-plan.mjs
+      - scripts/test_ga_promotion_plan.mjs
+      - scripts/reconcile-ga-r2.mjs
+      - scripts/read-pause-routes.mjs
+      - scripts/reconcile-source-tag.mjs
+      - scripts/find-authority-receipt.mjs
+      - scripts/verify-docker-promotion.mjs
+      - scripts/test_ga_promotion_reconcile.mjs
       - package.json
       - package-lock.json
   push:
@@ -88,6 +97,15 @@ on:
       - scripts/test_reconcile_rpm_release_asset.mjs
       - scripts/reconcile-rpm-r2.mjs
       - scripts/test_reconcile_rpm_r2.mjs
+      - .github/workflows/release-mobile.yml
+      - scripts/ga-promotion-plan.mjs
+      - scripts/test_ga_promotion_plan.mjs
+      - scripts/reconcile-ga-r2.mjs
+      - scripts/read-pause-routes.mjs
+      - scripts/reconcile-source-tag.mjs
+      - scripts/find-authority-receipt.mjs
+      - scripts/verify-docker-promotion.mjs
+      - scripts/test_ga_promotion_reconcile.mjs
       - package.json
       - package-lock.json
 
@@ -113,3 +131,5 @@ jobs:
         run: node --test scripts/test_assert_fresh_r2_version.mjs
       - name: Check deferred RPM promotion
         run: node --test scripts/test_rpm_ga_policy.mjs scripts/test_reconcile_rpm_release_asset.mjs scripts/test_reconcile_rpm_r2.mjs
+      - name: Check one-click promotion reconciliation
+        run: node --test scripts/test_ga_promotion_plan.mjs scripts/test_ga_promotion_reconcile.mjs

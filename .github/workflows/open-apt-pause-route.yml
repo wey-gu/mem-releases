@@ -15,6 +15,17 @@ on:
         description: "Fresh UUID for the audited route operation"
         required: true
         type: string
+  workflow_call:
+    inputs:
+      ga_tag:
+        required: true
+        type: string
+      previous_version:
+        required: true
+        type: string
+      operation_id:
+        required: true
+        type: string
 
 concurrency:
   group: desktop-upgrade-pause-routes
