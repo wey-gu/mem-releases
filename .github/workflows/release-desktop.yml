@@ -481,7 +481,7 @@ jobs:
 
       - &setup_desktop_python
         name: Set up Desktop build Python
-        if: steps.desktop_dependency.outputs.sha != ''
+        if: steps.desktop_dependency.outputs.sha != '' && runner.environment != 'self-hosted'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -934,10 +934,15 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           . (Join-Path $env:USERPROFILE 'ci-tools\Enter-BuildEnvironment.ps1')
+          & python3 -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
+          if ($LASTEXITCODE -ne 0) { throw 'Preinstalled Python 3.12 is required on this runner' }
+          & rustup which --toolchain 1.98.1 rustc | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Preinstalled Rust 1.98.1 is required on this runner' }
+          $env:RUSTUP_TOOLCHAIN = '1.98.1'
           if ((Get-PSDrive C).Free -lt 40GB) { throw 'At least 40 GiB free is required before a Desktop build' }
           $env:CARGO_TARGET_DIR = Join-Path $env:USERPROFILE 'ci-cache\runner-target'
           $env:XDG_CACHE_HOME = Join-Path $env:USERPROFILE 'ci-cache\pdfium'
-          foreach ($name in @('RUSTC_WRAPPER','SCCACHE_DIR','SCCACHE_CACHE_SIZE','SCCACHE_IDLE_TIMEOUT',
+          foreach ($name in @('RUSTUP_TOOLCHAIN','RUSTC_WRAPPER','SCCACHE_DIR','SCCACHE_CACHE_SIZE','SCCACHE_IDLE_TIMEOUT',
             'SCCACHE_IGNORE_SERVER_IO_ERROR','CMAKE_C_COMPILER_LAUNCHER','CMAKE_CXX_COMPILER_LAUNCHER',
             'CARGO_TARGET_DIR','XDG_CACHE_HOME')) {
             "$name=$([Environment]::GetEnvironmentVariable($name))" | Out-File $env:GITHUB_ENV -Append -Encoding utf8

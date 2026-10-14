@@ -103,3 +103,9 @@ developer clients. These counts are not exact per-job cache attribution. After
 qualification, run `Set-CacheDiagnostics.ps1` without `-Enable` while compilers
 are idle to restore quiet logging. If the idle guard fails, defer the operation;
 never stop developer compilers to collect diagnostics.
+
+Self-hosted builds use the preinstalled Python 3.12 runtime and check its version
+before checkout. They skip `actions/setup-python`, whose Windows installer
+modifies system Python registry entries and requires administrator access.
+Hosted builds retain the existing setup action; do not elevate the runner to
+work around installer permissions.

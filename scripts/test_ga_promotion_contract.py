@@ -1075,6 +1075,20 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
                                          upload["with"]["name"])
         self.assertEqual(set(self.jobs["nightly-report"]["needs"]), {"meta", *CPU_BUILD_JOBS})
 
+    def test_self_hosted_python_uses_preinstalled_runtime_without_system_installer(self):
+        setup = self.step("build-windows", name="Set up Desktop build Python")
+        for runner, sha, expected in (("self-hosted", "a" * 40, False),
+                                      ("github-hosted", "a" * 40, True),
+                                      ("github-hosted", "", False)):
+            self.assertEqual(github_expr(setup["if"], {"runner.environment": runner,
+                              "steps.desktop_dependency.outputs.sha": sha}), expected)
+        configure = self.step("build-windows", name="Configure isolated self-hosted Windows build")
+        self.assertIn("sys.version_info[:2] == (3, 12)", configure["run"])
+        rust = next(step for step in self.jobs["build-windows"]["steps"]
+                    if str(step.get("uses", "")).startswith("dtolnay/rust-toolchain"))
+        self.assertEqual(rust["if"], "runner.environment != 'self-hosted'")
+        self.assertIn("$env:RUSTUP_TOOLCHAIN = '1.98.1'", configure["run"])
+
     def test_shared_windows_miss_diagnostics_never_reset_or_upload_shared_logs(self):
         start = self.step("build-windows", name="Start sccache daemon with debug logging (Windows miss diagnostics)")
         self.assertIn("runner.environment != 'self-hosted'", start["if"])
