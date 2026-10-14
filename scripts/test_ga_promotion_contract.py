@@ -458,6 +458,18 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn("node ../scripts/verify-ga-delivery.mjs", publish)
         self.assertIn("uses: actions/checkout@v4", publish)
 
+    def test_macos_arm64_builds_the_clis_serially(self):
+        # The 7 GB arm64 runner stalled for 246 minutes with the CLI lane
+        # overlapped (run 38582266817); the 14 GB x86_64 runner overlaps fine.
+        workflow = (
+            ROOT / ".github" / "workflows" / "release-desktop.yml"
+        ).read_text()
+        arm = workflow.split("\n  build-macos-arm64:\n", 1)[1].split("\n  build-macos-x86_64:\n", 1)[0]
+        x86 = workflow.split("\n  build-macos-x86_64:\n", 1)[1].split("\n  build-windows:\n", 1)[0]
+        job_env = arm.split("\n    env:\n", 1)[1].split("\n    steps:\n", 1)[0]
+        self.assertIn('      NMEM_DESKTOP_PARALLEL_CLI: "0"\n', job_env + "\n")
+        self.assertNotIn("NMEM_DESKTOP_PARALLEL_CLI", x86)
+
     def test_rpm_is_bundled_from_the_deb_appimage_build(self):
         workflow = (
             ROOT / ".github" / "workflows" / "release-desktop.yml"

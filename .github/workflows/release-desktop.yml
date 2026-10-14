@@ -453,6 +453,14 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      # Build the CLIs after the server, not beside it (nowledge-co/mem#7137
+      # lane policy). On this 7 GB, 3-core runner the overlapped build went
+      # silent right after `Compiling nmem-server` and made no progress for
+      # 246 minutes until cancelled (run 38582266817), while the serial
+      # server compile takes 20-30 minutes (38550080175, 38582183103). The
+      # 14 GB x86_64 runner overlaps fine (server crate in 35 min). Serial
+      # costs about 6 minutes here; arm64 is not the long pole.
+      NMEM_DESKTOP_PARALLEL_CLI: "0"
     steps:
       - name: Checkout private source (nowledge-co/mem)
         uses: actions/checkout@v4
