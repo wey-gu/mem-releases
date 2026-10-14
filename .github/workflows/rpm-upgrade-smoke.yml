@@ -43,8 +43,8 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     env:
-      # PR runs test the open packaging PR branch until it merges.
-      SOURCE_REF: ${{ inputs.source_ref || 'perf/rpm-compression-none' }}
+      # Without inputs (pull_request runs) test nowledge-co/mem main.
+      SOURCE_REF: ${{ inputs.source_ref || 'main' }}
       BASE: ${{ inputs.base_version || '0.10.101' }}
       FEDORA: ${{ inputs.fedora || 'fedora:41' }}
       VER_A: 0.10.990
