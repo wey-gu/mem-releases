@@ -32,8 +32,10 @@ new processes use the same sccache wrapper; existing shells can opt in with:
 ```
 
 One local sccache server owns the disk cache. CI skips its hosted sccache setup,
-R2 configuration and stop/restart diagnostics on this runner. Toolchain,
-features, profile and source differences are separate cache entries. Incremental
+R2 configuration and stop/restart diagnostics on this runner.
+`Nowledge-Mem-Compiler-Cache` starts the shared daemon independently of CI, with
+idle shutdown disabled, so job orphan cleanup cannot terminate other clients'
+cache service. Toolchain, features, profile and source differences are separate cache entries. Incremental
 Rust, metadata-only checks and linker-invoking crates may compile uncached;
 Cargo's dependency artifacts and compatible Rust/C++ compilations still reuse.
 Do not point developer tests at the runner's `target` or stop the shared daemon.
