@@ -1089,6 +1089,24 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
         self.assertEqual(rust["if"], "runner.environment != 'self-hosted'")
         self.assertIn("$env:RUSTUP_TOOLCHAIN = '1.98.1'", configure["run"])
 
+    def test_windows_miss_parser_reads_real_colored_and_unpunctuated_events(self):
+        diag = self.tmp / "sccache-diag"
+        diag.mkdir()
+        prefix = "[2026-10-14T11:35:38.081Z DEBUG sccache::compiler::compiler] [fixture]: "
+        esc = "\x1b"
+        colored = prefix.replace("[2026", esc + "[90m[" + esc + "[0m2026").replace(
+            "DEBUG", esc + "[34mDEBUG" + esc + "[0m")
+        (diag / "daemon.log").write_text(colored + "Hash key: " + "a" * 64 + "\n" +
+                                         colored + "Cache miss in 0.007 s\n" +
+                                         prefix + "Cache hit in 0.001 s.\n")
+        result, _, _, _ = self.run_script(self.step("build-windows", name="Collect sccache miss diagnostics (Windows)")["run"],
+                                          {"RUNNER_TEMP": str(self.tmp), "CARGO_TARGET_DIR": "",
+                                           "SCCACHE_DIAGNOSTIC_LOG": ""})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [line.split() for line in (diag / "out/events.txt").read_text().splitlines()]
+        self.assertEqual([row[2] for row in rows], ["key", "miss", "hit"])
+        self.assertEqual(rows[0][3], "a" * 64)
+
     def test_shared_windows_miss_diagnostics_never_reset_or_upload_shared_logs(self):
         start = self.step("build-windows", name="Start sccache daemon with debug logging (Windows miss diagnostics)")
         self.assertIn("runner.environment != 'self-hosted'", start["if"])

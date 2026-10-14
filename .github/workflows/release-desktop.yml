@@ -1232,7 +1232,8 @@ jobs:
             # name. For a Rust compile only Cargo's extra-filename is kept
             # from the argument list, to tell feature variants of one crate
             # apart; the hash key line follows it, then the hit/miss line.
-            sed -nE '
+            ansi_escape=$(printf '\033')
+            sed -E "s/${ansi_escape}\\[[0-9;]*[mK]//g" "$log" | sed -nE '
               s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: get_cached_or_compile: .*"extra-filename=([^"]+)".*/\1 \2 args \3/p
               t
               s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: get_cached_or_compile: .*/\1 \2 args -/p
@@ -1242,7 +1243,7 @@ jobs:
               s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: Cache (hit|miss|none|recache) in ([0-9.]+) s.*/\1 \2 \3 \4/p
               t
               s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: (Cache read error|Failed to decompress).*/\1 \2 cache-error -/p
-            ' "$log" > "$out/events.txt"
+            ' > "$out/events.txt"
             echo "events: $(awk '{print $3}' "$out/events.txt" | sort | uniq -c | tr '\n' ' ')"
             if [[ -z "${SCCACHE_DIAGNOSTIC_LOG:-}" ]]; then
               echo "::group::Compile units that missed the cache"
