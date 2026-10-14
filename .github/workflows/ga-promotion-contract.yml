@@ -8,6 +8,7 @@ on:
       - .github/workflows/release-docker.yml
       - .github/workflows/finish-ga-release.yml
       - .github/workflows/release-desktop.yml
+      - .github/workflows/release-shape-nightly.yml
       - .github/workflows/release-docker-updater.yml
       - .github/workflows/test-windows-bazel.yml
       - .github/workflows/build-rust-bundle.yml
@@ -55,6 +56,7 @@ on:
       - .github/workflows/release-docker.yml
       - .github/workflows/finish-ga-release.yml
       - .github/workflows/release-desktop.yml
+      - .github/workflows/release-shape-nightly.yml
       - .github/workflows/release-docker-updater.yml
       - .github/workflows/test-windows-bazel.yml
       - .github/workflows/build-rust-bundle.yml

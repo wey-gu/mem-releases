@@ -12,6 +12,26 @@
 #   push tags v*       — auto-trigger when a tag is pushed to THIS repo.
 #   repository_dispatch [type: release] — for automation where the source
 #                        repo's tag-push fires a dispatch here.
+#   workflow_dispatch with `tag: nightly` — NIGHTLY release-shape build of a
+#                        nowledge-co/mem commit (`source_ref`, default main).
+#                        release-shape-nightly.yml dispatches it daily and
+#                        whenever main's Cargo manifests/lockfiles change.
+#
+# Nightly release-shape build (nowledge-co/mem#7108, W5/W17):
+#   Platform breakage (Windows NSIS, submodule init, PDFium, timeouts) used to
+#   surface only 1.5-3 h into a release, and dependency bumps compiled cold
+#   inside the release. The nightly builds the five default desktop platforms
+#   from one pinned nowledge-co/mem commit with the exact release build
+#   steps, including macOS signing + notarization, so the same breakage turns
+#   a nightly red instead of a release and the compile caches are warm. It has
+#   NO side effects: `meta` resolves it to is_dry_run=false AND
+#   run_publish=false, so the prerelease, -vulkan attach, and publish jobs
+#   (the only jobs that write a GH Release, R2, APT, or the updater feed) are
+#   all skipped; Vulkan is forced off; build artifacts are not uploaded (an
+#   unreleased main build must not become a public download). It runs in its
+#   own concurrency group, so it can never queue behind, replace, or cancel a
+#   release run; release-shape-nightly.yml does not dispatch it while a
+#   release run is in flight.
 #
 # First-time setup: see docs/SETUP.md.
 
@@ -21,9 +41,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Source tag to build (e.g. 0.8.4 or 0.8.4-ci1). Bare semver triggers publish; anything with a `-` suffix is a dry-run."
+        description: "Source tag to build (e.g. 0.8.4 or 0.8.4-ci1). Bare semver triggers publish; anything with a `-` suffix is a dry-run. `nightly` runs the side-effect-free nightly release-shape build."
         required: true
         type: string
+      source_ref:
+        description: "Only with tag=nightly: nowledge-co/mem branch, tag, or SHA to build (default: main). Releases always build v<tag>."
+        required: false
+        type: string
+        default: ""
       publish:
         description: "Run publish job (R2 + APT + GH release). Disable for build-only smoke tests."
         required: false
@@ -85,8 +110,12 @@ on:
   repository_dispatch:
     types: [release]
 
+# Releases keep the group `release-desktop-<ref>`. A nightly gets its own
+# group: a run in a shared group would replace a PENDING release run (GitHub
+# keeps one pending run per group), and a release dispatched from main shares
+# `refs/heads/main` with the nightly.
 concurrency:
-  group: release-desktop-${{ github.ref }}
+  group: ${{ inputs.tag == 'nightly' && 'release-desktop-nightly' || format('release-desktop-{0}', github.ref) }}
   cancel-in-progress: false
 
 permissions:
@@ -210,6 +239,7 @@ jobs:
       is_dry_run: ${{ steps.resolve.outputs.is_dry_run }}
       run_publish: ${{ steps.resolve.outputs.run_publish }}
       run_vulkan: ${{ steps.resolve.outputs.run_vulkan }}
+      is_nightly: ${{ steps.resolve.outputs.is_nightly }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -224,6 +254,8 @@ jobs:
           DISPATCH_TAG: ${{ inputs.tag }}
           DISPATCH_PUBLISH: ${{ inputs.publish }}
           DISPATCH_VULKAN: ${{ inputs.build_vulkan }}
+          DISPATCH_SOURCE_REF: ${{ inputs.source_ref }}
+          MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
           PAYLOAD_REF: ${{ github.event.client_payload.ref }}
           PAYLOAD_VERSION: ${{ github.event.client_payload.version }}
           PUSH_REF: ${{ github.ref_name }}
@@ -235,12 +267,23 @@ jobs:
           # repository_dispatch triggers always leave it off, so the normal
           # automated release path is byte-for-byte unchanged.
           VULKAN="false"
+          NIGHTLY="false"
+          NIGHTLY_REF=""
           case "$EVENT_NAME" in
             workflow_dispatch)
-              VERSION="$DISPATCH_TAG"
-              SOURCE_REF="v${VERSION}"
-              PUBLISH="$DISPATCH_PUBLISH"
-              VULKAN="$DISPATCH_VULKAN"
+              if [[ "$DISPATCH_TAG" == "nightly" ]]; then
+                NIGHTLY="true"
+                NIGHTLY_REF="${DISPATCH_SOURCE_REF:-main}"
+              else
+                if [[ -n "$DISPATCH_SOURCE_REF" ]]; then
+                  echo "::error::source_ref is only accepted with tag=nightly; a release always builds v<tag>."
+                  exit 1
+                fi
+                VERSION="$DISPATCH_TAG"
+                SOURCE_REF="v${VERSION}"
+                PUBLISH="$DISPATCH_PUBLISH"
+                VULKAN="$DISPATCH_VULKAN"
+              fi
               ;;
             push)
               # tag push on THIS repo — assume the same tag exists on source
@@ -258,6 +301,32 @@ jobs:
               exit 1
               ;;
           esac
+          if [[ "$NIGHTLY" == "true" ]]; then
+            # Pin ONE commit so all five build jobs compile the same source
+            # even if main moves during the run.
+            SOURCE_REF="$(GH_TOKEN="$MEM_REPO_TOKEN" gh api "repos/nowledge-co/mem/commits/${NIGHTLY_REF}" --jq .sha)"
+            if ! [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::Could not resolve nowledge-co/mem ref '${NIGHTLY_REF}' to a commit."
+              exit 1
+            fi
+            PKG="$(GH_TOKEN="$MEM_REPO_TOKEN" gh api -H 'Accept: application/vnd.github.raw+json' \
+              "repos/nowledge-co/mem/contents/nowledge-graph/package.json?ref=${SOURCE_REF}" | jq -r .version)"
+            if ! [[ "$PKG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::nowledge-graph/package.json at ${SOURCE_REF} has no X.Y.Z version (got '${PKG}')."
+              exit 1
+            fi
+            # The build jobs compare the part before `-` with package.json, and
+            # build-rust-bundle checks the staged binaries against Cargo.toml,
+            # so `<source version>-nightly.<date>` builds the source unmodified.
+            VERSION="${PKG}-nightly.$(date -u +%Y%m%d)"
+            PUBLISH="false"
+            VULKAN="false"
+            {
+              echo "### Nightly release-shape build"
+              echo "- Source: nowledge-co/mem \`${NIGHTLY_REF}\` @ \`${SOURCE_REF}\`"
+              echo "- Version label: \`${VERSION}\` (artifact names only; nothing is published or uploaded)"
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fi
           # Any pre-release suffix (`-ci*`, `-rc*`, `-beta*`, etc.) is a dry
           # run. Only a bare semver `X.Y.Z` ever publishes. Same gate as
           # the private repo's workflow.
@@ -265,6 +334,11 @@ jobs:
             DRY="true"; PUBLISH="false"
           else
             DRY="false"
+          fi
+          # A nightly is not an rc either: is_dry_run gates the draft
+          # pre-release and the -vulkan attach jobs, so it must stay false.
+          if [[ "$NIGHTLY" == "true" ]]; then
+            DRY="false"; PUBLISH="false"
           fi
           # Normalize VULKAN to a strict true/false ("" from a non-dispatch
           # trigger becomes false). NEVER touches publish/updater.
@@ -274,7 +348,8 @@ jobs:
           echo "is_dry_run=$DRY"         >> "$GITHUB_OUTPUT"
           echo "run_publish=$PUBLISH"    >> "$GITHUB_OUTPUT"
           echo "run_vulkan=$VULKAN"      >> "$GITHUB_OUTPUT"
-          echo "Resolved: version=$VERSION source_ref=$SOURCE_REF dry=$DRY publish=$PUBLISH vulkan=$VULKAN"
+          echo "is_nightly=$NIGHTLY"     >> "$GITHUB_OUTPUT"
+          echo "Resolved: version=$VERSION source_ref=$SOURCE_REF dry=$DRY publish=$PUBLISH vulkan=$VULKAN nightly=$NIGHTLY"
 
       - name: Pre-flight GA policy before build and optional Vulkan jobs
         if: ${{ steps.resolve.outputs.run_publish == 'true' }}
@@ -451,8 +526,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
@@ -478,34 +551,26 @@ jobs:
               -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
               submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run by
-          # dtolnay/rust-toolchain; caching it once poisoned every later run).
-          cache-bin: false
-          workspaces: |
-            nowledge-graph/src-tauri
-            nmem-rs
-          # liteparse-pdfium-sys records this path in its build-script output.
-          # Keep the matching runtime library alongside Cargo's target cache.
-          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
-          # Bumped to -v3 (2026-06-27) to invalidate a SECOND poison: the
-          # rust-cache keys on Cargo.lock, not on nmem-rs source, so a
-          # source-only change (no dep bump) restored a STALE nmem-server
-          # from cache and cargo logged 0 "Compiling" lines — rc<=18 shipped
-          # an old backend (missing the feed-503 string, int community ids).
-          # Any future source-behavior fix that lands without a Cargo.lock
-          # change must bump these keys (all 7, not just the 5 GA platforms)
-          # again.
-          # (-v2 had earlier invalidated a poisoned ~/.cargo/bin cargo binary.)
-          #
-          # Bumped again (2026-07-28) for a case worth naming, because it does
-          # not look like a source change at all: a bump of an upstream_forks/
-          # submodule. Those are cargo PATH deps, so their version never moves
-          # and Cargo.lock never changes, yet the C++ they compile is linked
-          # into nmem-server. The trigger here was a ladybug FTS concurrency
-          # backport. Treat a submodule pointer bump as a source-behavior fix.
-          key: macos-aarch64-v5-pdfium
+      # No Swatinem/rust-cache and no setup-node `cache: pnpm` on the macOS and
+      # Linux release jobs (nowledge-co/mem#7108; the Windows job dropped them
+      # in wey-gu/mem-releases#118). Releases run on new tag refs, and a cache
+      # saved by a tag run is visible only to that tag. Every sampled build job
+      # here logged `No cache found.` and `pnpm cache is not found` (0.10.100-rc2
+      # jobs 114574744783/114574744748/114574744757, 0.10.101-rc1 jobs
+      # 114815304627/114815304632), yet each still saved: 58-82 s (arm64),
+      # 80-188 s (x86_64), 30-51 s (Linux) for the ~2 GB target cache, plus
+      # 17-104 s for pnpm. Saving only from the nightly on main (which tag runs
+      # CAN read) was considered and rejected: the three ~2 GB target caches
+      # would hold ~6 GB of the 10 GB repository budget that one rc alone
+      # filled to 9.26 GB, so eviction would decide whether a release restores;
+      # a restored target dir only replaces sccache hits (99.5% on 0.10.100-rc2)
+      # and cannot avoid the version-bump recompiles, because the nightly built
+      # the pre-bump commit; and this cache twice restored a stale binary
+      # (rc<=18 shipped an old nmem-server). sccache on R2 is the compile cache
+      # that carries across tags, and the Unix backend builds through Bazel
+      # with its own remote cache. With no restored target directory,
+      # liteparse-pdfium-sys downloads its runtime into XDG_CACHE_HOME on every
+      # run, as it already did whenever the cache missed.
 
       # SOTA build-cache: sccache → R2 (S3). Content-keyed, unbounded, shared
       # across runs/branches. Caches BOTH rust (RUSTC_WRAPPER) and the heavy C++
@@ -659,7 +724,10 @@ jobs:
           mv -f "$DMG" "$OUT"
           echo "dmg=$OUT" >> "$GITHUB_OUTPUT"
 
+      # A nightly builds main, which may hold unreleased work: keep it off
+      # the public repository's downloadable workflow artifacts.
       - uses: actions/upload-artifact@v4
+        if: needs.meta.outputs.is_nightly != 'true'
         with:
           name: macos-arm64
           path: ${{ steps.locate.outputs.dmg }}
@@ -706,8 +774,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
@@ -722,17 +788,7 @@ jobs:
               -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
               submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run by
-          # dtolnay/rust-toolchain; caching it once poisoned every later run).
-          cache-bin: false
-          workspaces: |
-            nowledge-graph/src-tauri
-            nmem-rs
-          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
-          # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
-          key: macos-x86_64-v4-pdfium
+      # No target cache: see build-macos-arm64 (it never restores on tag runs).
 
       # sccache → R2 (see build-macos-arm64 for rationale).
       - *setup_sccache
@@ -841,7 +897,10 @@ jobs:
           mv -f "$DMG" "$OUT"
           echo "dmg=$OUT" >> "$GITHUB_OUTPUT"
 
+      # A nightly builds main, which may hold unreleased work: keep it off
+      # the public repository's downloadable workflow artifacts.
       - uses: actions/upload-artifact@v4
+        if: needs.meta.outputs.is_nightly != 'true'
         with:
           name: macos-x86_64
           path: ${{ steps.locate.outputs.dmg }}
@@ -1111,7 +1170,10 @@ jobs:
           Move-Item -Force $exe.FullName $out
           "exe=$out" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
+      # A nightly builds main, which may hold unreleased work: keep it off
+      # the public repository's downloadable workflow artifacts.
       - uses: actions/upload-artifact@v4
+        if: needs.meta.outputs.is_nightly != 'true'
         with:
           name: windows-x86_64
           path: ${{ steps.locate.outputs.exe }}
@@ -1244,8 +1306,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@1.98.1
 
@@ -1258,17 +1318,7 @@ jobs:
               -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
               submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run by
-          # dtolnay/rust-toolchain; caching it once poisoned every later run).
-          cache-bin: false
-          workspaces: |
-            nowledge-graph/src-tauri
-            nmem-rs
-          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
-          # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
-          key: linux-deb-appimage-v4-pdfium
+      # No target cache: see build-macos-arm64 (it never restores on tag runs).
 
       # sccache → R2 (see build-macos-arm64 for rationale).
       - *setup_sccache
@@ -1358,7 +1408,10 @@ jobs:
           ./scripts/verify-linux-package.sh "${{ steps.locate.outputs.deb }}"
           ./scripts/verify-linux-package.sh "${{ steps.locate.outputs.appimage }}"
 
+      # A nightly builds main, which may hold unreleased work: keep it off
+      # the public repository's downloadable workflow artifacts.
       - uses: actions/upload-artifact@v4
+        if: needs.meta.outputs.is_nightly != 'true'
         with:
           name: linux-deb-appimage
           path: |
@@ -1410,12 +1463,21 @@ jobs:
           echo "::error::RPM build or verification failed; the linux-rpm artifact is not uploaded. DEB/AppImage artifacts are unaffected."
 
       - uses: actions/upload-artifact@v4
-        if: steps.rpm.outcome == 'success'
+        if: steps.rpm.outcome == 'success' && needs.meta.outputs.is_nightly != 'true'
         with:
           name: linux-rpm
           path: ${{ steps.rpm.outputs.rpm }}
           if-no-files-found: error
           retention-days: 7
+
+      # A release learns about a failed RPM from the missing artifact (the
+      # prerelease upload or publish fails). A nightly uploads nothing, so it
+      # fails this job instead of staying green.
+      - name: Fail the nightly on an RPM failure
+        if: steps.rpm.outcome != 'success' && needs.meta.outputs.is_nightly == 'true'
+        run: |
+          echo "::error::Nightly: the RPM build or verification failed (see 'Build, locate, and verify native .rpm')."
+          exit 1
 
   # =======================================================================
   # OPTIONAL -vulkan GPU variant jobs (Windows + Linux only).
@@ -1473,8 +1535,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
@@ -1487,17 +1547,7 @@ jobs:
       # C++ link) does not expose NASM on PATH, so install it explicitly.
       - uses: ilammy/setup-nasm@v1
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-          workspaces: |
-            nowledge-graph/src-tauri
-            nmem-rs
-          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
-          # Separate cache key from the CPU windows job: the GPU feature pulls
-          # in the GGML Vulkan backend, so the compiled artifacts differ and
-          # must not share/poison the CPU build cache.
-          key: windows-x86_64-vulkan-v3-pdfium
+      # No target cache: see build-macos-arm64 (it never restores on tag runs).
 
       - *setup_sccache
       - *wait_before_sccache_retry
@@ -1747,8 +1797,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@1.98.1
 
@@ -1761,16 +1809,7 @@ jobs:
               -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
               submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-          workspaces: |
-            nowledge-graph/src-tauri
-            nmem-rs
-          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
-          # Separate cache key from the CPU linux job (GPU feature -> different
-          # compiled artifacts; must not poison the CPU build cache).
-          key: linux-vulkan-v3-pdfium
+      # No target cache: see build-macos-arm64 (it never restores on tag runs).
 
       - *setup_sccache
       - *wait_before_sccache_retry
@@ -2370,3 +2409,69 @@ jobs:
           echo "- R2 prefix:  app/$VERSION/"                     >> "$GITHUB_STEP_SUMMARY"
           echo "- GH release: v$VERSION (draft, on this repo)"   >> "$GITHUB_STEP_SUMMARY"
           echo "- Updater:    latest/update delivery verified"    >> "$GITHUB_STEP_SUMMARY"
+
+  # -----------------------------------------------------------------------
+  # Nightly report: one tracking issue in THIS repository. A failed nightly
+  # opens it (or comments on the open one); the next green nightly comments
+  # and closes it. Its token can only touch issues. Release runs never reach
+  # this job: the condition is the nightly concurrency selector.
+  # -----------------------------------------------------------------------
+  nightly-report:
+    needs:
+      - meta
+      - build-macos-arm64
+      - build-macos-x86_64
+      - build-windows
+      - build-linux-deb-appimage
+    if: ${{ always() && inputs.tag == 'nightly' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
+      RESULT_META: ${{ needs.meta.result }}
+      RESULT_MACOS_ARM64: ${{ needs.build-macos-arm64.result }}
+      RESULT_MACOS_X86_64: ${{ needs.build-macos-x86_64.result }}
+      RESULT_WINDOWS: ${{ needs.build-windows.result }}
+      RESULT_LINUX: ${{ needs.build-linux-deb-appimage.result }}
+    steps:
+      - name: Report the nightly result
+        run: |
+          set -euo pipefail
+          TITLE="Nightly release-shape build is failing"
+          table="| job | result |"$'\n'"| --- | --- |"
+          failed="false"
+          for pair in "meta:$RESULT_META" \
+                      "build-macos-arm64:$RESULT_MACOS_ARM64" \
+                      "build-macos-x86_64:$RESULT_MACOS_X86_64" \
+                      "build-windows:$RESULT_WINDOWS" \
+                      "build-linux-deb-appimage (+ RPM):$RESULT_LINUX"; do
+            job="${pair%%:*}"; result="${pair#*:}"
+            table+=$'\n'"| ${job} | ${result} |"
+            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then failed="true"; fi
+          done
+          {
+            echo "### Nightly release-shape result"
+            echo "Source: nowledge-co/mem @ \`${SOURCE_REF:-unresolved}\`, version label \`${VERSION:-unresolved}\`"
+            echo
+            echo "$table"
+          } >> "$GITHUB_STEP_SUMMARY"
+          open_issue="$(gh issue list -R "$REPO" --state open --search "in:title \"${TITLE}\"" \
+            --json number,title | jq -r --arg t "$TITLE" '[.[] | select(.title == $t)][0].number // empty')"
+          body="Nightly release-shape build of nowledge-co/mem @ \`${SOURCE_REF:-unresolved}\` (\`${VERSION:-unresolved}\`): ${RUN_URL}"$'\n\n'"${table}"
+          if [[ "$failed" == "true" ]]; then
+            if [[ -n "$open_issue" ]]; then
+              gh issue comment "$open_issue" -R "$REPO" --body "Still failing. ${body}"
+            else
+              gh issue create -R "$REPO" --title "$TITLE" --body "${body}"$'\n\n'"Fix the source or this workflow before the next release; the next green nightly closes this issue."
+            fi
+            echo "::error::Nightly release-shape build failed: ${RUN_URL}"
+          elif [[ -n "$open_issue" ]]; then
+            gh issue comment "$open_issue" -R "$REPO" --body "Passing again. ${body}"
+            gh issue close "$open_issue" -R "$REPO"
+          fi
