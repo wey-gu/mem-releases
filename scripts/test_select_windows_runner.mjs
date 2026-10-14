@@ -20,3 +20,9 @@ test('missing credentials, permissions, malformed data and network errors fall b
 test('successful inventory resolves self-hosted', async () => {
   assert.equal(await resolveRunner('auto','secret','a/b',async()=>({ok:true,json:async()=>({runners:[ready]})})),'windows-book');
 });
+test('a release always selects GitHub-hosted Windows, whatever the mode or inventory', async () => {
+  const online = async () => ({ ok: true, json: async () => ({ runners: [ready] }) });
+  for (const mode of ['auto', 'self-hosted', 'hosted'])
+    assert.equal(await resolveRunner(mode, 'secret', 'a/b', online, { release: true }), 'windows-2022');
+  assert.equal(await resolveRunner('auto', 'secret', 'a/b', online, { release: false }), 'windows-book');
+});

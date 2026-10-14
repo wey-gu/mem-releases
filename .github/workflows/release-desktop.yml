@@ -147,17 +147,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # Releases (tag push, repository_dispatch, any dispatch tag other than
+      # `nightly`) always build Windows on GitHub-hosted runners; windows-book
+      # is for qualification and nightly runs only (nowledge-co/mem#7108).
       - id: mode
         env:
           MODE: ${{ inputs.windows_runner || 'auto' }}
           LEGACY_SELF_HOSTED: ${{ inputs.windows_self_hosted }}
+          IS_RELEASE: ${{ !(github.event_name == 'workflow_dispatch' && inputs.tag == 'nightly') }}
           APP_CONFIGURED: ${{ secrets.RELEASE_APP_ID != '' && secrets.RELEASE_APP_PRIVATE_KEY != '' }}
         run: |
           if [[ "$LEGACY_SELF_HOSTED" == "true" && "$MODE" == "auto" ]]; then MODE=self-hosted; fi
-          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
-          echo "app_configured=$APP_CONFIGURED" >> "$GITHUB_OUTPUT"
+          {
+            echo "mode=$MODE"
+            echo "release=$IS_RELEASE"
+            echo "app_configured=$APP_CONFIGURED"
+          } >> "$GITHUB_OUTPUT"
       - id: inventory-token
-        if: ${{ steps.mode.outputs.mode == 'auto' && steps.mode.outputs.app_configured == 'true' }}
+        if: ${{ steps.mode.outputs.mode == 'auto' && steps.mode.outputs.release != 'true' && steps.mode.outputs.app_configured == 'true' }}
         continue-on-error: true
         uses: actions/create-github-app-token@v3
         with:
@@ -167,9 +174,10 @@ jobs:
           repositories: mem-releases
           permission-administration: read
       - id: select
-        name: Prefer available Windows machine, otherwise GitHub
+        name: Releases use GitHub; nightlies prefer the available Windows machine
         env:
           WINDOWS_RUNNER_MODE: ${{ steps.mode.outputs.mode }}
+          WINDOWS_RUNNER_RELEASE: ${{ steps.mode.outputs.release }}
           RUNNER_INVENTORY_TOKEN: ${{ steps.inventory-token.outputs.token }}
         run: node scripts/select-windows-runner.mjs
 
