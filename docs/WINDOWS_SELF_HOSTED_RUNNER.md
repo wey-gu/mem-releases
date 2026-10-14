@@ -31,10 +31,18 @@ parallelism to four jobs while local tests can continue.
 | `ci-tools` | Pinned tools, helpers and pre-change user environment backup |
 | `ci-cache/compiler` | Shared local sccache storage, capped at 8 GiB |
 | `ci-cache/runner-target` | Runner-only Cargo artifacts retained across jobs |
+| `ci-cache/pnpm-store` | Persistent pnpm package downloads shared across runner jobs |
 | `.cargo` | Existing shared crate downloads and registry |
 
 **Never clean** `dev/mem/nmem-rs/target`,
 `dev/mem/nowledge-graph/src-tauri/target`, or `dev/mem/.context`.
+The self-hosted job exports `NMEM_PNPM_STORE_DIR` before `pnpm/action-setup`
+and installs with explicit `--store-dir` and `--prefer-offline`. Without this override, pnpm 11 uses the
+store inside the action's `PNPM_HOME`, which the action deletes and recreates on
+the next job. The persistent store is outside checkout and action installation
+paths. Checkout still recreates `node_modules`, so linking and install scripts
+remain; measure a warm run before promising a wall-time reduction.
+
 Developer tests retain their existing targets and incremental settings. Their
 new processes use the same sccache wrapper; existing shells can opt in with:
 
@@ -75,3 +83,37 @@ Retaining the runner target's dependency artifacts and cleaning only our
 `nmem-wire` package before rebuilding took 30.728 seconds, with one Rust
 cache hit observed. That is about 6.4x faster than the initial component build;
 it does not establish the full backend's rebuild cost after a version change.
+
+## Full Windows qualification
+
+Dispatch `release-desktop` with `tag=nightly`, `source_ref=<mem commit SHA>`,
+`publish=false`, `windows_only=true`, and the desired `windows_runner` mode.
+It runs the same standard Windows release build and NSIS packaging steps;
+macOS/Linux, GPU variants, nightly all-platform reporting, artifact uploads and
+all publishing jobs are skipped. `windows_only` is rejected for release tags.
+Use a fixed SHA when comparing runner timing; hardware and cache state differ.
+The self-hosted shared cache statistics can also include developer clients;
+do not restart that shared daemon to isolate measurements.
+
+## W8 diagnostics on the shared runner
+
+Dead Windows caches are removed on both runner modes. Hosted jobs start their
+own debug daemon and upload the sanitized W8 diagnostics. Self-hosted CI never
+restarts the shared daemon. For a bounded qualification, an operator copies the
+updated helpers into `ci-tools`, then runs `Set-CacheDiagnostics.ps1 -Enable`
+only while compiler clients are idle. This restarts the independently scheduled
+server with debug logging, retaining all cache and target contents. CI records
+its log offset and shared statistics and hashes the persistent runner target.
+
+The self-hosted raw log, unit events and hashes stay in the local job workspace;
+only aggregate counts enter the job log, because the shared server may include
+developer clients. These counts are not exact per-job cache attribution. After
+qualification, run `Set-CacheDiagnostics.ps1` without `-Enable` while compilers
+are idle to restore quiet logging. If the idle guard fails, defer the operation;
+never stop developer compilers to collect diagnostics.
+
+Self-hosted builds use the preinstalled Python 3.12 runtime and check its version
+before checkout. They skip `actions/setup-python`, whose Windows installer
+modifies system Python registry entries and requires administrator access.
+Hosted builds retain the existing setup action; do not elevate the runner to
+work around installer permissions.

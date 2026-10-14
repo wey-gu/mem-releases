@@ -918,6 +918,7 @@ def meta_context(outputs, extra=None):
         "inputs.allow_newer_desktop_latest": False,
         "inputs.windows_runner_probe": False,
         "inputs.windows_cache_benchmark": False,
+        "inputs.windows_only": False,
     })
     context.update(extra or {})
     return context
@@ -1061,7 +1062,8 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
                                     "run_publish": "false", "run_vulkan": "false"})
             for job in CPU_BUILD_JOBS:
                 with self.subTest(is_nightly=is_nightly, job=job):
-                    self.assertNotIn("if", self.jobs[job], "Default platform builds are unconditional")
+                    self.assertTrue(github_expr(self.jobs[job].get("if", "true"), context),
+                                    "Default platform builds run without windows_only")
                     expected_needs = ["meta", "select-windows-runner"] if job == "build-windows" else "meta"
                     self.assertEqual(self.jobs[job]["needs"], expected_needs)
                     uploads = [s for s in self.jobs[job]["steps"]
@@ -1073,6 +1075,85 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
                                          upload["with"]["name"])
         self.assertEqual(set(self.jobs["nightly-report"]["needs"]), {"meta", *CPU_BUILD_JOBS})
 
+    def test_self_hosted_python_uses_preinstalled_runtime_without_system_installer(self):
+        setup = self.step("build-windows", name="Set up Desktop build Python")
+        for runner, sha, expected in (("self-hosted", "a" * 40, False),
+                                      ("github-hosted", "a" * 40, True),
+                                      ("github-hosted", "", False)):
+            self.assertEqual(github_expr(setup["if"], {"runner.environment": runner,
+                              "steps.desktop_dependency.outputs.sha": sha}), expected)
+        configure = self.step("build-windows", name="Configure isolated self-hosted Windows build")
+        self.assertIn("sys.version_info[:2] == (3, 12)", configure["run"])
+        rust = next(step for step in self.jobs["build-windows"]["steps"]
+                    if str(step.get("uses", "")).startswith("dtolnay/rust-toolchain"))
+        self.assertEqual(rust["if"], "runner.environment != 'self-hosted'")
+        self.assertIn("$env:RUSTUP_TOOLCHAIN = '1.98.1'", configure["run"])
+
+    def test_self_hosted_pnpm_store_survives_action_setup_and_checkout(self):
+        steps = self.jobs["build-windows"]["steps"]
+        configure = self.step("build-windows", name="Configure isolated self-hosted Windows build")
+        self.assertEqual(configure["if"], "runner.environment == 'self-hosted'")
+        self.assertIn("$env:NMEM_PNPM_STORE_DIR = Join-Path $env:USERPROFILE 'ci-cache\\pnpm-store'", configure["run"])
+        self.assertIn("'NMEM_PNPM_STORE_DIR'", configure["run"])
+        setup = next(step for step in steps if step.get("uses") == "pnpm/action-setup@v4")
+        self.assertLess(steps.index(configure), steps.index(setup))
+        install = self.step("build-windows", name="Install pnpm deps")
+        self.assertIn("--prefer-offline", install["run"])
+        self.assertIn("$installArgs += @('--store-dir', $env:NMEM_PNPM_STORE_DIR)", install["run"])
+
+    def test_windows_miss_parser_reads_real_colored_and_unpunctuated_events(self):
+        diag = self.tmp / "sccache-diag"
+        diag.mkdir()
+        prefix = "[2026-10-14T11:35:38.081Z DEBUG sccache::compiler::compiler] [fixture]: "
+        esc = "\x1b"
+        colored = prefix.replace("[2026", esc + "[90m[" + esc + "[0m2026").replace(
+            "DEBUG", esc + "[34mDEBUG" + esc + "[0m")
+        (diag / "daemon.log").write_text(colored + "Hash key: " + "a" * 64 + "\n" +
+                                         colored + "Cache miss in 0.007 s\n" +
+                                         prefix + "Cache hit in 0.001 s.\n")
+        result, _, _, _ = self.run_script(self.step("build-windows", name="Collect sccache miss diagnostics (Windows)")["run"],
+                                          {"RUNNER_TEMP": str(self.tmp), "CARGO_TARGET_DIR": "",
+                                           "SCCACHE_DIAGNOSTIC_LOG": ""})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [line.split() for line in (diag / "out/events.txt").read_text().splitlines()]
+        self.assertEqual([row[2] for row in rows], ["key", "miss", "hit"])
+        self.assertEqual(rows[0][3], "a" * 64)
+
+    def test_shared_windows_miss_diagnostics_never_reset_or_upload_shared_logs(self):
+        start = self.step("build-windows", name="Start sccache daemon with debug logging (Windows miss diagnostics)")
+        self.assertIn("runner.environment != 'self-hosted'", start["if"])
+        prepare = self.step("build-windows", name="Prepare shared sccache diagnostics without restarting (Windows)")
+        self.assertEqual(prepare["if"], "runner.environment == 'self-hosted'")
+        self.assertNotIn("stop-server", prepare["run"])
+        helper = (ROOT / "scripts/windows-runner/Prepare-CacheDiagnostics.ps1").read_text()
+        self.assertNotIn("stop-server", helper)
+        self.assertIn("SCCACHE_DIAGNOSTIC_OFFSET", helper)
+        collect = self.step("build-windows", name="Collect sccache miss diagnostics (Windows)")
+        self.assertNotIn("runner.environment != 'self-hosted'", collect["if"])
+        self.assertIn("${CARGO_TARGET_DIR:-}", collect["run"])
+        self.assertIn("${SCCACHE_DIAGNOSTIC_OFFSET:-0}", collect["run"])
+        upload = self.step("build-windows", name="Upload sccache miss diagnostics (Windows)")
+        self.assertIn("runner.environment != 'self-hosted'", upload["if"])
+
+    def test_windows_only_build_is_nightly_and_has_no_publishers(self):
+        result, outputs, _, _ = self.resolve("workflow_dispatch", DISPATCH_TAG="nightly",
+                                             WINDOWS_ONLY="true", DISPATCH_SOURCE_REF=NIGHTLY_SHA)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        extra = {"github.event_name": "workflow_dispatch", "inputs.tag": "nightly",
+                 "inputs.windows_only": True}
+        self.assertEqual(self.side_effect_reachable(outputs, extra), [])
+        context = meta_context(outputs, extra)
+        for job in CPU_BUILD_JOBS:
+            self.assertEqual(github_expr(self.jobs[job].get("if", "true"), context),
+                             job == "build-windows", job)
+        self.assertFalse(github_expr(self.jobs["nightly-report"]["if"], context))
+        self.assertEqual(outputs["source_ref"], NIGHTLY_SHA)
+        for event, tag in (("workflow_dispatch", "0.10.102"), ("push", "nightly"),
+                           ("repository_dispatch", "nightly")):
+            result, outputs, _, _ = self.resolve(event, DISPATCH_TAG=tag, WINDOWS_ONLY="true")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(outputs, {})
+
     def test_nightly_never_shares_a_concurrency_group_with_a_release(self):
         group = self.workflow["concurrency"]["group"]
         self.assertFalse(self.workflow["concurrency"]["cancel-in-progress"])
@@ -1083,13 +1164,18 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
             ("workflow_dispatch", "nightly", "refs/heads/main", "release-desktop-nightly"),
         ):
             with self.subTest(event=event, tag=tag):
-                context = {"github.event_name": event, "inputs.tag": tag, "github.ref": ref}
+                context = {"github.event_name": event, "inputs.tag": tag, "github.ref": ref,
+                           "inputs.windows_only": False, "github.run_id": 100}
                 self.assertEqual(github_expr(group, context), expected)
+        for run_id in (100, 101):
+            self.assertEqual(github_expr(group, {"inputs.windows_only": True, "github.run_id": run_id,
+                                                "inputs.tag": "nightly", "github.ref": "refs/heads/main"}),
+                             f"windows-qualification-{run_id}")
         report_if = self.jobs["nightly-report"]["if"]
         for event, tag, expected in (("workflow_dispatch", "nightly", True),
                                      ("workflow_dispatch", "0.10.102", False), ("push", None, False),
                                      ("repository_dispatch", None, False)):
-            self.assertEqual(github_expr(report_if, {"github.event_name": event, "inputs.tag": tag}),
+            self.assertEqual(github_expr(report_if, {"github.event_name": event, "inputs.tag": tag, "inputs.windows_only": False}),
                              expected, (event, tag))
         self.assertEqual(self.jobs["nightly-report"]["permissions"], {"issues": "write"})
 

@@ -69,6 +69,11 @@ on:
         required: false
         type: boolean
         default: false
+      windows_only:
+        description: "Only build standard Windows from the pinned source_ref; accepted only with tag=nightly, never publishes."
+        required: false
+        type: boolean
+        default: false
       windows_runner_probe:
         description: "Only run the isolated Windows self-hosted feasibility probe; skip all release jobs."
         required: false
@@ -115,7 +120,7 @@ on:
 # keeps one pending run per group), and a release dispatched from main shares
 # `refs/heads/main` with the nightly.
 concurrency:
-  group: ${{ inputs.tag == 'nightly' && 'release-desktop-nightly' || format('release-desktop-{0}', github.ref) }}
+  group: ${{ inputs.windows_only == true && format('windows-qualification-{0}', github.run_id) || (inputs.tag == 'nightly' && 'release-desktop-nightly' || format('release-desktop-{0}', github.ref)) }}
   cancel-in-progress: false
 
 permissions:
@@ -255,6 +260,7 @@ jobs:
           DISPATCH_PUBLISH: ${{ inputs.publish }}
           DISPATCH_VULKAN: ${{ inputs.build_vulkan }}
           DISPATCH_SOURCE_REF: ${{ inputs.source_ref }}
+          WINDOWS_ONLY: ${{ inputs.windows_only }}
           MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
           PAYLOAD_REF: ${{ github.event.client_payload.ref }}
           PAYLOAD_VERSION: ${{ github.event.client_payload.version }}
@@ -262,6 +268,10 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          if [[ "${WINDOWS_ONLY:-false}" == "true" && ( "$EVENT_NAME" != "workflow_dispatch" || "$DISPATCH_TAG" != "nightly" ) ]]; then
+            echo "::error::windows_only is accepted only for a non-publishing tag=nightly manual build."
+            exit 1
+          fi
           # VULKAN is the OPTIONAL -vulkan GPU variant gate. It is ONLY ever
           # opt-in via the workflow_dispatch `build_vulkan` input; tag-push and
           # repository_dispatch triggers always leave it off, so the normal
@@ -413,6 +423,7 @@ jobs:
   # -----------------------------------------------------------------------
 
   build-macos-arm64:
+    if: ${{ inputs.windows_only != true }}
     needs: meta
     runs-on: macos-15
     # 300, not 180: a cold-cache build (any version bump) runs close to three
@@ -470,7 +481,7 @@ jobs:
 
       - &setup_desktop_python
         name: Set up Desktop build Python
-        if: steps.desktop_dependency.outputs.sha != ''
+        if: steps.desktop_dependency.outputs.sha != '' && runner.environment != 'self-hosted'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -735,6 +746,7 @@ jobs:
           retention-days: 7
 
   build-macos-x86_64:
+    if: ${{ inputs.windows_only != true }}
     needs: meta
     runs-on: macos-15-intel
     # 300, not 180: see build-macos-arm64 (0.10.101-rc1 evidence).
@@ -922,12 +934,19 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           . (Join-Path $env:USERPROFILE 'ci-tools\Enter-BuildEnvironment.ps1')
+          & python3 -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
+          if ($LASTEXITCODE -ne 0) { throw 'Preinstalled Python 3.12 is required on this runner' }
+          & rustup which --toolchain 1.98.1 rustc | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Preinstalled Rust 1.98.1 is required on this runner' }
+          $env:RUSTUP_TOOLCHAIN = '1.98.1'
           if ((Get-PSDrive C).Free -lt 40GB) { throw 'At least 40 GiB free is required before a Desktop build' }
           $env:CARGO_TARGET_DIR = Join-Path $env:USERPROFILE 'ci-cache\runner-target'
           $env:XDG_CACHE_HOME = Join-Path $env:USERPROFILE 'ci-cache\pdfium'
-          foreach ($name in @('RUSTC_WRAPPER','SCCACHE_DIR','SCCACHE_CACHE_SIZE','SCCACHE_IDLE_TIMEOUT',
+          # action-setup recreates PNPM_HOME; keep package downloads outside it.
+          $env:NMEM_PNPM_STORE_DIR = Join-Path $env:USERPROFILE 'ci-cache\pnpm-store'
+          foreach ($name in @('RUSTUP_TOOLCHAIN','RUSTC_WRAPPER','SCCACHE_DIR','SCCACHE_CACHE_SIZE','SCCACHE_IDLE_TIMEOUT',
             'SCCACHE_IGNORE_SERVER_IO_ERROR','CMAKE_C_COMPILER_LAUNCHER','CMAKE_CXX_COMPILER_LAUNCHER',
-            'CARGO_TARGET_DIR','XDG_CACHE_HOME')) {
+            'CARGO_TARGET_DIR','XDG_CACHE_HOME','NMEM_PNPM_STORE_DIR')) {
             "$name=$([Environment]::GetEnvironmentVariable($name))" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           }
       # The inline fragment bootstrap is pinned by its exact bytes in the CSP.
@@ -966,6 +985,7 @@ jobs:
           node-version: "22"
 
       - uses: dtolnay/rust-toolchain@1.98.1
+        if: runner.environment != 'self-hosted'
         with:
           targets: x86_64-pc-windows-msvc
 
@@ -1060,7 +1080,14 @@ jobs:
 
       - name: Install pnpm deps
         working-directory: nowledge-graph
-        run: pnpm install --frozen-lockfile --prefer-offline
+        shell: pwsh
+        run: |
+          $installArgs = @('install', '--frozen-lockfile', '--prefer-offline')
+          if ($env:NMEM_PNPM_STORE_DIR) {
+            $installArgs += @('--store-dir', $env:NMEM_PNPM_STORE_DIR)
+          }
+          & pnpm @installArgs
+          if ($LASTEXITCODE -ne 0) { throw "pnpm install failed ($LASTEXITCODE)" }
 
       # The hosted Windows image already includes LLVM/clang, CMake, and Ninja.
       # Install only protoc from its upstream GitHub release so a Chocolatey
@@ -1146,6 +1173,13 @@ jobs:
           SCCACHE_LOG=sccache=debug SCCACHE_LOG_MILLIS=1 \
             SCCACHE_ERROR_LOG="$diag/daemon.log" sccache --start-server
 
+      - name: Prepare shared sccache diagnostics without restarting (Windows)
+        if: runner.environment == 'self-hosted'
+        continue-on-error: true
+        shell: powershell
+        run: |
+          & (Join-Path $env:USERPROFILE 'ci-tools\Prepare-CacheDiagnostics.ps1')
+
       - name: Build Rust backend bundle (Windows)
         working-directory: nowledge-graph
         shell: pwsh
@@ -1185,7 +1219,7 @@ jobs:
       # already exposes: unit names, hit/miss, hash keys, and content hashes.
       # Compiler arguments and the raw daemon log stay on the runner.
       - name: Collect sccache miss diagnostics (Windows)
-        if: always() && runner.environment != 'self-hosted' && env.RUSTC_WRAPPER == 'sccache'
+        if: always() && env.RUSTC_WRAPPER != ''
         continue-on-error: true
         shell: bash
         run: |
@@ -1194,13 +1228,21 @@ jobs:
           out="$diag/out"
           mkdir -p "$out"
           log="$diag/daemon.log"
+          if [[ -n "${SCCACHE_DIAGNOSTIC_LOG:-}" ]]; then
+            shared_log="$(cygpath -u "$SCCACHE_DIAGNOSTIC_LOG")"
+            # Keep raw shared logs local; extract only this job's time window.
+            tail -c "+$(( ${SCCACHE_DIAGNOSTIC_OFFSET:-0} + 1 ))" "$shared_log" > "$diag/window.log"
+            log="$diag/window.log"
+            sccache --show-stats --stats-format json > "$out/stats-after.json"
+          fi
           if [[ -s "$log" ]]; then
             # One line per daemon event, in log order: "<time> <unit> <event>
             # <value>". <unit> is the Rust crate name or the C/C++ object
             # name. For a Rust compile only Cargo's extra-filename is kept
             # from the argument list, to tell feature variants of one crate
             # apart; the hash key line follows it, then the hit/miss line.
-            sed -nE '
+            ansi_escape=$(printf '\033')
+            sed -E "s/${ansi_escape}\\[[0-9;]*[mK]//g" "$log" | sed -nE '
               s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: get_cached_or_compile: .*"extra-filename=([^"]+)".*/\1 \2 args \3/p
               t
               s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: get_cached_or_compile: .*/\1 \2 args -/p
@@ -1210,17 +1252,23 @@ jobs:
               s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: Cache (hit|miss|none|recache) in ([0-9.]+) s.*/\1 \2 \3 \4/p
               t
               s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: (Cache read error|Failed to decompress).*/\1 \2 cache-error -/p
-            ' "$log" > "$out/events.txt"
+            ' > "$out/events.txt"
             echo "events: $(awk '{print $3}' "$out/events.txt" | sort | uniq -c | tr '\n' ' ')"
-            echo "::group::Compile units that missed the cache"
-            awk '$3 == "miss" {print $2}' "$out/events.txt" | sort | uniq -c
-            echo "::endgroup::"
+            if [[ -z "${SCCACHE_DIAGNOSTIC_LOG:-}" ]]; then
+              echo "::group::Compile units that missed the cache"
+              awk '$3 == "miss" {print $2}' "$out/events.txt" | sort | uniq -c
+              echo "::endgroup::"
+            else
+              echo "Shared cache events may include developer clients; unit names stay local."
+            fi
           else
             echo "::warning title=sccache diagnostics::No daemon debug log at $log"
           fi
           # Content hashes of every input sccache hashes into a Rust key, plus
           # native objects, so a cross-run diff names the unstable artifact.
-          for root in nmem-rs/target nowledge-graph/src-tauri/target; do
+          roots=(nmem-rs/target nowledge-graph/src-tauri/target)
+          if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then roots+=("$(cygpath -u "$CARGO_TARGET_DIR")"); fi
+          for root in "${roots[@]}"; do
             [[ -d "$root" ]] || continue
             find "$root" -type f \( \
                 \( -path '*/deps/*' \( -name '*.rlib' -o -name '*.dll' \) \) -o \
@@ -1241,6 +1289,7 @@ jobs:
           retention-days: 14
 
   build-linux-deb-appimage:
+    if: ${{ inputs.windows_only != true }}
     needs: meta
     # Builds every default Linux artifact (.deb, .AppImage, .rpm) from ONE
     # backend bundle and ONE Tauri shell build, against one explicit runtime
@@ -2423,7 +2472,7 @@ jobs:
       - build-macos-x86_64
       - build-windows
       - build-linux-deb-appimage
-    if: ${{ always() && inputs.tag == 'nightly' }}
+    if: ${{ always() && inputs.tag == 'nightly' && inputs.windows_only != true }}
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     permissions:
