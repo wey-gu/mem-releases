@@ -234,10 +234,13 @@ verify the embedded native binary and updater path, run the required
 native-link/artifact smoke, and verify Docker and CLI artifacts where they are
 in scope. RC publication must not move `latest` or the GA updater feed.
 
-The desktop RC uploads its platform artifacts independently. A slow RPM build
-may complete after the macOS, Windows, DEB, and AppImage artifacts; its result
-must still pass the Linux payload and ABI-floor checks before it can be
-promoted. Do not make a failed RPM invisible by treating the RC as complete.
+The desktop RC uploads its platform artifacts independently. The RPM is
+bundled in the Linux DEB/AppImage job from the same backend and shell binaries,
+after the DEB/AppImage artifact is saved; an RPM failure does not block those
+core Linux artifacts. The RPM must still pass the Linux payload and ABI-floor
+checks before it can be promoted. A failed RPM leaves no `linux-rpm` artifact
+and fails `prerelease-upload-linux-rpm`; do not make it invisible by treating
+the RC as complete.
 
 ### Mandatory post-build version E2E
 

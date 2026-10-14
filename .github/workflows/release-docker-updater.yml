@@ -179,10 +179,13 @@ jobs:
           MINOR="${V%.*}"
           {
             echo "primary=${IMAGE}:${V}"
-            echo "minor=${IMAGE}:${MINOR}"
+            # Floating :X.Y / :latest move only for a GA allowed to move
+            # :latest (an rc forces push_latest=false), same as release-docker.
             if [[ "${{ needs.meta.outputs.push_latest }}" == "true" ]]; then
+              echo "minor=${IMAGE}:${MINOR}"
               echo "latest=${IMAGE}:latest"
             else
+              echo "minor="
               echo "latest="
             fi
           } >> "$GITHUB_OUTPUT"
@@ -194,8 +197,10 @@ jobs:
           ARM="${IMAGE}@${{ needs.build-arm64.outputs.digest }}"
           declare -a TAGS=(
             "${{ steps.tags.outputs.primary }}"
-            "${{ steps.tags.outputs.minor }}"
           )
+          if [[ -n "${{ steps.tags.outputs.minor }}" ]]; then
+            TAGS+=( "${{ steps.tags.outputs.minor }}" )
+          fi
           if [[ -n "${{ steps.tags.outputs.latest }}" ]]; then
             TAGS+=( "${{ steps.tags.outputs.latest }}" )
           fi

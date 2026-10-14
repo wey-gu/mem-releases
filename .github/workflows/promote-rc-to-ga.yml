@@ -7,20 +7,25 @@
 # (e.g. v0.8.4) across the core distribution surfaces:
 #
 #   Docker (CPU):
-#     - re-tags nowledgelabs/mem:<rc> → nowledgelabs/mem:<ga> (and :latest)
-#     - re-tags nowledgelabs/mem-updater:<rc> → mem-updater:<ga> (and :latest)
+#     - verifies the rc digest's cosign signature, then re-tags
+#       nowledgelabs/mem:<rc> → :<ga> (and :<X.Y> + :latest when push_latest)
+#     - same for nowledgelabs/mem-updater
+#     Floating tags (:latest, :X.Y, :X.Y-<variant>) move ONLY here (or in a
+#     direct GA build allowed to move :latest); an rc never moves them.
 #     The cosign signatures are bound to the manifest digest, so verification
 #     by `cosign verify nowledgelabs/mem:<ga>` continues to succeed — the
 #     signature was produced during the rc release-docker workflow run.
 #
 #   Docker (GPU):
-#     - BUILDS nowledgelabs/mem:<ga>-cuda and :<ga>-vulkan (amd64-only) from
-#       the SAME rc source ref the CPU images were validated against. GPU
-#       images can't be re-tagged like the CPU manifest because release-docker
-#       skips its GPU jobs on rc tags (gated on push_latest), so no
-#       :<rc>-cuda / :<rc>-vulkan exists to promote. These feature builds are
-#       unsigned, matching release-docker's GPU jobs (only the CPU manifest is
-#       cosign-signed in either path).
+#     - re-tags nowledgelabs/mem:<rc>-cuda / :<rc>-vulkan (amd64-only, built
+#       by release-docker during the rc run) → :<ga>-<variant> (plus the
+#       floating :<X.Y>-<variant> when push_latest=true), after verifying the
+#       rc digest's cosign signature, and checks the GA digest equals the rc
+#       digest. Never :latest. GPU images are signed at build time, like CPU.
+#     - If the rc GPU image is missing (an rc cut before release-docker built
+#       GPU images on rc tags), the variant FAILS rather than silently
+#       rebuilding. Re-run with gpu_source=build (and only GPU selected) to
+#       rebuild from the rc source ref as an explicit fallback.
 #
 #   Desktop:
 #     - downloads .dmg/.exe/.deb/.AppImage from the rc GH Release
@@ -83,17 +88,24 @@ on:
         type: boolean
         default: true
       promote_gpu:
-        description: "Compatibility switch: build both CUDA and Vulkan images from the rc source ref"
+        description: "Promote both CUDA and Vulkan images (see gpu_source)"
         type: boolean
         default: true
       promote_cuda:
-        description: "Build & publish only the CUDA image when promote_gpu is disabled"
+        description: "Promote only the CUDA image when promote_gpu is disabled"
         type: boolean
         default: false
       promote_vulkan:
-        description: "Build & publish only the Vulkan image when promote_gpu is disabled"
+        description: "Promote only the Vulkan image when promote_gpu is disabled"
         type: boolean
         default: false
+      gpu_source:
+        description: "retag: re-tag the rc-built :<rc>-<variant> images (fails if absent). build: explicit fallback that rebuilds from the rc source ref (~1-2h)"
+        type: choice
+        options:
+          - retag
+          - build
+        default: retag
       promote_desktop:
         description: "Promote core desktop bundles (DMG/EXE/deb/AppImage)"
         type: boolean
@@ -249,38 +261,53 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Verify RC manifests exist
-        run: |
-          set -euo pipefail
-          docker buildx imagetools inspect "docker.io/nowledgelabs/mem:${RC}" \
-            >/dev/null
-          docker buildx imagetools inspect "docker.io/nowledgelabs/mem-updater:${RC}" \
-            >/dev/null
-          echo "Both RC manifests present on Hub."
+      - uses: sigstore/cosign-installer@v3
 
+      # One step per image: resolve the rc digest, refuse to promote bits our
+      # release workflows did not sign, re-tag that exact digest, then move
+      # the floating GA pointers (:X.Y and :latest) only when this GA may
+      # move :latest. release-docker no longer moves :X.Y on an rc, so GA
+      # promotion is the only place it moves.
       - name: Promote nowledgelabs/mem
-        run: |
+        env:
+          REPO: docker.io/nowledgelabs/mem
+          SIGNER: '^https://github\.com/${{ github.repository }}/\.github/workflows/(release-docker|release-docker-updater|promote-gpu-variant)\.yml@'
+        run: &promote_cpu_image |
           set -euo pipefail
-          docker buildx imagetools create \
-            -t "docker.io/nowledgelabs/mem:${GA}" \
-            "docker.io/nowledgelabs/mem:${RC}"
-          if [[ "${PUSH_LATEST}" == "true" ]]; then
-            docker buildx imagetools create \
-              -t "docker.io/nowledgelabs/mem:latest" \
-              "docker.io/nowledgelabs/mem:${RC}"
+          RC_DIGEST="$(docker buildx imagetools inspect "${REPO}:${RC}" --format '{{json .Manifest}}' \
+            | python3 -c 'import json,sys;print(json.load(sys.stdin)["digest"])')"
+          if [[ -z "$RC_DIGEST" ]]; then
+            echo "::error::${REPO}:${RC} does not exist on Hub."
+            exit 1
           fi
+          if ! cosign verify "${REPO}@${RC_DIGEST}" \
+              --certificate-identity-regexp="$SIGNER" \
+              --certificate-oidc-issuer="https://token.actions.githubusercontent.com" >/dev/null; then
+            echo "::error::${REPO}@${RC_DIGEST} has no valid release signature; refusing to promote."
+            exit 1
+          fi
+          declare -a TAGS=( "${REPO}:${GA}" )
+          if [[ "${PUSH_LATEST}" == "true" ]]; then
+            TAGS+=( "${REPO}:${GA%.*}" "${REPO}:latest" )
+          fi
+          declare -a ARGS=()
+          for t in "${TAGS[@]}"; do ARGS+=( -t "$t" ); done
+          docker buildx imagetools create "${ARGS[@]}" "${REPO}@${RC_DIGEST}"
+          for tag in "${TAGS[@]}"; do
+            GOT="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' \
+              | python3 -c 'import json,sys;print(json.load(sys.stdin)["digest"])')"
+            if [[ "$GOT" != "$RC_DIGEST" ]]; then
+              echo "::error::${tag} digest ${GOT} != rc digest ${RC_DIGEST}"
+              exit 1
+            fi
+            echo "verified ${tag} -> ${GOT}"
+          done
 
       - name: Promote nowledgelabs/mem-updater
-        run: |
-          set -euo pipefail
-          docker buildx imagetools create \
-            -t "docker.io/nowledgelabs/mem-updater:${GA}" \
-            "docker.io/nowledgelabs/mem-updater:${RC}"
-          if [[ "${PUSH_LATEST}" == "true" ]]; then
-            docker buildx imagetools create \
-              -t "docker.io/nowledgelabs/mem-updater:latest" \
-              "docker.io/nowledgelabs/mem-updater:${RC}"
-          fi
+        env:
+          REPO: docker.io/nowledgelabs/mem-updater
+          SIGNER: '^https://github\.com/${{ github.repository }}/\.github/workflows/(release-docker|release-docker-updater|promote-gpu-variant)\.yml@'
+        run: *promote_cpu_image
 
       - name: Verify GA manifests
         run: |
@@ -298,7 +325,7 @@ jobs:
             echo "### Docker promoted ${RC} → ${GA}"
             echo "- mem:           docker.io/nowledgelabs/mem:${GA}"
             echo "- mem-updater:   docker.io/nowledgelabs/mem-updater:${GA}"
-            echo "- :latest moved: ${PUSH_LATEST}"
+            echo "- :latest and :X.Y moved: ${PUSH_LATEST}"
             echo ""
             echo "Cosign signatures are inherited from the rc digest. Verify with:"
             echo '```'
@@ -308,11 +335,10 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # RC tags do not contain GPU images, so GA still builds each variant from
-  # the exact validated RC source. CUDA and Vulkan are separate reusable
+  # release-docker builds :<rc>-cuda / :<rc>-vulkan during the rc run, so GA
+  # re-tags them (gpu_source=retag). CUDA and Vulkan are separate reusable
   # workflow calls: neither waits for the other, and a failed variant can be
-  # retried without rebuilding the successful one. `promote_gpu` remains the
-  # backwards-compatible switch for operators that want both variants.
+  # retried alone. `promote_gpu` remains the switch for both variants.
   promote-cuda:
     needs: validate
     if: ${{ inputs.promote_gpu || inputs.promote_cuda }}
@@ -321,6 +347,8 @@ jobs:
       rc_tag: ${{ needs.validate.outputs.rc_tag }}
       ga_tag: ${{ needs.validate.outputs.ga_tag }}
       variant: cuda
+      source: ${{ inputs.gpu_source }}
+      move_floating: ${{ inputs.push_latest }}
     secrets: inherit
 
   promote-vulkan:
@@ -331,6 +359,8 @@ jobs:
       rc_tag: ${{ needs.validate.outputs.rc_tag }}
       ga_tag: ${{ needs.validate.outputs.ga_tag }}
       variant: vulkan
+      source: ${{ inputs.gpu_source }}
+      move_floating: ${{ inputs.push_latest }}
     secrets: inherit
 
   promote-desktop:

@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - .github/workflows/promote-rc-to-ga.yml
+      - .github/workflows/promote-gpu-variant.yml
+      - .github/workflows/release-docker.yml
       - .github/workflows/finish-ga-release.yml
       - .github/workflows/release-desktop.yml
       - .github/workflows/test-windows-bazel.yml
@@ -46,6 +48,8 @@ on:
     branches: [main]
     paths:
       - .github/workflows/promote-rc-to-ga.yml
+      - .github/workflows/promote-gpu-variant.yml
+      - .github/workflows/release-docker.yml
       - .github/workflows/finish-ga-release.yml
       - .github/workflows/release-desktop.yml
       - .github/workflows/test-windows-bazel.yml
