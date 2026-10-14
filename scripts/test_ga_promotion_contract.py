@@ -30,6 +30,59 @@ def bundle_arguments(workflow):
     return bash_calls, powershell_calls
 
 
+def workflow_text(name):
+    return (ROOT / ".github" / "workflows" / name).read_text()
+
+
+def job_section(workflow, job):
+    section = workflow.split(f"\n  {job}:\n", 1)[1]
+    return re.split(r"\n  [A-Za-z0-9_-]+:\n", section, 1)[0]
+
+
+def step_script(section, step_name):
+    step = section.split(f"name: {step_name}\n", 1)[1]
+    body = step.split("        run: |\n", 1)[1]
+    lines = []
+    for line in body.splitlines():
+        if line.strip() and not line.startswith("          "):
+            break
+        lines.append(line)
+    return textwrap.dedent("\n".join(lines)) + "\n"
+
+
+# Minimal stand-in for `docker buildx imagetools` backed by a JSON file that
+# maps image refs (tag or @digest) to manifest digests.
+FAKE_DOCKER = r"""#!/usr/bin/env python3
+import json, os, sys
+state_path = os.environ["FAKE_REGISTRY"]
+state = json.load(open(state_path))
+args = sys.argv[1:]
+with open(os.environ["FAKE_DOCKER_LOG"], "a") as log:
+    log.write(json.dumps(args) + "\n")
+assert args[:2] == ["buildx", "imagetools"], args
+if args[2] == "inspect":
+    ref = args[3]
+    digest = ref.split("@", 1)[1] if "@" in ref else state.get(ref)
+    if digest is None or ("@" in ref and digest not in state.values()):
+        sys.stderr.write(f"ERROR: {ref}: not found\n")
+        sys.exit(1)
+    if "--format" in args:
+        print(json.dumps({"digest": digest}))
+    else:
+        print(f"Name: {ref}\nDigest: {digest}")
+elif args[2] == "create":
+    tags = [args[i + 1] for i, a in enumerate(args) if a == "-t"]
+    src = args[-1]
+    digest = src.split("@", 1)[1]
+    digest = os.environ.get("FAKE_RETAG_DIGEST", digest)
+    for tag in tags:
+        state[tag] = digest
+    json.dump(state, open(state_path, "w"))
+else:
+    sys.exit(2)
+"""
+
+
 class GAPromotionContractTest(unittest.TestCase):
     def test_release_bundle_commands_select_public_production_channel(self):
         for name, expected_bash, expected_powershell in (
@@ -445,6 +498,130 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertLess(open_apt.index("node scripts/verify-upgrade-pause.mjs"),
                         open_apt.index("node scripts/open-apt-pause-route.mjs"))
         self.assertIn("permissions:\n  # Draft Releases are hidden from read-only GITHUB_TOKENs.\n  contents: write", apt)
+
+
+    def test_release_docker_builds_gpu_images_on_rc_with_rc_scoped_tags(self):
+        workflow = workflow_text("release-docker.yml")
+        for variant in ("cuda", "vulkan"):
+            with self.subTest(variant=variant):
+                section = job_section(workflow, f"build-{variant}")
+                # No GA-only gate: rc runs must produce the image GA re-tags.
+                self.assertNotIn("push_latest", section)
+                self.assertNotRegex(section, r"\n    if:")
+                self.assertIn(f"      VARIANT: {variant}\n", section)
+                self.assertIn("tags: ${{ steps.tags.outputs.list }}", section)
+        script = step_script(job_section(workflow, "build-cuda"), "Resolve GPU image tags")
+        cases = (
+            ("0.10.80-rc1", "true", "cuda",
+             "docker.io/nowledgelabs/mem:0.10.80-rc1-cuda"),
+            ("0.10.80-rc1", "true", "vulkan",
+             "docker.io/nowledgelabs/mem:0.10.80-rc1-vulkan"),
+            ("0.10.80", "false", "cuda",
+             "docker.io/nowledgelabs/mem:0.10.80-cuda,docker.io/nowledgelabs/mem:0.10-cuda"),
+            ("0.10.80", "false", "vulkan",
+             "docker.io/nowledgelabs/mem:0.10.80-vulkan,docker.io/nowledgelabs/mem:0.10-vulkan"),
+        )
+        for version, prerelease, variant, expected in cases:
+            with self.subTest(version=version, variant=variant), tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp) / "out"
+                env = dict(os.environ, IMAGE="docker.io/nowledgelabs/mem", V=version,
+                           IS_PRERELEASE=prerelease, VARIANT=variant,
+                           GITHUB_OUTPUT=str(output))
+                result = subprocess.run(["bash", "-c", script], env=env,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output.read_text(), f"list={expected}\n")
+                self.assertNotIn("latest", expected)
+
+    def test_release_docker_meta_classifies_prereleases(self):
+        meta = job_section(workflow_text("release-docker.yml"), "meta")
+        script = meta.split("      - id: v\n        run: |\n", 1)[1]
+        script = textwrap.dedent(script.split("\n\n", 1)[0]) + "\n"
+        script = (script.replace("${{ github.event_name }}", "push")
+                        .replace("${{ inputs.tag }}", "")
+                        .replace("${{ inputs.latest }}", ""))
+        for ref, prerelease, latest in (("v0.10.80-rc1", "true", "false"),
+                                        ("v0.10.80", "false", "true")):
+            with self.subTest(ref=ref), tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp) / "out"
+                env = dict(os.environ, GITHUB_REF_NAME=ref, GITHUB_OUTPUT=str(output))
+                result = subprocess.run(["bash", "-c", script], env=env,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                self.assertEqual(values["is_prerelease"], prerelease)
+                self.assertEqual(values["push_latest"], latest)
+
+    def run_gpu_retag(self, registry, retag_digest=None, variant="cuda", source="retag"):
+        section = job_section(workflow_text("promote-gpu-variant.yml"), "retag")
+        script = step_script(section, "Re-tag rc GPU image to GA")
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)])
+        docker = tmp / "docker"
+        docker.write_text(FAKE_DOCKER)
+        docker.chmod(0o755)
+        state = tmp / "registry.json"
+        state.write_text(json.dumps(registry))
+        log = tmp / "docker.log"
+        log.write_text("")
+        env = dict(os.environ, PATH=str(tmp) + os.pathsep + os.environ["PATH"],
+                   FAKE_REGISTRY=str(state), FAKE_DOCKER_LOG=str(log),
+                   IMAGE="docker.io/nowledgelabs/mem", RC="0.10.80-rc2", GA="0.10.80",
+                   VARIANT=variant, SOURCE=source,
+                   GITHUB_STEP_SUMMARY=str(tmp / "summary"))
+        if retag_digest:
+            env["FAKE_RETAG_DIGEST"] = retag_digest
+        result = subprocess.run(["bash", "-c", script], env=env,
+                                capture_output=True, text=True)
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        return result, json.loads(state.read_text()), calls
+
+    def test_gpu_promotion_retags_exact_rc_digest(self):
+        rc = {"docker.io/nowledgelabs/mem:0.10.80-rc2-cuda": "sha256:rc"}
+        result, registry, calls = self.run_gpu_retag(rc)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(registry["docker.io/nowledgelabs/mem:0.10.80-cuda"], "sha256:rc")
+        self.assertEqual(registry["docker.io/nowledgelabs/mem:0.10-cuda"], "sha256:rc")
+        self.assertFalse(any("latest" in tag for tag in registry))
+        creates = [c for c in calls if c[2] == "create"]
+        self.assertEqual(len(creates), 1)
+        self.assertEqual(creates[0][-1], "docker.io/nowledgelabs/mem@sha256:rc")
+
+    def test_gpu_promotion_fails_closed_without_rc_image(self):
+        result, registry, calls = self.run_gpu_retag({})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("gpu_source=build", result.stdout)
+        self.assertEqual([c for c in calls if c[2] == "create"], [])
+        self.assertEqual(registry, {})
+
+    def test_gpu_promotion_rejects_digest_drift_and_bad_inputs(self):
+        rc = {"docker.io/nowledgelabs/mem:0.10.80-rc2-vulkan": "sha256:rc"}
+        result, _, _ = self.run_gpu_retag(rc, retag_digest="sha256:other", variant="vulkan")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("!= rc digest", result.stdout)
+        for variant, source in (("rocm", "retag"), ("cuda", "rebuild")):
+            with self.subTest(variant=variant, source=source):
+                result, _, calls = self.run_gpu_retag(rc, variant=variant, source=source)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, [])
+
+    def test_gpu_rebuild_is_an_explicit_fallback(self):
+        variant = workflow_text("promote-gpu-variant.yml")
+        self.assertIn("    if: ${{ inputs.source != 'build' }}\n",
+                      job_section(variant, "retag"))
+        build = job_section(variant, "build")
+        self.assertIn("    if: ${{ inputs.source == 'build' }}\n", build)
+        self.assertIn("uses: docker/build-push-action@v6", build)
+        self.assertNotIn("docker/build-push-action", job_section(variant, "retag"))
+        self.assertIn("        default: retag\n", variant)
+
+        promote = workflow_text("promote-rc-to-ga.yml")
+        self.assertIn("      gpu_source:\n", promote)
+        self.assertRegex(promote, r"gpu_source:\n(?:        .*\n)*?        default: retag\n")
+        for job in ("promote-cuda", "promote-vulkan"):
+            with self.subTest(job=job):
+                self.assertIn("      source: ${{ inputs.gpu_source }}\n",
+                              job_section(promote, job))
 
 
 if __name__ == "__main__":
