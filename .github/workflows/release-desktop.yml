@@ -1158,6 +1158,13 @@ jobs:
           SCCACHE_LOG=sccache=debug SCCACHE_LOG_MILLIS=1 \
             SCCACHE_ERROR_LOG="$diag/daemon.log" sccache --start-server
 
+      - name: Prepare shared sccache diagnostics without restarting (Windows)
+        if: runner.environment == 'self-hosted'
+        continue-on-error: true
+        shell: powershell
+        run: |
+          & (Join-Path $env:USERPROFILE 'ci-tools\Prepare-CacheDiagnostics.ps1')
+
       - name: Build Rust backend bundle (Windows)
         working-directory: nowledge-graph
         shell: pwsh
@@ -1197,7 +1204,7 @@ jobs:
       # already exposes: unit names, hit/miss, hash keys, and content hashes.
       # Compiler arguments and the raw daemon log stay on the runner.
       - name: Collect sccache miss diagnostics (Windows)
-        if: always() && runner.environment != 'self-hosted' && env.RUSTC_WRAPPER == 'sccache'
+        if: always() && env.RUSTC_WRAPPER != ''
         continue-on-error: true
         shell: bash
         run: |
@@ -1206,6 +1213,13 @@ jobs:
           out="$diag/out"
           mkdir -p "$out"
           log="$diag/daemon.log"
+          if [[ -n "${SCCACHE_DIAGNOSTIC_LOG:-}" ]]; then
+            shared_log="$(cygpath -u "$SCCACHE_DIAGNOSTIC_LOG")"
+            # Keep raw shared logs local; extract only this job's time window.
+            tail -c "+$(( ${SCCACHE_DIAGNOSTIC_OFFSET:-0} + 1 ))" "$shared_log" > "$diag/window.log"
+            log="$diag/window.log"
+            sccache --show-stats --stats-format json > "$out/stats-after.json"
+          fi
           if [[ -s "$log" ]]; then
             # One line per daemon event, in log order: "<time> <unit> <event>
             # <value>". <unit> is the Rust crate name or the C/C++ object
@@ -1224,15 +1238,21 @@ jobs:
               s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: (Cache read error|Failed to decompress).*/\1 \2 cache-error -/p
             ' "$log" > "$out/events.txt"
             echo "events: $(awk '{print $3}' "$out/events.txt" | sort | uniq -c | tr '\n' ' ')"
-            echo "::group::Compile units that missed the cache"
-            awk '$3 == "miss" {print $2}' "$out/events.txt" | sort | uniq -c
-            echo "::endgroup::"
+            if [[ -z "${SCCACHE_DIAGNOSTIC_LOG:-}" ]]; then
+              echo "::group::Compile units that missed the cache"
+              awk '$3 == "miss" {print $2}' "$out/events.txt" | sort | uniq -c
+              echo "::endgroup::"
+            else
+              echo "Shared cache events may include developer clients; unit names stay local."
+            fi
           else
             echo "::warning title=sccache diagnostics::No daemon debug log at $log"
           fi
           # Content hashes of every input sccache hashes into a Rust key, plus
           # native objects, so a cross-run diff names the unstable artifact.
-          for root in nmem-rs/target nowledge-graph/src-tauri/target; do
+          roots=(nmem-rs/target nowledge-graph/src-tauri/target)
+          if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then roots+=("$(cygpath -u "$CARGO_TARGET_DIR")"); fi
+          for root in "${roots[@]}"; do
             [[ -d "$root" ]] || continue
             find "$root" -type f \( \
                 \( -path '*/deps/*' \( -name '*.rlib' -o -name '*.dll' \) \) -o \

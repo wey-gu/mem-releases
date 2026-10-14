@@ -1075,6 +1075,22 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
                                          upload["with"]["name"])
         self.assertEqual(set(self.jobs["nightly-report"]["needs"]), {"meta", *CPU_BUILD_JOBS})
 
+    def test_shared_windows_miss_diagnostics_never_reset_or_upload_shared_logs(self):
+        start = self.step("build-windows", name="Start sccache daemon with debug logging (Windows miss diagnostics)")
+        self.assertIn("runner.environment != 'self-hosted'", start["if"])
+        prepare = self.step("build-windows", name="Prepare shared sccache diagnostics without restarting (Windows)")
+        self.assertEqual(prepare["if"], "runner.environment == 'self-hosted'")
+        self.assertNotIn("stop-server", prepare["run"])
+        helper = (ROOT / "scripts/windows-runner/Prepare-CacheDiagnostics.ps1").read_text()
+        self.assertNotIn("stop-server", helper)
+        self.assertIn("SCCACHE_DIAGNOSTIC_OFFSET", helper)
+        collect = self.step("build-windows", name="Collect sccache miss diagnostics (Windows)")
+        self.assertNotIn("runner.environment != 'self-hosted'", collect["if"])
+        self.assertIn("${CARGO_TARGET_DIR:-}", collect["run"])
+        self.assertIn("${SCCACHE_DIAGNOSTIC_OFFSET:-0}", collect["run"])
+        upload = self.step("build-windows", name="Upload sccache miss diagnostics (Windows)")
+        self.assertIn("runner.environment != 'self-hosted'", upload["if"])
+
     def test_windows_only_build_is_nightly_and_has_no_publishers(self):
         result, outputs, _, _ = self.resolve("workflow_dispatch", DISPATCH_TAG="nightly",
                                              WINDOWS_ONLY="true", DISPATCH_SOURCE_REF=NIGHTLY_SHA)

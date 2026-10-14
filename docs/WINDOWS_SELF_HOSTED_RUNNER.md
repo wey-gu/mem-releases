@@ -86,3 +86,20 @@ all publishing jobs are skipped. `windows_only` is rejected for release tags.
 Use a fixed SHA when comparing runner timing; hardware and cache state differ.
 The self-hosted shared cache statistics can also include developer clients;
 do not restart that shared daemon to isolate measurements.
+
+## W8 diagnostics on the shared runner
+
+Dead Windows caches are removed on both runner modes. Hosted jobs start their
+own debug daemon and upload the sanitized W8 diagnostics. Self-hosted CI never
+restarts the shared daemon. For a bounded qualification, an operator copies the
+updated helpers into `ci-tools`, then runs `Set-CacheDiagnostics.ps1 -Enable`
+only while compiler clients are idle. This restarts the independently scheduled
+server with debug logging, retaining all cache and target contents. CI records
+its log offset and shared statistics and hashes the persistent runner target.
+
+The self-hosted raw log, unit events and hashes stay in the local job workspace;
+only aggregate counts enter the job log, because the shared server may include
+developer clients. These counts are not exact per-job cache attribution. After
+qualification, run `Set-CacheDiagnostics.ps1` without `-Enable` while compilers
+are idle to restore quiet logging. If the idle guard fails, defer the operation;
+never stop developer compilers to collect diagnostics.
