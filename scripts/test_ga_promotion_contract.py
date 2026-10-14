@@ -263,8 +263,11 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertLess(windows.index("Initialize Rust path dependencies before cache restore"),
                         windows.index("Resolve or repair the PDFium runtime cache"))
         vulkan = workflow.split("\n  build-windows-vulkan:\n", 1)[1].split("\n  build-linux-vulkan:\n", 1)[0]
+        if "uses: Swatinem/rust-cache@v2" in vulkan:
+            self.assertLess(vulkan.index("*initialize_windows_path_dependencies"),
+                            vulkan.index("uses: Swatinem/rust-cache@v2"))
         self.assertLess(vulkan.index("*initialize_windows_path_dependencies"),
-                        vulkan.index("uses: Swatinem/rust-cache@v2"))
+                        vulkan.index("name: Build Rust backend bundle"))
 
         scripts_by_job = {"windows": script, "windows-vulkan": script}
         bundle = (ROOT / ".github" / "workflows" / "build-rust-bundle.yml").read_text()
@@ -781,6 +784,341 @@ class GAPromotionContractTest(unittest.TestCase):
         promote = workflow_text("promote-rc-to-ga.yml")
         for job in ("promote-cuda", "promote-vulkan"):
             self.assertIn("      move_floating: ${{ inputs.push_latest }}\n", job_section(promote, job))
+
+
+
+# ---------------------------------------------------------------------------
+# Nightly release-shape build (nowledge-co/mem#7108, W5)
+# ---------------------------------------------------------------------------
+
+NIGHTLY_SHA = "0123456789abcdef0123456789abcdef01234567"
+CPU_BUILD_JOBS = ("build-macos-arm64", "build-macos-x86_64", "build-windows",
+                  "build-linux-deb-appimage")
+CPU_ARTIFACTS = ("macos-arm64", "macos-x86_64", "windows-x86_64",
+                 "linux-deb-appimage", "linux-rpm")
+# Anything that writes outside the run: GH Releases, R2, APT, Worker routes,
+# tags, cache purges. Issue comments are the nightly's one intended effect.
+SIDE_EFFECT_MARKERS = ("gh release create", "gh release upload", "gh release edit",
+                       "upload-draft-release-assets", "upload-package", "update-apt-repo",
+                       "purge_cache", "git push", "git tag", "wrangler")
+
+# Fake `gh` for the meta scripts. Logs every call; serves a commit lookup, a
+# raw package.json, and `run list`.
+FAKE_GH = r"""#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["FAKE_GH_LOG"], "a") as log:
+    log.write(json.dumps({"args": sys.argv[1:], "token": os.environ.get("GH_TOKEN", "")}) + "\n")
+args = sys.argv[1:]
+if os.environ.get("FAKE_GH_FAIL") == "1":
+    sys.exit(1)
+if args[:1] == ["api"] and "/commits/" in args[-3 if "--jq" in args else -1]:
+    print(os.environ.get("FAKE_GH_SHA", ""))
+elif args[:1] == ["api"] and "/contents/nowledge-graph/package.json" in args[-1]:
+    print(json.dumps({"name": "nowledge-graph", "version": os.environ.get("FAKE_GH_PKG", "")}))
+elif args[:2] == ["run", "list"]:
+    print(os.environ.get("FAKE_GH_RUNS", "[]"))
+elif args[:2] == ["issue", "list"]:
+    print(os.environ.get("FAKE_GH_ISSUES", "[]"))
+elif args[:1] == ["issue"]:
+    pass
+else:
+    sys.exit(f"unexpected gh call: {args}")
+"""
+
+
+def load_release_desktop():
+    import yaml  # PyYAML ships with the hosted Ubuntu images.
+    return yaml.safe_load(workflow_text("release-desktop.yml"))
+
+
+def github_expr(expression, context):
+    """Evaluate the subset of GitHub expression syntax used by `if:` and
+    `concurrency.group` in release-desktop.yml. Unknown names raise so a new
+    condition cannot pass these tests unexamined."""
+    expr = expression.strip()
+    if expr.startswith("${{") and expr.endswith("}}"):
+        expr = expr[3:-2]
+    out, i = [], 0
+    token = re.compile(r"\s+|'[^']*'|&&|\|\||==|!=|!|\(|\)|,|[A-Za-z_][A-Za-z0-9_.-]*")
+    while i < len(expr):
+        m = token.match(expr, i)
+        if not m:
+            raise AssertionError(f"unsupported expression syntax: {expression!r}")
+        t = m.group(0)
+        i = m.end()
+        if t.isspace() or t in ("(", ")", ",", "==", "!="):
+            out.append(t)
+        elif t.startswith("'"):
+            out.append(repr(t[1:-1]))
+        elif t == "&&":
+            out.append(" and ")
+        elif t == "||":
+            out.append(" or ")
+        elif t == "!":
+            out.append(" not ")
+        elif t in ("always", "success", "format"):
+            out.append(f"_{t}")
+        elif t in ("true", "false"):
+            out.append(str(t == "true"))
+        else:
+            if t not in context:
+                raise AssertionError(f"unmodelled context {t!r} in {expression!r}")
+            out.append(repr(context[t]))
+    return eval("".join(out), {"__builtins__": {}}, {
+        "_always": lambda: True, "_success": lambda: True,
+        "_format": lambda fmt, *args: fmt.format(*args),
+    })
+
+
+def meta_context(outputs, extra=None):
+    context = {f"needs.meta.outputs.{k}": v for k, v in outputs.items()}
+    context.update({f"steps.resolve.outputs.{k}": v for k, v in outputs.items()})
+    context.update({
+        "needs.meta.outputs.nightly_yielded": outputs.get("nightly_yielded", ""),
+        "steps.rpm.outcome": "success",
+        "steps.setup_sccache.outcome": "success",
+        "steps.desktop_dependency.outputs.sha": NIGHTLY_SHA,
+        "env.RUSTC_WRAPPER": "sccache",
+        "env.CLOUDFLARE_ZONE_ID": "zone", "env.CLOUDFLARE_API_TOKEN": "token",
+        "inputs.allow_newer_desktop_latest": False,
+    })
+    context.update(extra or {})
+    return context
+
+
+class ReleaseDesktopNightlyContractTest(unittest.TestCase):
+    def setUp(self):
+        self.workflow = load_release_desktop()
+        self.jobs = self.workflow["jobs"]
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(self.tmp)])
+        gh = self.tmp / "bin" / "gh"
+        gh.parent.mkdir()
+        gh.write_text(FAKE_GH)
+        gh.chmod(0o755)
+        self.log = self.tmp / "gh.log"
+
+    def step(self, job, step_id=None, name=None):
+        for step in self.jobs[job]["steps"]:
+            if (step_id and step.get("id") == step_id) or (name and step.get("name") == name):
+                return step
+        raise AssertionError(f"{job}: no step {step_id or name}")
+
+    def run_script(self, script, env):
+        self.log.write_text("")
+        output, summary = self.tmp / "output", self.tmp / "summary"
+        for f in (output, summary):
+            f.write_text("")
+        result = subprocess.run(
+            ["bash", "-e", "-c", script], capture_output=True, text=True, check=False,
+            env={"PATH": str(self.tmp / "bin") + os.pathsep + os.environ["PATH"],
+                 "FAKE_GH_LOG": str(self.log), "GITHUB_OUTPUT": str(output),
+                 "GITHUB_STEP_SUMMARY": str(summary), **env},
+        )
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines() if "=" in line)
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        return result, values, calls, summary.read_text()
+
+    def resolve(self, event, **env):
+        base = {"EVENT_NAME": event, "DISPATCH_TAG": "", "DISPATCH_PUBLISH": "",
+                "DISPATCH_VULKAN": "", "DISPATCH_SOURCE_REF": "", "PAYLOAD_REF": "",
+                "PAYLOAD_VERSION": "", "PUSH_REF": "main", "MEM_REPO_TOKEN": "mem-token",
+                "FAKE_GH_SHA": NIGHTLY_SHA, "FAKE_GH_PKG": "0.10.102"}
+        base.update(env)
+        return self.run_script(self.step("meta", step_id="resolve")["run"], base)
+
+    def test_release_paths_resolve_exactly_as_before(self):
+        keys = ("version", "source_ref", "is_dry_run", "run_publish", "run_vulkan", "is_nightly")
+        cases = (
+            ("push", {"PUSH_REF": "v0.10.102-rc1"},
+             ("0.10.102-rc1", "v0.10.102-rc1", "true", "false", "false", "false")),
+            ("workflow_dispatch", {"DISPATCH_TAG": "0.10.102", "DISPATCH_PUBLISH": "true",
+                                   "DISPATCH_VULKAN": "false"},
+             ("0.10.102", "v0.10.102", "false", "true", "false", "false")),
+            ("workflow_dispatch", {"DISPATCH_TAG": "0.10.102", "DISPATCH_PUBLISH": "false",
+                                   "DISPATCH_VULKAN": "true"},
+             ("0.10.102", "v0.10.102", "false", "false", "true", "false")),
+            ("workflow_dispatch", {"DISPATCH_TAG": "0.10.102-ci1", "DISPATCH_PUBLISH": "true",
+                                   "DISPATCH_VULKAN": "true"},
+             ("0.10.102-ci1", "v0.10.102-ci1", "true", "false", "true", "false")),
+            ("repository_dispatch", {"PAYLOAD_REF": "v0.10.102-rc2", "PAYLOAD_VERSION": "0.10.102-rc2"},
+             ("0.10.102-rc2", "v0.10.102-rc2", "true", "false", "false", "false")),
+            ("repository_dispatch", {"PAYLOAD_REF": "v0.10.102", "PAYLOAD_VERSION": "0.10.102"},
+             ("0.10.102", "v0.10.102", "false", "true", "false", "false")),
+        )
+        for event, env, expected in cases:
+            with self.subTest(event=event, env=env):
+                result, values, calls, _ = self.resolve(event, **env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(tuple(values.get(k) for k in keys), expected)
+                self.assertEqual(calls, [], "A release must not resolve its source through the API")
+        result, values, _, _ = self.resolve("workflow_dispatch", DISPATCH_TAG="0.10.102",
+                                            DISPATCH_PUBLISH="true", DISPATCH_SOURCE_REF="main")
+        self.assertNotEqual(result.returncode, 0, "source_ref must never redirect a release build")
+        self.assertIn("only accepted with tag=nightly", result.stdout + result.stderr)
+        self.assertEqual(values, {})
+
+    def test_nightly_pins_one_commit_and_never_publishes(self):
+        for event, env, ref in (
+            ("schedule", {}, "main"),
+            ("workflow_dispatch", {"DISPATCH_TAG": "nightly"}, "main"),
+            ("workflow_dispatch", {"DISPATCH_TAG": "nightly", "DISPATCH_SOURCE_REF": "feat/x",
+                                   "DISPATCH_PUBLISH": "true", "DISPATCH_VULKAN": "true"}, "feat/x"),
+        ):
+            with self.subTest(event=event, env=env):
+                result, values, calls, summary = self.resolve(event, **env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertRegex(values["version"], r"^0\.10\.102-nightly\.\d{8}$")
+                self.assertEqual(values["version"].split("-", 1)[0], "0.10.102",
+                                 "The package.json version check compares the part before '-'")
+                self.assertEqual(values["source_ref"], NIGHTLY_SHA)
+                self.assertEqual((values["is_dry_run"], values["run_publish"], values["run_vulkan"],
+                                  values["is_nightly"]), ("false", "false", "false", "true"))
+                self.assertTrue(all(c["token"] == "mem-token" for c in calls), calls)
+                self.assertEqual(calls[0]["args"][:2], ["api", f"repos/nowledge-co/mem/commits/{ref}"])
+                self.assertIn(f"package.json?ref={NIGHTLY_SHA}", calls[1]["args"][-1])
+                self.assertIn(NIGHTLY_SHA, summary)
+        for env in ({"FAKE_GH_SHA": "not-a-sha"}, {"FAKE_GH_PKG": "0.10"}, {"FAKE_GH_FAIL": "1"}):
+            with self.subTest(failure=env):
+                result, values, _, _ = self.resolve("schedule", **env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(values, {})
+
+    def side_effect_reachable(self, outputs, extra=None):
+        context = meta_context(outputs, extra)
+        reachable = []
+        for name, job in self.jobs.items():
+            job_if = job.get("if")
+            if job_if is not None and not github_expr(str(job_if), context):
+                continue
+            if job.get("environment") or "upload-prerelease-desktop-artifact" in job.get("uses", ""):
+                reachable.append(name)
+                continue
+            for step in job.get("steps", []):
+                text = step.get("run", "")
+                if not any(marker in text for marker in SIDE_EFFECT_MARKERS):
+                    continue
+                if step.get("if") is None or github_expr(str(step["if"]), context):
+                    reachable.append(f"{name}: {step.get('name')}")
+        return reachable
+
+    def test_nightly_outputs_reach_no_publishing_job_or_step(self):
+        nightly = {"version": "0.10.102-nightly.20261014", "is_dry_run": "false",
+                   "run_publish": "false", "run_vulkan": "false", "is_nightly": "true"}
+        for event, tag in (("schedule", None), ("workflow_dispatch", "nightly")):
+            self.assertEqual(self.side_effect_reachable(
+                nightly, {"github.event_name": event, "inputs.tag": tag}), [], event)
+        # The evaluator is not vacuous: the release shapes do reach their writers.
+        push = {"github.event_name": "push", "inputs.tag": None}
+        rc = dict(nightly, version="0.10.102-rc1", is_dry_run="true", is_nightly="false")
+        self.assertIn("prerelease-prepare: Create draft pre-release GH Release",
+                      self.side_effect_reachable(rc, push))
+        self.assertIn("prerelease-upload-macos-arm64", self.side_effect_reachable(rc, push))
+        ga = dict(nightly, version="0.10.102", run_publish="true", is_nightly="false")
+        self.assertIn("publish", self.side_effect_reachable(ga, push))
+        vulkan_rc = dict(rc, run_vulkan="true")
+        self.assertIn("build-linux-vulkan: Attach -vulkan bundles to GH Release (manual download only)",
+                      self.side_effect_reachable(vulkan_rc, push))
+
+    def test_nightly_uploads_no_binaries_and_yield_only_skips_nightly_builds(self):
+        for outputs, expect_upload, expect_build in (
+            ({"is_nightly": "true", "nightly_yielded": ""}, False, True),
+            ({"is_nightly": "true", "nightly_yielded": "true"}, False, False),
+            ({"is_nightly": "false", "nightly_yielded": ""}, True, True),
+        ):
+            context = meta_context(dict(outputs, is_dry_run="false", run_publish="false",
+                                        run_vulkan="false"))
+            for job in CPU_BUILD_JOBS:
+                with self.subTest(outputs=outputs, job=job):
+                    self.assertEqual(github_expr(self.jobs[job]["if"], context), expect_build)
+                    uploads = [s for s in self.jobs[job]["steps"]
+                               if str(s.get("uses", "")).startswith("actions/upload-artifact")
+                               and s["with"]["name"] in CPU_ARTIFACTS]
+                    self.assertTrue(uploads)
+                    for upload in uploads:
+                        self.assertEqual(github_expr(upload.get("if", "true"), context), expect_upload,
+                                         upload["with"]["name"])
+
+    def test_nightly_never_shares_a_concurrency_group_with_a_release(self):
+        group = self.workflow["concurrency"]["group"]
+        self.assertFalse(self.workflow["concurrency"]["cancel-in-progress"])
+        for event, tag, ref, expected in (
+            ("push", None, "refs/tags/v0.10.102-rc1", "release-desktop-refs/tags/v0.10.102-rc1"),
+            ("workflow_dispatch", "0.10.102", "refs/heads/main", "release-desktop-refs/heads/main"),
+            ("repository_dispatch", None, "refs/heads/main", "release-desktop-refs/heads/main"),
+            ("schedule", None, "refs/heads/main", "release-desktop-nightly"),
+            ("workflow_dispatch", "nightly", "refs/heads/main", "release-desktop-nightly"),
+        ):
+            with self.subTest(event=event, tag=tag):
+                context = {"github.event_name": event, "inputs.tag": tag, "github.ref": ref}
+                self.assertEqual(github_expr(group, context), expected)
+        report_if = self.jobs["nightly-report"]["if"]
+        for event, tag, expected in (("schedule", None, True), ("workflow_dispatch", "nightly", True),
+                                     ("workflow_dispatch", "0.10.102", False), ("push", None, False),
+                                     ("repository_dispatch", None, False)):
+            self.assertEqual(github_expr(report_if, {"github.event_name": event, "inputs.tag": tag}),
+                             expected, (event, tag))
+        self.assertEqual(self.jobs["nightly-report"]["permissions"], {"issues": "write"})
+
+    def test_scheduled_nightly_yields_to_any_active_release_run(self):
+        step = self.step("meta", step_id="yield")
+        self.assertEqual(step["if"], "${{ github.event_name == 'schedule' }}")
+        runs = lambda *rs: json.dumps([{"databaseId": i, "event": e, "status": s}
+                                        for i, (e, s) in enumerate(rs, start=10)])
+        for listing, fail, yielded in (
+            (runs(("push", "in_progress")), "0", True),
+            (runs(("workflow_dispatch", "queued")), "0", True),
+            (runs(("repository_dispatch", "waiting")), "0", True),
+            (runs(("push", "completed"), ("schedule", "in_progress")), "0", False),
+            (json.dumps([{"databaseId": 99, "event": "push", "status": "in_progress"}]), "0", False),
+            ("[]", "1", False),
+        ):
+            with self.subTest(listing=listing, fail=fail):
+                result, values, calls, _ = self.run_script(step["run"], {
+                    "FAKE_GH_RUNS": listing, "FAKE_GH_FAIL": fail, "GITHUB_RUN_ID": "99",
+                    "GITHUB_REPOSITORY": "wey-gu/mem-releases"})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(values.get("nightly_yielded") == "true", yielded)
+                self.assertEqual(calls[0]["args"][:2], ["run", "list"])
+
+    def test_nightly_report_tracks_one_issue(self):
+        script = self.jobs["nightly-report"]["steps"][0]["run"]
+        title = "Nightly release-shape build is failing"
+        green = {f"RESULT_{k}": "success" for k in ("META", "MACOS_ARM64", "MACOS_X86_64",
+                                                     "WINDOWS", "LINUX")}
+        base = dict(green, REPO="wey-gu/mem-releases", RUN_URL="https://example.invalid/run/1",
+                    VERSION="0.10.102-nightly.20261014", SOURCE_REF=NIGHTLY_SHA, YIELDED="")
+        open_issue = json.dumps([{"number": 7, "title": title}])
+        other_issue = json.dumps([{"number": 8, "title": title + " (old)"}])
+        for env, expected in (
+            ({"RESULT_WINDOWS": "failure"}, [["issue", "create"]]),
+            ({"RESULT_META": "failure", "FAKE_GH_ISSUES": other_issue}, [["issue", "create"]]),
+            ({"RESULT_LINUX": "cancelled", "FAKE_GH_ISSUES": open_issue}, [["issue", "comment", "7"]]),
+            ({"FAKE_GH_ISSUES": open_issue}, [["issue", "comment", "7"], ["issue", "close", "7"]]),
+            ({}, []),
+            ({"YIELDED": "true", "RESULT_WINDOWS": "skipped"}, None),
+        ):
+            with self.subTest(env=env):
+                result, _, calls, summary = self.run_script(script, dict(base, **env))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Nightly release-shape result", summary)
+                writes = [c["args"][:3] if c["args"][1] != "create" else c["args"][:2]
+                          for c in calls if c["args"][:2] != ["issue", "list"]]
+                if expected is None:
+                    self.assertEqual(calls, [])
+                else:
+                    self.assertEqual(writes, expected)
+                for call in calls:
+                    if call["args"][:2] == ["issue", "create"]:
+                        self.assertEqual(call["args"][call["args"].index("--title") + 1], title)
+
+    def test_release_jobs_do_not_save_target_or_pnpm_caches_that_tag_runs_never_restore(self):
+        for name, job in self.jobs.items():
+            for step in job.get("steps", []):
+                with self.subTest(job=name, step=step.get("name") or step.get("uses")):
+                    self.assertFalse(str(step.get("uses", "")).startswith("Swatinem/rust-cache"))
+                    self.assertNotIn("cache", (step.get("with") or {}) if str(step.get("uses", "")).startswith(
+                        "actions/setup-node") else {})
 
 
 if __name__ == "__main__":
