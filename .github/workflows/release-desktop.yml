@@ -49,6 +49,16 @@ on:
         required: false
         type: boolean
         default: false
+      windows_self_hosted:
+        description: "Use windows-book for the standard Windows build; GPU variants and the default remain hosted."
+        required: false
+        type: boolean
+        default: false
+      windows_cache_benchmark:
+        description: "Also measure compatible local-test/runner cache reuse during the isolated Windows probe."
+        required: false
+        type: boolean
+        default: false
   push:
     # Auto-fire on RC-style tags ONLY (anything with a `-` suffix:
     # `-rcN`, `-betaN`, `-ciN`). Clean-semver GA tags like `v0.8.4`
@@ -93,6 +103,15 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Verify configured tools and shared cache
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . (Join-Path $env:USERPROFILE 'ci-tools\Enter-BuildEnvironment.ps1')
+          foreach ($tool in @('pwsh','python3','clang','cmake','ninja','protoc','nasm','sccache','makensis')) {
+            $resolved = (Get-Command $tool -ErrorAction Stop).Source
+            Write-Host "$tool available"
+          }
       - name: Verify native Windows runner and compiler
         shell: powershell
         run: |
@@ -127,6 +146,12 @@ jobs:
           - Native Rust/MSVC proof: $result ($([math]::Round($timer.Elapsed.TotalSeconds, 2)) seconds)
           - This small fixture does not measure release build performance.
           "@ | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8
+      - name: Measure shared compiler cache
+        if: ${{ inputs.windows_cache_benchmark == true }}
+        shell: powershell
+        run: |
+          & (Join-Path $env:USERPROFILE 'ci-tools\pwsh\pwsh.exe') -NoProfile -File (Join-Path $env:USERPROFILE 'ci-tools\Test-SharedCache.ps1')
+          if ($LASTEXITCODE -ne 0) { throw 'Shared cache measurement failed' }
 
   # -----------------------------------------------------------------------
   # Resolve version + flags. Also exposes `source_ref` so build jobs check
@@ -456,6 +481,7 @@ jobs:
       - &setup_sccache
         name: Setup sccache
         id: setup_sccache
+        if: runner.environment != 'self-hosted'
         continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.9
       - &wait_before_sccache_retry
@@ -780,12 +806,27 @@ jobs:
 
   build-windows:
     needs: meta
-    runs-on: windows-2022
+    runs-on: ${{ inputs.windows_self_hosted == true && 'windows-book' || 'windows-2022' }}
     timeout-minutes: 180
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
     steps:
+      - &configure_windows_self_hosted
+        name: Configure isolated self-hosted Windows build
+        if: runner.environment == 'self-hosted'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . (Join-Path $env:USERPROFILE 'ci-tools\Enter-BuildEnvironment.ps1')
+          if ((Get-PSDrive C).Free -lt 40GB) { throw 'At least 40 GiB free is required before a Desktop build' }
+          $env:CARGO_TARGET_DIR = Join-Path $env:USERPROFILE 'ci-cache\runner-target'
+          $env:XDG_CACHE_HOME = Join-Path $env:USERPROFILE 'ci-cache\pdfium'
+          foreach ($name in @('RUSTC_WRAPPER','SCCACHE_DIR','SCCACHE_CACHE_SIZE','SCCACHE_IDLE_TIMEOUT',
+            'SCCACHE_IGNORE_SERVER_IO_ERROR','CMAKE_C_COMPILER_LAUNCHER','CMAKE_CXX_COMPILER_LAUNCHER',
+            'CARGO_TARGET_DIR','XDG_CACHE_HOME')) {
+            "$name=$([Environment]::GetEnvironmentVariable($name))" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          }
       # The inline fragment bootstrap is pinned by its exact bytes in the CSP.
       # Windows checkout conversion must not rewrite those bytes to CRLF.
       - &preserve_windows_checkout_lf
@@ -802,6 +843,7 @@ jobs:
           token: ${{ secrets.MEM_REPO_TOKEN }}
           ref: ${{ env.SOURCE_REF }}
           submodules: false
+          persist-credentials: false
 
       - *resolve_hawdb_dependency
       - *checkout_hawdb_dependency
@@ -843,6 +885,7 @@ jobs:
       # windows-2022 image (MSVC 14.44, needed because 14.51 breaks ladybug's
       # C++ link) does not expose NASM on PATH, so install it explicitly.
       - uses: ilammy/setup-nasm@v1
+        if: runner.environment != 'self-hosted'
 
       # No Swatinem/rust-cache on the Windows critical path. Releases run on
       # tag refs, and a GitHub Actions cache written by a tag run is visible
@@ -885,6 +928,7 @@ jobs:
       - *wait_before_sccache_retry
       - *retry_setup_sccache
       - name: Point sccache at R2
+        if: runner.environment != 'self-hosted'
         shell: bash
         env:
           CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -988,7 +1032,7 @@ jobs:
       # env, and debug output on their stderr would reach Cargo. Remove both
       # steps once the root cause is fixed.
       - name: Start sccache daemon with debug logging (Windows miss diagnostics)
-        if: env.RUSTC_WRAPPER == 'sccache'
+        if: runner.environment != 'self-hosted' && env.RUSTC_WRAPPER == 'sccache'
         continue-on-error: true
         shell: bash
         run: |
@@ -1016,7 +1060,8 @@ jobs:
         working-directory: nowledge-graph
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *.exe -Recurse | Select-Object -First 1
+          $bundleRoot = if ($env:CARGO_TARGET_DIR) { Join-Path $env:CARGO_TARGET_DIR "release/bundle/nsis" } else { "src-tauri/target/release/bundle/nsis" }
+          $exe = Get-ChildItem -Path $bundleRoot -Filter *.exe -Recurse | Select-Object -First 1
           if (-not $exe) { Write-Error "::error::No NSIS installer produced"; exit 1 }
           $out = Join-Path $env:RUNNER_TEMP "Nowledge Mem_${env:VERSION}_x64-setup.exe"
           Move-Item -Force $exe.FullName $out
@@ -1034,7 +1079,7 @@ jobs:
       # already exposes: unit names, hit/miss, hash keys, and content hashes.
       # Compiler arguments and the raw daemon log stay on the runner.
       - name: Collect sccache miss diagnostics (Windows)
-        if: always() && env.RUSTC_WRAPPER == 'sccache'
+        if: always() && runner.environment != 'self-hosted' && env.RUSTC_WRAPPER == 'sccache'
         continue-on-error: true
         shell: bash
         run: |
@@ -1080,7 +1125,7 @@ jobs:
           echo "artifact hashes: $(wc -l < "$out/artifact-sha256.txt")"
 
       - name: Upload sccache miss diagnostics (Windows)
-        if: always() && env.RUSTC_WRAPPER == 'sccache'
+        if: always() && runner.environment != 'self-hosted' && env.RUSTC_WRAPPER == 'sccache'
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
