@@ -333,9 +333,23 @@ URLs/sizes. Use its fallback version as `previous_version` when opening APT and 
 `paused_stable_version` during pause-aware package promotion. On Desktop unpause,
 pass it as `fallback_version`; keep `previous_version` bound to the stable
 version in the authority publish receipt. Pass the version blocked by the exact
-pause routes as `paused_version` when opening APT or removing Desktop routes. The
-six-platform post-deploy readback must pass before declaring fallback delivery
-verified. Merging these scripts does not install or enable a production pause.
+pause routes as `paused_version` when opening APT or removing Desktop routes.
+After the seven-day artifact retention, read the active pause Worker's
+`FALLBACK_VERSION` binding and deployment history; do not infer the fallback from
+GitHub latest or the authority stable baseline. The six-platform post-deploy
+readback checks exact filenames and requests a one-byte Range GET against each
+planned size, in addition to metadata, redirects and stopped control. If the CDN
+ignores Range with HTTP 200, require the full planned Content-Length, read one
+stream chunk, then cancel instead of downloading the installer. It must pass
+before declaring fallback delivery verified. This is a bounded availability
+check, not a full download, signature or native install check. Merging these
+scripts does not install or enable a production pause.
+
+Pause installation and authority mutations currently use separate workflow
+concurrency groups. The stopped check and post-deploy readback do not form an
+atomic cross-workflow transaction. Operators must avoid concurrent authority
+changes while installing pause routes; existing coordination work is tracked
+in https://github.com/wey-gu/mem-releases/issues/141.
 
 If an independently deployed emergency Worker is intentionally pausing Desktop
 latest, update, and APT routes, keep it in place while staging the GA. First

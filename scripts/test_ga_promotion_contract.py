@@ -655,6 +655,7 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn('--var "FALLBACK_VERSION:${PREVIOUS_VERSION}"', install_pause)
         self.assertIn('--var "FALLBACK_PUBLISHED_AT:${FALLBACK_PUBLISHED_AT}"', install_pause)
         self.assertIn("node scripts/verify-upgrade-pause.mjs", install_pause)
+        self.assertIn('VERIFY_FALLBACK_PLAN: .desktop-pause-plan.json', install_pause)
 
         finish = (ROOT / ".github/workflows/finish-ga-release.yml").read_text()
         self.assertIn('export VERIFY_FALLBACK_VERSION="${{ inputs.paused_stable_version }}"',
