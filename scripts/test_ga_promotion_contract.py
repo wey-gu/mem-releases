@@ -608,6 +608,7 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn("VERIFY_FALLBACK_VERSION: ${{ inputs.paused_stable_version }}", apt)
         self.assertIn("node scripts/verify-ga-delivery.mjs --apt-preflight", apt)
         self.assertIn("node scripts/update-apt-repo.cjs \"$GA\" \"$DEB\"", apt)
+        self.assertIn("node scripts/publish-apt-landing.mjs", apt)
         self.assertIn("node scripts/verify-ga-delivery.mjs --apt-only", apt)
         self.assertLess(apt.index("--apt-preflight"),
                         apt.index("name: Publish the exact GA DEB to APT"))
@@ -638,6 +639,28 @@ class GAPromotionContractTest(unittest.TestCase):
                       finish)
         unpause = (ROOT / ".github/workflows/remove-desktop-upgrade-pause.yml").read_text()
         self.assertIn("VERIFY_FALLBACK_VERSION: ${{ inputs.previous_version }}", unpause)
+
+    def test_apt_landing_is_published_and_verified_after_repository_metadata(self):
+        workflows = {
+            "promote-rc-to-ga.yml": "Verify download delivery",
+            "promote-apt-to-ga.yml": "Verify exact APT delivery",
+            "release-desktop.yml": "Verify download delivery",
+            "repair-apt-pool.yml": "Verify apt/pool matches Packages manifest",
+        }
+        for name, verify_step in workflows.items():
+            with self.subTest(workflow=name):
+                workflow = workflow_text(name)
+                update = workflow.index("update-apt-repo.cjs")
+                landing = workflow.index("node scripts/publish-apt-landing.mjs", update)
+                verify = workflow.index(verify_step, landing)
+                self.assertLess(update, landing)
+                self.assertLess(landing, verify)
+
+        repair = workflow_text("repair-apt-landing.yml")
+        self.assertIn("environment: release-publish", repair)
+        self.assertIn("operation_id:", repair)
+        self.assertIn("operation_id must be a lowercase UUID v4", repair)
+        self.assertIn("node scripts/publish-apt-landing.mjs", repair)
 
 
     def test_release_docker_builds_gpu_images_on_rc_with_rc_scoped_tags(self):
@@ -909,6 +932,7 @@ CPU_ARTIFACTS = ("macos-arm64", "macos-x86_64", "windows-x86_64",
 # tags, cache purges. Issue comments are the nightly's one intended effect.
 SIDE_EFFECT_MARKERS = ("gh release create", "gh release upload", "gh release edit",
                        "upload-draft-release-assets", "upload-package", "update-apt-repo",
+                       "publish-apt-landing",
                        "purge_cache", "git push", "git tag", "wrangler")
 
 # Fake `gh` for the meta scripts. Logs every call; serves a commit lookup, a

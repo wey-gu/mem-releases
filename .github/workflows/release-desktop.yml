@@ -2290,8 +2290,9 @@ jobs:
           node-version: "22"
 
       - name: Install mem-backbone npm deps
-        working-directory: mem-backbone
-        run: npm ci --no-audit --no-fund
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm ci --prefix mem-backbone --no-audit --no-fund
 
       - name: Pre-flight desktop version and APT policy
         env:
@@ -2408,6 +2409,10 @@ jobs:
         working-directory: mem-backbone
         if: ${{ !inputs.allow_newer_desktop_latest }}
         run: node scripts/update-apt-repo.cjs "$VERSION" "${{ steps.paths.outputs.deb }}"
+
+      - name: Publish APT landing
+        if: ${{ !inputs.allow_newer_desktop_latest }}
+        run: node scripts/publish-apt-landing.mjs
 
       - name: Verify download delivery (R2 + optional APT + Worker)
         working-directory: mem-backbone

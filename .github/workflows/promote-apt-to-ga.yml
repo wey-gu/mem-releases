@@ -137,6 +137,9 @@ jobs:
         working-directory: mem-backbone
         run: node scripts/update-apt-repo.cjs "$GA" "$DEB"
 
+      - name: Publish APT landing
+        run: node scripts/publish-apt-landing.mjs
+
       - name: Verify exact APT delivery
         run: VERIFY_RELEASE_VERSION="$GA" node scripts/verify-ga-delivery.mjs --apt-only
 

@@ -7,6 +7,7 @@ import {
   verifyStagedGADelivery,
   verifyVersionPolicy,
 } from './verify-ga-delivery.mjs';
+import { APT_LANDING_MARKER } from './publish-apt-landing.mjs';
 
 const version = '0.10.94';
 const files = {
@@ -28,9 +29,10 @@ const targets = {
   'linux-appimage': 'x86_64-unknown-linux-gnu',
 };
 const artifact = (release, file) => `https://download.test/app/${release}/${file}`;
-const reply = (status, body, url = '') => ({
+const reply = (status, body, url = '', contentType = 'application/json') => ({
   status,
   url,
+  headers: new Headers({ 'Content-Type': contentType }),
   json: async () => body,
   text: async () => body,
 });
@@ -39,6 +41,9 @@ function fixture({ latest = version, missing = '', updater = latest, apt = versi
   return async (value) => {
     const url = new URL(value);
     const platform = url.searchParams.get('platform');
+    if (url.pathname === '/apt' || url.pathname === '/apt/') {
+      return reply(200, `<html ${APT_LANDING_MARKER}></html>`, '', 'text/html; charset=utf-8');
+    }
     if (url.pathname === '/latest') {
       if (platform === missing) return reply(404, {});
       return reply(200, {
@@ -195,6 +200,15 @@ test('staged GA rejects a redirect to another version', async () => {
 
 test('APT-only verification accepts the exact staged GA', async () => {
   await verifyAptDelivery(options(fixture()));
+});
+
+test('APT-only verification rejects a missing repository landing', async () => {
+  const fetcher = async (value, init) => {
+    if (new URL(value).pathname === '/apt') return reply(404, 'not found');
+    return fixture()(value, init);
+  };
+  await assert.rejects(verifyAptDelivery(options(fetcher)),
+    /APT landing \/apt: expected 200, got 404/);
 });
 
 test('APT preflight accepts an older live release and rejects a newer one', async () => {

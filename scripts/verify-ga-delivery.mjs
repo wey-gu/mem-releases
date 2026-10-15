@@ -1,6 +1,7 @@
 // Release-owned exact-version gate. The Backbone verifier checks transport
 // health but intentionally permits missing platforms and older releases.
 import { pathToFileURL } from 'node:url';
+import { verifyAptLanding } from './publish-apt-landing.mjs';
 
 const FILES = {
   mac: 'aarch64-apple-darwin.dmg',
@@ -96,6 +97,7 @@ export async function verifyAptDelivery({
 }) {
   requireCondition(/^\d+\.\d+\.\d+$/.test(expectedVersion || ''),
     'VERIFY_RELEASE_VERSION must be a clean semver');
+  await verifyAptLanding({ host: downloadHost, fetcher });
   const response = await browserRequest(fetcher)(
     `https://${downloadHost}/apt/dists/stable/main/binary-amd64/Packages`,
     { redirect: 'follow' },
