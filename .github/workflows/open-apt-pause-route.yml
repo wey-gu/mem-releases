@@ -120,9 +120,11 @@ jobs:
             "https://backbone-mem.nowledge.co/download/${GA}/mac"
           verify_paused "versioned CDN download" \
             "https://download-mem.nowledge.co/app/${GA}/aarch64-apple-darwin.dmg"
-          curl -fsS -H 'Range: bytes=0-0' -o /dev/null \
+          curl -fsS -H 'Range: bytes=0-0' \
+            -H "User-Agent: Nowledge-Mem/${PREVIOUS_VERSION} (Tauri)" -o /dev/null \
             "https://download-mem.nowledge.co/app/${PREVIOUS_VERSION}/aarch64-apple-darwin.dmg"
-          curl -fsS -o /dev/null "https://backbone-mem.nowledge.co/health"
+          curl -fsS -H "User-Agent: Nowledge-Mem/${PREVIOUS_VERSION} (Tauri)" \
+            -o /dev/null "https://backbone-mem.nowledge.co/health"
 
       - name: Summary
         run: |
