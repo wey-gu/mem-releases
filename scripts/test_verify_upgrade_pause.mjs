@@ -17,7 +17,12 @@ function reply(status, body, headers = {}) {
   };
 }
 
-function fixture({ legacyStatus = 503, controlStatus = 'stopped', exposeRelease = false } = {}) {
+function fixture({
+  legacyStatus = 503,
+  controlStatus = 'stopped',
+  exposeRelease = false,
+  fallbackVersion = '',
+} = {}) {
   return async (value) => {
     const url = new URL(value);
     if (url.pathname === '/latest' && url.searchParams.get('update_control') === '1') {
@@ -29,6 +34,24 @@ function fixture({ legacyStatus = 503, controlStatus = 'stopped', exposeRelease 
       }, { 'cache-control': 'no-store' });
     }
     if (url.pathname === '/update.json') return reply(204, '', pausedHeaders);
+    if (fallbackVersion && url.pathname === '/latest') {
+      const platform = url.searchParams.get('platform');
+      return reply(200, {
+        platform,
+        version: fallbackVersion,
+        download_url: `https://download-mem.nowledge.co/app/${fallbackVersion}/artifact`,
+      }, {
+        ...pausedHeaders,
+        'x-mem-latest-fallback': fallbackVersion,
+      });
+    }
+    if (fallbackVersion && url.pathname.startsWith('/download/latest/')) {
+      return reply(302, '', {
+        ...pausedHeaders,
+        location: `https://download-mem.nowledge.co/app/${fallbackVersion}/artifact`,
+        'x-mem-latest-fallback': fallbackVersion,
+      });
+    }
     return reply(legacyStatus, 'Desktop upgrades are temporarily paused.', pausedHeaders);
   };
 }
@@ -60,6 +83,19 @@ function options(fetcher, extras = {}) {
 
 test('accepts fail-closed legacy routes and stopped protocol-1 responses', async () => {
   await verifyUpgradePause(options(fixture()));
+});
+
+test('accepts previous stable metadata while the controlled authority remains stopped', async () => {
+  const fallbackVersion = '0.10.99';
+  await verifyUpgradePause(options(fixture({ fallbackVersion }), { fallbackVersion }));
+});
+
+test('rejects fallback metadata that exposes the paused release', async () => {
+  const fallbackVersion = '0.10.99';
+  await assert.rejects(verifyUpgradePause(options(
+    fixture({ fallbackVersion: '0.10.100' }),
+    { fallbackVersion },
+  )), /expected version 0\.10\.99/);
 });
 
 test('desktop-only mode does not require the APT route to remain paused', async () => {

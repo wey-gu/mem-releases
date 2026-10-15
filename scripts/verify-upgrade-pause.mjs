@@ -45,6 +45,40 @@ function assertNoUpdate(response, label) {
   assertPauseHeaders(response, label);
 }
 
+function assertFallbackHeaders(response, version, label) {
+  requireCondition((response.headers.get('cache-control') || '').toLowerCase().includes('no-store'),
+    `${label}: cache-control must include no-store`);
+  requireCondition(Boolean(response.headers.get('x-mem-upgrade-pause')),
+    `${label}: x-mem-upgrade-pause is missing`);
+  requireCondition(response.headers.get('x-mem-latest-fallback') === version,
+    `${label}: expected fallback marker ${version}`);
+}
+
+async function assertFallbackLatest(response, platform, version, label) {
+  requireCondition(response.status === 200, `${label}: expected 200, got ${response.status}`);
+  assertFallbackHeaders(response, version, label);
+  const body = await response.json();
+  requireCondition(body?.platform === platform,
+    `${label}: expected platform ${platform}, got ${body?.platform || '<missing>'}`);
+  requireCondition(body?.version === version,
+    `${label}: expected version ${version}, got ${body?.version || '<missing>'}`);
+  const download = new URL(body?.download_url || 'https://invalid.invalid/');
+  requireCondition(download.hostname === 'download-mem.nowledge.co',
+    `${label}: fallback download host is invalid`);
+  requireCondition(download.pathname.startsWith(`/app/${version}/`),
+    `${label}: fallback download does not target ${version}`);
+}
+
+function assertFallbackRedirect(response, version, label) {
+  requireCondition(response.status === 302, `${label}: expected 302, got ${response.status}`);
+  assertFallbackHeaders(response, version, label);
+  const location = new URL(response.headers.get('location') || 'https://invalid.invalid/');
+  requireCondition(location.hostname === 'download-mem.nowledge.co',
+    `${label}: fallback redirect host is invalid`);
+  requireCondition(location.pathname.startsWith(`/app/${version}/`),
+    `${label}: fallback redirect does not target ${version}`);
+}
+
 export async function verifyUpgradePause({
   platforms,
   previousVersion,
@@ -53,6 +87,7 @@ export async function verifyUpgradePause({
   includeApt = true,
   includeControlled = true,
   includeLegacy = true,
+  fallbackVersion = '',
   fetcher = fetch,
   requestIdFactory = randomUUID,
 }) {
@@ -74,10 +109,19 @@ export async function verifyUpgradePause({
 
   for (const platform of platforms) {
     if (includeLegacy) {
-      await assertPaused(await request(`${base}/latest?platform=${platform}`),
-        `/latest ${platform}`);
-      await assertPaused(await request(`${base}/download/latest/${platform}`),
-        `/download/latest/${platform}`);
+      if (fallbackVersion) {
+        requireCondition(/^\d+\.\d+\.\d+$/.test(fallbackVersion),
+          'VERIFY_FALLBACK_VERSION must be a clean semver');
+        await assertFallbackLatest(await request(`${base}/latest?platform=${platform}`),
+          platform, fallbackVersion, `/latest ${platform}`);
+        assertFallbackRedirect(await request(`${base}/download/latest/${platform}`),
+          fallbackVersion, `/download/latest/${platform}`);
+      } else {
+        await assertPaused(await request(`${base}/latest?platform=${platform}`),
+          `/latest ${platform}`);
+        await assertPaused(await request(`${base}/download/latest/${platform}`),
+          `/download/latest/${platform}`);
+      }
     }
 
     if (includeControlled) {
@@ -131,6 +175,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     includeApt: !process.argv.includes('--desktop-only'),
     includeControlled: !process.argv.includes('--legacy-only'),
     includeLegacy: !process.argv.includes('--controlled-only'),
+    fallbackVersion: process.env.VERIFY_FALLBACK_VERSION,
   }).catch((error) => {
     console.error(`Upgrade pause verification failed: ${error.message}`);
     process.exitCode = 1;
