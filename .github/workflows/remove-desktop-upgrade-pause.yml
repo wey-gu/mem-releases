@@ -15,6 +15,10 @@ on:
         description: "Version blocked by pause routes (defaults to previous_version)"
         required: false
         type: string
+      fallback_version:
+        description: "Website fallback from the pause plan (defaults to previous_version)"
+        required: false
+        type: string
       operator_name:
         description: "Named operator recorded in the authority receipt"
         required: true
@@ -66,14 +70,14 @@ jobs:
       R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
       VERIFY_RELEASE_VERSION: ${{ inputs.ga_tag }}
       VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.previous_version }}
-      VERIFY_FALLBACK_VERSION: ${{ inputs.previous_version }}
+      VERIFY_FALLBACK_VERSION: ${{ inputs.fallback_version || inputs.previous_version }}
       VERIFY_PLATFORMS: mac,mac-intel,win,linux-appimage,linux-deb,linux-rpm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm
@@ -94,8 +98,8 @@ jobs:
             echo "::error::previous_version must be clean semver and differ from GA."
             exit 1
           }
-          [[ "$PAUSED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$PAUSED_VERSION" != "$GA" ]] || {
-            echo "::error::paused_version must be clean semver and differ from GA."
+          [[ "$PAUSED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::paused_version must be clean semver."
             exit 1
           }
           [[ "$OPERATOR_NAME" =~ ^[a-zA-Z0-9_.@-]{1,100}$ ]] || {
@@ -122,7 +126,7 @@ jobs:
           printf '%s\n' "$release" > /tmp/ga-release.json
 
       - name: Download the exact authority publish receipt
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: desktop-update-receipt-${{ inputs.authority_publish_operation_id }}
           path: /tmp/authority-receipt

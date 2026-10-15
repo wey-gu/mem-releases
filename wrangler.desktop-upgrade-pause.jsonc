@@ -26,11 +26,11 @@
       "zone_name": "nowledge.co"
     },
     {
-      "pattern": "backbone-mem.nowledge.co/download/0.10.102/*",
+      "pattern": "backbone-mem.nowledge.co/download/__PAUSED_VERSION__/*",
       "zone_name": "nowledge.co"
     },
     {
-      "pattern": "download-mem.nowledge.co/app/0.10.102/*",
+      "pattern": "download-mem.nowledge.co/app/__PAUSED_VERSION__/*",
       "zone_name": "nowledge.co"
     },
     {

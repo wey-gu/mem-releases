@@ -296,6 +296,47 @@ gh workflow run promote-rc-to-ga.yml -R wey-gu/mem-releases \
   -f push_latest=true
 ```
 
+### Withdraw a Desktop version without blocking website downloads
+
+First withdraw the affected GitHub GA release to a draft, retain its artifacts,
+and stop the production Desktop authority through its audited named-operator
+workflow. Then install the download fallback with a fresh operation UUID:
+
+```bash
+gh workflow run install-desktop-upgrade-pause.yml -R wey-gu/mem-releases \
+  -f ga_tag=<withdrawn-version> \
+  -f operation_id=<uuid-v4>
+```
+
+The workflow reads all GitHub release pages and selects the highest numeric
+SemVer below the withdrawn version that is public, not a prerelease, and has
+all six Desktop packages. Drafts represent withdrawn versions and cannot be
+fallbacks. Every selected CDN package must return HTTP 200 to a HEAD request
+with a size matching its Release asset. Missing objects or sizes skip that
+version; authentication, service, transport, or incomplete-source failures stop
+before deployment. No usable older GA also stops before deployment. This proves
+package availability, not native startup or installation compatibility.
+
+The selected version is fixed in the generated Worker configuration for that
+pause. Website latest/download routes return its metadata or redirect to its
+platform-specific package, while controlled updates stay stopped, the legacy
+updater returns no update, and exact downloads of the withdrawn version stay
+blocked. The checked-in Wrangler file is a template: use the workflow-generated
+configuration, never deploy its version placeholders directly. This is one
+active global pause; if the fallback itself is later withdrawn, rerun this
+workflow with the same paused version and a fresh UUID to select the next usable
+GA. Selection is not performed on every user download.
+
+Retain the workflow's pause-plan artifact: it records the paused version,
+fallback version, GitHub release ID, publication time, and six checked package
+URLs/sizes. Use its fallback version as `previous_version` when opening APT and as
+`paused_stable_version` during pause-aware package promotion. On Desktop unpause,
+pass it as `fallback_version`; keep `previous_version` bound to the stable
+version in the authority publish receipt. Pass the version blocked by the exact
+pause routes as `paused_version` when opening APT or removing Desktop routes. The
+six-platform post-deploy readback must pass before declaring fallback delivery
+verified. Merging these scripts does not install or enable a production pause.
+
 If an independently deployed emergency Worker is intentionally pausing Desktop
 latest, update, and APT routes, keep it in place while staging the GA. First
 verify the pause and protocol-1 stopped state, then dispatch the core promotion
@@ -324,6 +365,7 @@ is readable:
 gh workflow run open-apt-pause-route.yml -R wey-gu/mem-releases \
   -f ga_tag=<version> \
   -f previous_version=<previous-version> \
+  -f paused_version=<withdrawn-version> \
   -f operation_id=<uuid-v4>
 ```
 
@@ -364,6 +406,8 @@ Desktop pause routes with the exact publish receipt and a fresh route UUID:
 gh workflow run remove-desktop-upgrade-pause.yml -R wey-gu/mem-releases \
   -f ga_tag=<version> \
   -f previous_version=<previous-version> \
+  -f paused_version=<withdrawn-version> \
+  -f fallback_version=<version-from-pause-plan> \
   -f operator_name=<named-operator> \
   -f authority_publish_run_id=<run-id> \
   -f authority_publish_operation_id=<uuid-v4> \

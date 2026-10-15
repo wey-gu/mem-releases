@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import worker from './desktop-upgrade-pause-worker.mjs';
 
 const env = {
+  PAUSED_VERSION: '0.10.102',
   FALLBACK_VERSION: '0.10.101',
   FALLBACK_PUBLISHED_AT: '2026-10-13T00:50:08Z',
   PAUSE_OPERATION_ID: '00000000-0000-4000-8000-000000000102',
@@ -77,4 +78,12 @@ test('fails closed when fallback metadata is invalid', async () => {
     'https://backbone-mem.nowledge.co/latest?platform=unknown',
   ), env);
   assert.equal(response.status, 400);
+});
+
+test('never redirects to the paused version or a newer release', async () => {
+  for (const fallback of ['1.4.0', '1.10.0', '1.04.0']) {
+    await assert.rejects(worker.fetch(new Request(
+      'https://backbone-mem.nowledge.co/download/latest/mac',
+    ), { ...env, PAUSED_VERSION: '1.4.0', FALLBACK_VERSION: fallback }));
+  }
 });

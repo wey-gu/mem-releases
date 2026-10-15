@@ -7,10 +7,6 @@ on:
         description: "Published version to pause"
         required: true
         type: string
-      previous_version:
-        description: "Previous public version retained for recovery"
-        required: true
-        type: string
       operation_id:
         description: "Fresh UUID for the audited route operation"
         required: true
@@ -29,19 +25,16 @@ jobs:
     environment: release-publish
     env:
       GA: ${{ inputs.ga_tag }}
-      PREVIOUS_VERSION: ${{ inputs.previous_version }}
       OPERATION_ID: ${{ inputs.operation_id }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       VERIFY_PLATFORMS: mac,mac-intel,win,linux-appimage,linux-deb,linux-rpm
-      VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.previous_version }}
-      VERIFY_FALLBACK_VERSION: ${{ inputs.previous_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm
@@ -54,32 +47,42 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          [[ "$GA" == "0.10.102" ]] || {
-            echo "::error::This reviewed pause route is scoped to 0.10.102."
-            exit 1
-          }
-          [[ "$PREVIOUS_VERSION" == "0.10.101" ]] || {
-            echo "::error::The retained public baseline must be 0.10.101."
+          [[ "$GA" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo "::error::ga_tag must be clean semver."
             exit 1
           }
           [[ "$OPERATION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
             echo "::error::operation_id must be a lowercase UUID v4."
             exit 1
           }
-          release="$(gh api "repos/${REPO}/releases/413349639")"
-          jq -e --arg ga "v${GA}" \
-            '.id == 413349639 and .tag_name == $ga and .draft == true and .prerelease == false and (.assets | length) == 6' \
-            <<<"$release" >/dev/null
-          latest="$(gh api "repos/${REPO}/releases/latest")"
-          jq -e --arg previous "v${PREVIOUS_VERSION}" \
-            '.tag_name == $previous and .draft == false and .prerelease == false and (.assets | length) == 6' \
-            <<<"$latest" >/dev/null
-          fallback_published_at="$(jq -r '.published_at // empty' <<<"$latest")"
-          [[ "$fallback_published_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]] || {
-            echo "::error::The retained public baseline is missing published_at."
-            exit 1
-          }
-          echo "FALLBACK_PUBLISHED_AT=${fallback_published_at}" >> "$GITHUB_ENV"
+          gh api --paginate --slurp "repos/${REPO}/releases?per_page=100" > .desktop-pause-releases.json
+
+      - name: Select the last usable GA and generate exact pause routes
+        run: |
+          set -euo pipefail
+          node scripts/prepare-desktop-pause.mjs \
+            --paused-version "$GA" \
+            --releases-json .desktop-pause-releases.json \
+            --config wrangler.desktop-upgrade-pause.jsonc \
+            --output .desktop-upgrade-pause.generated.json \
+            --plan .desktop-pause-plan.json
+          previous_version="$(jq -r .fallback_version .desktop-pause-plan.json)"
+          published_at="$(jq -r .fallback_published_at .desktop-pause-plan.json)"
+          {
+            echo "PREVIOUS_VERSION=${previous_version}"
+            echo "VERIFY_PREVIOUS_DESKTOP_VERSION=${previous_version}"
+            echo "VERIFY_FALLBACK_VERSION=${previous_version}"
+            echo "FALLBACK_PUBLISHED_AT=${published_at}"
+          } >> "$GITHUB_ENV"
+
+      - name: Retain the selected fallback before production mutation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-pause-plan-${{ inputs.operation_id }}
+          path: .desktop-pause-plan.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Verify the controlled authority is already stopped
         run: node scripts/verify-upgrade-pause.mjs --desktop-only --controlled-only
@@ -91,9 +94,10 @@ jobs:
         run: |
           set -euo pipefail
           npx wrangler deploy \
-            --config wrangler.desktop-upgrade-pause.jsonc \
+            --config .desktop-upgrade-pause.generated.json \
             --message "Pause Desktop ${GA} distribution (${OPERATION_ID})" \
             --var "PAUSE_OPERATION_ID:${OPERATION_ID}" \
+            --var "PAUSED_VERSION:${GA}" \
             --var "FALLBACK_VERSION:${PREVIOUS_VERSION}" \
             --var "FALLBACK_PUBLISHED_AT:${FALLBACK_PUBLISHED_AT}"
 
@@ -142,7 +146,7 @@ jobs:
             echo "- Route operation: ${OPERATION_ID}"
             echo "- Paused version: ${GA}"
             echo "- Retained public release: ${PREVIOUS_VERSION}"
-            echo "- Legacy latest fallback: ${PREVIOUS_VERSION}"
+            echo "- Automatically selected latest usable GA: ${PREVIOUS_VERSION}"
             echo "- Exact pause routes: 6"
             echo "- Controlled stop and legacy fallback readback: six platforms verified"
             echo "- Versioned ${GA} downloads and APT: blocked"

@@ -11,6 +11,10 @@ on:
         description: "Known-good stable Desktop version protected by the pause"
         required: true
         type: string
+      paused_version:
+        description: "Version blocked by exact routes (defaults to previous_version)"
+        required: false
+        type: string
       operation_id:
         description: "Fresh UUID for the audited route operation"
         required: true
@@ -31,6 +35,7 @@ jobs:
     env:
       GA: ${{ inputs.ga_tag }}
       PREVIOUS_VERSION: ${{ inputs.previous_version }}
+      PAUSED_VERSION: ${{ inputs.paused_version || inputs.previous_version }}
       OPERATION_ID: ${{ inputs.operation_id }}
       CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -38,11 +43,11 @@ jobs:
       VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.previous_version }}
       VERIFY_FALLBACK_VERSION: ${{ inputs.previous_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
 
@@ -58,6 +63,10 @@ jobs:
           }
           [[ "$PREVIOUS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$PREVIOUS_VERSION" != "$GA" ]] || {
             echo "::error::previous_version must be a clean semver different from GA."
+            exit 1
+          }
+          [[ "$PAUSED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::paused_version must be clean semver."
             exit 1
           }
           [[ "$OPERATION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
@@ -76,6 +85,8 @@ jobs:
           node scripts/verify-upgrade-pause.mjs
 
       - name: Remove only the APT pause route
+        env:
+          PREVIOUS_VERSION: ${{ inputs.paused_version || inputs.previous_version }}
         run: node scripts/open-apt-pause-route.mjs
 
       - name: Verify APT is open while Desktop remains paused
