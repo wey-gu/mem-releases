@@ -397,8 +397,9 @@ class GAPromotionContractTest(unittest.TestCase):
     def test_desktop_update_control_completes_only_a_verified_published_candidate(self):
         workflow = (ROOT / '.github/workflows/desktop-update-control.yml').read_text()
         worker = (ROOT / 'scripts/desktop-update-operator-worker.mjs').read_text()
-        self.assertIn('options: [status, recover, complete, prepare, publish]', workflow)
-        self.assertIn("['recover', 'complete', 'prepare', 'publish']", worker)
+        self.assertIn('options: [status, stop, recover, complete, prepare, publish]', workflow)
+        self.assertIn("['stop', 'recover', 'complete', 'prepare', 'publish']", worker)
+        self.assertIn('stop) next_mode="stopped"', workflow)
         self.assertIn('complete requires an observed published mode', workflow)
         self.assertIn("jq '.candidate' /tmp/pre-state.json", workflow)
         self.assertIn('node scripts/verify-ga-delivery.mjs', workflow)
@@ -592,6 +593,9 @@ class GAPromotionContractTest(unittest.TestCase):
             promote.index("node ../scripts/verify-upgrade-pause.mjs"),
         )
         self.assertIn("node ../scripts/verify-ga-delivery.mjs --staged-while-paused", promote)
+        self.assertEqual(promote.count("VERIFY_FALLBACK_VERSION:"), 2)
+        self.assertIn('export VERIFY_FALLBACK_VERSION="${{ inputs.paused_stable_version }}"',
+                      promote)
         self.assertIn(
             "if: ${{ !inputs.allow_newer_desktop_latest && !inputs.desktop_upgrade_pause_active }}",
             promote,
@@ -601,6 +605,7 @@ class GAPromotionContractTest(unittest.TestCase):
         apt = (ROOT / ".github" / "workflows" /
                "promote-apt-to-ga.yml").read_text()
         self.assertIn("node scripts/verify-upgrade-pause.mjs --desktop-only", apt)
+        self.assertIn("VERIFY_FALLBACK_VERSION: ${{ inputs.paused_stable_version }}", apt)
         self.assertIn("node scripts/verify-ga-delivery.mjs --apt-preflight", apt)
         self.assertIn("node scripts/update-apt-repo.cjs \"$GA\" \"$DEB\"", apt)
         self.assertIn("node scripts/verify-ga-delivery.mjs --apt-only", apt)
@@ -616,7 +621,23 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn("node scripts/verify-ga-delivery.mjs --apt-preflight", open_apt)
         self.assertLess(open_apt.index("node scripts/verify-upgrade-pause.mjs"),
                         open_apt.index("node scripts/open-apt-pause-route.mjs"))
+        self.assertIn("VERIFY_FALLBACK_VERSION: ${{ inputs.previous_version }}", open_apt)
         self.assertIn("permissions:\n  # Draft Releases are hidden from read-only GITHUB_TOKENs.\n  contents: write", apt)
+
+        install_pause = (ROOT / ".github/workflows" /
+                         "install-desktop-upgrade-pause.yml").read_text()
+        self.assertIn('[[ "$GA" == "0.10.102" ]]', install_pause)
+        self.assertIn('[[ "$PREVIOUS_VERSION" == "0.10.101" ]]', install_pause)
+        self.assertIn("VERIFY_FALLBACK_VERSION: ${{ inputs.previous_version }}", install_pause)
+        self.assertIn('--var "FALLBACK_VERSION:${PREVIOUS_VERSION}"', install_pause)
+        self.assertIn('--var "FALLBACK_PUBLISHED_AT:${FALLBACK_PUBLISHED_AT}"', install_pause)
+        self.assertIn("node scripts/verify-upgrade-pause.mjs", install_pause)
+
+        finish = (ROOT / ".github/workflows/finish-ga-release.yml").read_text()
+        self.assertIn('export VERIFY_FALLBACK_VERSION="${{ inputs.paused_stable_version }}"',
+                      finish)
+        unpause = (ROOT / ".github/workflows/remove-desktop-upgrade-pause.yml").read_text()
+        self.assertIn("VERIFY_FALLBACK_VERSION: ${{ inputs.previous_version }}", unpause)
 
 
     def test_release_docker_builds_gpu_images_on_rc_with_rc_scoped_tags(self):

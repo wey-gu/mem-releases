@@ -41,6 +41,7 @@ jobs:
       GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
       VERIFY_PLATFORMS: mac,mac-intel,win,linux,linux-deb,linux-appimage
       VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.paused_stable_version }}
+      VERIFY_FALLBACK_VERSION: ${{ inputs.paused_stable_version }}
     steps:
       - uses: actions/checkout@v4
         with:

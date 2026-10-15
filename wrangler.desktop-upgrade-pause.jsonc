@@ -1,0 +1,41 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nowledge-mem-upgrade-pause",
+  "account_id": "d18f4946cabbb715aac97d4661f88b6e",
+  "main": "scripts/desktop-upgrade-pause-worker.mjs",
+  "compatibility_date": "2026-10-12",
+  "workers_dev": false,
+  "preview_urls": false,
+  "services": [
+    {
+      "binding": "BACKBONE",
+      "service": "nowledge-mem-backbone-prod"
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "backbone-mem.nowledge.co/latest*",
+      "zone_name": "nowledge.co"
+    },
+    {
+      "pattern": "backbone-mem.nowledge.co/update.json*",
+      "zone_name": "nowledge.co"
+    },
+    {
+      "pattern": "backbone-mem.nowledge.co/download/latest/*",
+      "zone_name": "nowledge.co"
+    },
+    {
+      "pattern": "backbone-mem.nowledge.co/download/0.10.102/*",
+      "zone_name": "nowledge.co"
+    },
+    {
+      "pattern": "download-mem.nowledge.co/app/0.10.102/*",
+      "zone_name": "nowledge.co"
+    },
+    {
+      "pattern": "download-mem.nowledge.co/apt/*",
+      "zone_name": "nowledge.co"
+    }
+  ]
+}

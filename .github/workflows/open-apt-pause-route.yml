@@ -36,6 +36,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       VERIFY_PLATFORMS: mac,mac-intel,win,linux-appimage,linux-deb,linux-rpm
       VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.previous_version }}
+      VERIFY_FALLBACK_VERSION: ${{ inputs.previous_version }}
     steps:
       - uses: actions/checkout@v4
         with:

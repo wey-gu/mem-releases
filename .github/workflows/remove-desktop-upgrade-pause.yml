@@ -66,6 +66,7 @@ jobs:
       R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
       VERIFY_RELEASE_VERSION: ${{ inputs.ga_tag }}
       VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.previous_version }}
+      VERIFY_FALLBACK_VERSION: ${{ inputs.previous_version }}
       VERIFY_PLATFORMS: mac,mac-intel,win,linux-appimage,linux-deb,linux-rpm
     steps:
       - uses: actions/checkout@v4
