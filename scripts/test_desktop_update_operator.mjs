@@ -75,6 +75,24 @@ test('forwards completion through the selected named operator', async () => {
   assert.equal((await response.json()).mode, 'completed');
 });
 
+test('forwards an emergency stop through the selected named operator', async () => {
+  const operation = {
+    action: 'stop',
+    expected_revision: 21,
+    operation_id: '00000000-0000-4000-8000-000000000000',
+    reason: 'Withdraw the current Desktop release',
+  };
+  const fetcher = async (url, init) => {
+    assert.equal(String(url), 'https://backbone-mem.nowledge.co/admin/desktop-updates');
+    assert.equal(init.method, 'POST');
+    assert.deepEqual(JSON.parse(init.body), operation);
+    return Response.json({ ...operation, actor: 'hawkingrei', mode: 'stopped' });
+  };
+  const response = await handleOperatorRequest(request(operation), baseEnv, fetcher);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).mode, 'stopped');
+});
+
 function release(version) {
   const names = [
     `Nowledge.Mem_${version}_aarch64.dmg`,

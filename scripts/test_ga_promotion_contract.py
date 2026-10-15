@@ -397,8 +397,9 @@ class GAPromotionContractTest(unittest.TestCase):
     def test_desktop_update_control_completes_only_a_verified_published_candidate(self):
         workflow = (ROOT / '.github/workflows/desktop-update-control.yml').read_text()
         worker = (ROOT / 'scripts/desktop-update-operator-worker.mjs').read_text()
-        self.assertIn('options: [status, recover, complete, prepare, publish]', workflow)
-        self.assertIn("['recover', 'complete', 'prepare', 'publish']", worker)
+        self.assertIn('options: [status, stop, recover, complete, prepare, publish]', workflow)
+        self.assertIn("['stop', 'recover', 'complete', 'prepare', 'publish']", worker)
+        self.assertIn('stop) next_mode="stopped"', workflow)
         self.assertIn('complete requires an observed published mode', workflow)
         self.assertIn("jq '.candidate' /tmp/pre-state.json", workflow)
         self.assertIn('node scripts/verify-ga-delivery.mjs', workflow)

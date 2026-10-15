@@ -7,7 +7,7 @@ on:
         description: "Read or mutate the production Desktop update authority"
         required: true
         type: choice
-        options: [status, recover, complete, prepare, publish]
+        options: [status, stop, recover, complete, prepare, publish]
       operator_name:
         description: "Named operator key in the production Secrets Store document"
         required: true
@@ -127,6 +127,9 @@ jobs:
               echo "::error::recover requires an observed stopped or held mode."
               exit 1
             }
+            exit 0
+          fi
+          if [[ "$ACTION" == "stop" ]]; then
             exit 0
           fi
           [[ "$GA" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$GA" != "$EXPECTED_STABLE_VERSION" ]] || {
@@ -303,6 +306,7 @@ jobs:
           next_revision="$((EXPECTED_REVISION + 1))"
           case "$ACTION" in
             recover) next_mode="recovered" ;;
+            stop) next_mode="stopped" ;;
             complete) next_mode="completed" ;;
             prepare) next_mode="draft" ;;
             publish) next_mode="published" ;;
@@ -324,6 +328,10 @@ jobs:
               '.stable_version == $stable' /tmp/operation-receipt.json >/dev/null
             if [[ "$ACTION" == "recover" ]]; then
               jq -e '.candidate_version == null' /tmp/operation-receipt.json >/dev/null
+            elif [[ "$ACTION" == "stop" ]]; then
+              jq -e --slurpfile pre /tmp/pre-state.json \
+                '.candidate_version == ($pre[0].candidate.version // null)' \
+                /tmp/operation-receipt.json >/dev/null
             else
               jq -e --arg ga "$GA" '.candidate_version == $ga' /tmp/operation-receipt.json >/dev/null
             fi
@@ -339,6 +347,7 @@ jobs:
           next_revision="$((EXPECTED_REVISION + 1))"
           case "$ACTION" in
             recover) next_mode="recovered" ;;
+            stop) next_mode="stopped" ;;
             complete) next_mode="completed" ;;
             prepare) next_mode="draft" ;;
             publish) next_mode="published" ;;
@@ -354,6 +363,9 @@ jobs:
               '.stable.version == $stable' /tmp/post-state.json >/dev/null
             if [[ "$ACTION" == "recover" ]]; then
               jq -e '.candidate == null' /tmp/post-state.json >/dev/null
+            elif [[ "$ACTION" == "stop" ]]; then
+              jq -e --slurpfile pre /tmp/pre-state.json \
+                '.candidate == $pre[0].candidate' /tmp/post-state.json >/dev/null
             else
               jq -e --arg ga "$GA" '.candidate.version == $ga' /tmp/post-state.json >/dev/null
             fi
