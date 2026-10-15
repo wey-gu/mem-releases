@@ -1,14 +1,14 @@
-name: open-apt-pause-route
+name: install-desktop-upgrade-pause
 
 on:
   workflow_dispatch:
     inputs:
       ga_tag:
-        description: "Draft GA version whose APT repository will be published next"
+        description: "Published version to pause"
         required: true
         type: string
       previous_version:
-        description: "Known-good stable Desktop version protected by the pause"
+        description: "Previous public version retained for recovery"
         required: true
         type: string
       operation_id:
@@ -21,18 +21,17 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  # Draft Releases are hidden from read-only GITHUB_TOKENs.
   contents: write
 
 jobs:
-  open-apt:
+  pause:
     runs-on: ubuntu-22.04
     environment: release-publish
     env:
       GA: ${{ inputs.ga_tag }}
       PREVIOUS_VERSION: ${{ inputs.previous_version }}
       OPERATION_ID: ${{ inputs.operation_id }}
-      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       VERIFY_PLATFORMS: mac,mac-intel,win,linux-appimage,linux-deb,linux-rpm
       VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.previous_version }}
@@ -44,51 +43,90 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
 
-      - name: Validate the staged release and operation boundary
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Validate the withdrawal boundary
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          [[ "$GA" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "::error::ga_tag must be clean semver."
+          [[ "$GA" == "0.10.102" ]] || {
+            echo "::error::This reviewed pause route is scoped to 0.10.102."
             exit 1
           }
-          [[ "$PREVIOUS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$PREVIOUS_VERSION" != "$GA" ]] || {
-            echo "::error::previous_version must be a clean semver different from GA."
+          [[ "$PREVIOUS_VERSION" == "0.10.101" ]] || {
+            echo "::error::The retained public baseline must be 0.10.101."
             exit 1
           }
           [[ "$OPERATION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
             echo "::error::operation_id must be a lowercase UUID v4."
             exit 1
           }
-          release="$(gh release view "v${GA}" --repo "$REPO" --json isDraft,assets)"
-          [[ "$(jq -r '.isDraft' <<<"$release")" == "true" ]] || {
-            echo "::error::v${GA} must exist as a draft release."
-            exit 1
-          }
-          [[ "$(jq '.assets | length' <<<"$release")" == "6" ]] || {
-            echo "::error::v${GA} must contain all six Desktop package assets."
-            exit 1
-          }
-          node scripts/verify-upgrade-pause.mjs
+          release="$(gh api "repos/${REPO}/releases/413349639")"
+          jq -e --arg ga "v${GA}" \
+            '.id == 413349639 and .tag_name == $ga and .draft == true and .prerelease == false and (.assets | length) == 6' \
+            <<<"$release" >/dev/null
+          latest="$(gh api "repos/${REPO}/releases/latest")"
+          jq -e --arg previous "v${PREVIOUS_VERSION}" \
+            '.tag_name == $previous and .draft == false and .prerelease == false' \
+            <<<"$latest" >/dev/null
 
-      - name: Remove only the APT pause route
-        run: node scripts/open-apt-pause-route.mjs
+      - name: Verify the controlled authority is already stopped
+        run: node scripts/verify-upgrade-pause.mjs --desktop-only --controlled-only
 
-      - name: Verify APT is open while Desktop remains paused
+      - name: Install pinned Wrangler
+        run: npm install --no-save --ignore-scripts --no-audit --no-fund wrangler@4.131.0
+
+      - name: Install the exact release pause routes
         run: |
           set -euo pipefail
-          node scripts/verify-upgrade-pause.mjs --desktop-only
-          VERIFY_RELEASE_VERSION="$GA" node scripts/verify-ga-delivery.mjs --apt-preflight
+          npx wrangler deploy \
+            --config wrangler.desktop-upgrade-pause.jsonc \
+            --message "Pause Desktop ${GA} distribution (${OPERATION_ID})" \
+            --var "PAUSE_OPERATION_ID:${OPERATION_ID}"
+
+      - name: Verify all paused distribution channels
+        run: |
+          set -euo pipefail
+          node scripts/verify-upgrade-pause.mjs
+
+          verify_paused() {
+            local label="$1"
+            local url="$2"
+            local headers body status
+            headers="$(mktemp)"
+            body="$(mktemp)"
+            status="$(curl -sS -D "$headers" -o "$body" -w '%{http_code}' \
+              -H "User-Agent: Nowledge-Mem/${PREVIOUS_VERSION} (Tauri)" "$url")"
+            [[ "$status" == "503" ]] || {
+              echo "::error::${label} expected 503, got ${status}."
+              exit 1
+            }
+            grep -Eiq '^cache-control:.*no-store' "$headers"
+            grep -Eiq "^x-mem-upgrade-pause: ${OPERATION_ID}" "$headers"
+            grep -Eiq 'temporarily paused' "$body"
+          }
+
+          verify_paused "versioned Backbone download" \
+            "https://backbone-mem.nowledge.co/download/${GA}/mac"
+          verify_paused "versioned CDN download" \
+            "https://download-mem.nowledge.co/app/${GA}/aarch64-apple-darwin.dmg"
+          curl -fsS -H 'Range: bytes=0-0' -o /dev/null \
+            "https://download-mem.nowledge.co/app/${PREVIOUS_VERSION}/aarch64-apple-darwin.dmg"
+          curl -fsS -o /dev/null "https://backbone-mem.nowledge.co/health"
 
       - name: Summary
         run: |
           {
-            echo "### APT pause route opened"
-            echo "- Operation: ${OPERATION_ID}"
-            echo "- Intended GA: ${GA}"
-            echo "- Retained Desktop pause routes: 5"
-            echo "- Pause Worker deployment: retained"
+            echo "### Desktop upgrade pause installed"
+            echo "- Route operation: ${OPERATION_ID}"
+            echo "- Paused version: ${GA}"
+            echo "- Retained public release: ${PREVIOUS_VERSION}"
+            echo "- Exact pause routes: 6"
+            echo "- Controlled and legacy readback: six platforms verified"
+            echo "- Versioned ${GA} downloads and APT: blocked"
+            echo "- Install packages and tags: retained"
           } >> "$GITHUB_STEP_SUMMARY"

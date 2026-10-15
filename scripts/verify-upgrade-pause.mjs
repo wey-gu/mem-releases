@@ -52,6 +52,7 @@ export async function verifyUpgradePause({
   aptBaseUrl = 'https://download-mem.nowledge.co/apt',
   includeApt = true,
   includeControlled = true,
+  includeLegacy = true,
   fetcher = fetch,
   requestIdFactory = randomUUID,
 }) {
@@ -72,10 +73,12 @@ export async function verifyUpgradePause({
   });
 
   for (const platform of platforms) {
-    await assertPaused(await request(`${base}/latest?platform=${platform}`),
-      `/latest ${platform}`);
-    await assertPaused(await request(`${base}/download/latest/${platform}`),
-      `/download/latest/${platform}`);
+    if (includeLegacy) {
+      await assertPaused(await request(`${base}/latest?platform=${platform}`),
+        `/latest ${platform}`);
+      await assertPaused(await request(`${base}/download/latest/${platform}`),
+        `/download/latest/${platform}`);
+    }
 
     if (includeControlled) {
       const requestId = requestIdFactory();
@@ -101,10 +104,12 @@ export async function verifyUpgradePause({
     }
   }
 
-  for (const target of new Set(platforms.map((platform) => TARGETS[platform]))) {
-    assertNoUpdate(await request(
-      `${base}/update.json?current_version=${previousVersion}&target=${target}`,
-    ), `/update.json ${target}`);
+  if (includeLegacy) {
+    for (const target of new Set(platforms.map((platform) => TARGETS[platform]))) {
+      assertNoUpdate(await request(
+        `${base}/update.json?current_version=${previousVersion}&target=${target}`,
+      ), `/update.json ${target}`);
+    }
   }
 
   if (includeApt) {
@@ -125,6 +130,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     aptBaseUrl: process.env.VERIFY_APT_BASE_URL,
     includeApt: !process.argv.includes('--desktop-only'),
     includeControlled: !process.argv.includes('--legacy-only'),
+    includeLegacy: !process.argv.includes('--controlled-only'),
   }).catch((error) => {
     console.error(`Upgrade pause verification failed: ${error.message}`);
     process.exitCode = 1;
