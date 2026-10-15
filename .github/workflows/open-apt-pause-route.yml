@@ -91,7 +91,13 @@ jobs:
       - name: Verify all paused distribution channels
         run: |
           set -euo pipefail
-          node scripts/verify-upgrade-pause.mjs
+          for attempt in {1..12}; do
+            if node scripts/verify-upgrade-pause.mjs; then
+              break
+            fi
+            [[ "$attempt" -lt 12 ]] || exit 1
+            sleep 5
+          done
 
           verify_paused() {
             local label="$1"
