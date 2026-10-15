@@ -22,6 +22,7 @@ function fixture({
   controlStatus = 'stopped',
   exposeRelease = false,
   fallbackVersion = '',
+  fallbackMarker = fallbackVersion,
 } = {}) {
   return async (value) => {
     const url = new URL(value);
@@ -42,14 +43,14 @@ function fixture({
         download_url: `https://download-mem.nowledge.co/app/${fallbackVersion}/artifact`,
       }, {
         ...pausedHeaders,
-        'x-mem-latest-fallback': fallbackVersion,
+        'x-mem-latest-fallback': fallbackMarker,
       });
     }
     if (fallbackVersion && url.pathname.startsWith('/download/latest/')) {
       return reply(302, '', {
         ...pausedHeaders,
         location: `https://download-mem.nowledge.co/app/${fallbackVersion}/artifact`,
-        'x-mem-latest-fallback': fallbackVersion,
+        'x-mem-latest-fallback': fallbackMarker,
       });
     }
     return reply(legacyStatus, 'Desktop upgrades are temporarily paused.', pausedHeaders);
@@ -93,7 +94,7 @@ test('accepts previous stable metadata while the controlled authority remains st
 test('rejects fallback metadata that exposes the paused release', async () => {
   const fallbackVersion = '0.10.99';
   await assert.rejects(verifyUpgradePause(options(
-    fixture({ fallbackVersion: '0.10.100' }),
+    fixture({ fallbackVersion: '0.10.100', fallbackMarker: fallbackVersion }),
     { fallbackVersion },
   )), /expected version 0\.10\.99/);
 });
