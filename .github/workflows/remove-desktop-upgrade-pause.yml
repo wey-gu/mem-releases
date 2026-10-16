@@ -165,6 +165,7 @@ jobs:
 
       - name: Verify published packages and the still-closed Desktop boundary
         env:
+          VERIFY_PAUSED_VERSION: ${{ inputs.paused_version || inputs.previous_version }}
           VERIFY_PREVIOUS_DESKTOP_VERSION: ${{ inputs.paused_version || inputs.previous_version }}
           VERIFY_DESKTOP_MANIFEST: /tmp/desktop-update-manifest.json
           VERIFY_AUTHORITY_REVISION: ${{ inputs.authority_revision }}

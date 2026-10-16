@@ -434,6 +434,15 @@ published GA, APT, direct downloads, and active pause, deletes only the reviewed
 Desktop routes, retains the pause Worker deployment, and requires exact legacy
 plus protocol-1 `allowed` readback before success.
 
+When `ga_tag` equals `paused_version`, the exact public package routes must
+still return 503 with the pause identity and `no-store` before route removal.
+The pre-removal gate checks both Backbone and CDN paths on all six platforms;
+package identity is qualified by the unchanged Release/R2 manifest comparison.
+For a different staged candidate, the gate still requires readable exact-version
+downloads. After removal, both paths require the full normal public delivery
+readback. This does not change the authority handoff: the workflow still requires
+a `publish` receipt, not a recover-only receipt.
+
 Once that exposure workflow succeeds, accept the published candidate as the
 new stable recovery baseline. Use the published authority revision returned by
 the publish receipt, the stable version that was retained during rollout, and a

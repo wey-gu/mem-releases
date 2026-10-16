@@ -449,6 +449,7 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn('--desktop-only --legacy-only', closed)
         self.assertIn('VERIFY_DESKTOP_MANIFEST: /tmp/desktop-update-manifest.json', closed)
         self.assertIn('VERIFY_AUTHORITY_REVISION:', closed)
+        self.assertIn('VERIFY_PAUSED_VERSION: ${{ inputs.paused_version || inputs.previous_version }}', closed)
         self.assertIn('node scripts/verify-controlled-desktop-update.mjs', closed)
         self.assertIn('nowledge-mem-upgrade-pause', routes)
         self.assertNotIn('wrangler delete', workflow)
