@@ -477,12 +477,33 @@ jobs:
         run: |
           set -euo pipefail
           if grep -q -- '--init-desktop-https' nowledge-graph/scripts/build-rust-bundle.sh; then
-            read -r mode kind sha dependency_path <<< "$(git ls-tree HEAD hawdb)"
-            if ! [[ "$mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ && "$dependency_path" == hawdb ]]; then
+            entry="$(git ls-tree HEAD hawdb)"
+            if [[ -z "$entry" ]]; then
+              # nowledge-co/mem#7222: HawDB is a crates.io dependency of the nmem-rs
+              # workspace, pinned (version + checksum) in nmem-rs/Cargo.lock, and the
+              # build script fetches it itself. Nothing to check out, but the build
+              # still needs Python 3.11+ (tomllib) to read that pin.
+              registry="$(awk '
+                /^\[\[package\]\]/ { name = ""; next }
+                /^name = / { name = $3; next }
+                /^source = / && name == "\"hawdb\"" { print $3 }
+              ' nmem-rs/Cargo.lock 2>/dev/null || true)"
+              if [[ "$registry" != '"registry+https://github.com/rust-lang/crates.io-index"' ]]; then
+                echo "::error::Source must pin HawDB as one crates.io package in nmem-rs/Cargo.lock (or, before #7222, as an exact dependency gitlink)." >&2
+                exit 1
+              fi
+              echo "mode=registry" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            read -r entry_mode kind sha dependency_path <<< "$entry"
+            if ! [[ "$entry_mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ && "$dependency_path" == hawdb ]]; then
               echo "::error::Source must record HawDB as an exact dependency gitlink." >&2
               exit 1
             fi
-            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+            {
+              echo "mode=gitlink"
+              echo "sha=$sha"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - &checkout_hawdb_dependency
@@ -497,7 +518,7 @@ jobs:
 
       - &setup_desktop_python
         name: Set up Desktop build Python
-        if: steps.desktop_dependency.outputs.sha != '' && runner.environment != 'self-hosted'
+        if: steps.desktop_dependency.outputs.mode != '' && runner.environment != 'self-hosted'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
