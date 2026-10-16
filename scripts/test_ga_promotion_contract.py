@@ -199,7 +199,17 @@ class GAPromotionContractTest(unittest.TestCase):
             script = "\n".join(
                 line[10:] for line in resolver.split("        run: |\n", 1)[1].splitlines()
             )
-            cases = ((True, "gitlink"), (False, "missing"), (True, "blob"), (True, "missing"))
+            crates_io = 'source = "registry+https://github.com/rust-lang/crates.io-index"'
+            locks = {
+                "registry": f'[[package]]\nname = "hawdb"\nversion = "0.8.0"\n{crates_io}\nchecksum = "ab"\n',
+                "registry-twice": (f'[[package]]\nname = "hawdb"\nversion = "0.8.0"\n{crates_io}\n'
+                                   f'[[package]]\nname = "hawdb"\nversion = "0.7.0"\n{crates_io}\n'),
+                "git-source": '[[package]]\nname = "hawdb"\nversion = "0.8.0"\nsource = "git+https://example.invalid/hawdb"\n',
+                "other-only": f'[[package]]\nname = "hawdb-adapter"\nversion = "0.8.0"\n{crates_io}\n',
+            }
+            cases = ((True, "gitlink"), (False, "missing"), (True, "blob"), (True, "missing"),
+                     (True, "registry"), (True, "registry-twice"), (True, "git-source"),
+                     (True, "other-only"))
             for has_contract, entry_kind in cases:
                 with (
                     self.subTest(workflow=name, has_contract=has_contract, entry_kind=entry_kind),
@@ -224,13 +234,22 @@ class GAPromotionContractTest(unittest.TestCase):
                     elif entry_kind == "blob":
                         (root / "hawdb").write_text("This is not a dependency gitlink.\n")
                         git("add", "hawdb")
+                    elif entry_kind in locks:
+                        (root / "nmem-rs").mkdir()
+                        (root / "nmem-rs" / "Cargo.lock").write_text(locks[entry_kind])
+                        git("add", "nmem-rs")
                     git("-c", "user.name=Release Contract", "-c", "user.email=release-contract@example.invalid",
                         "commit", "--no-gpg-sign", "-qm", "Record candidate dependency")
                     output = root / "github-output"
                     result = subprocess.run(["bash", "-c", script], cwd=root, check=False,
                                             env={**git_env, "GITHUB_OUTPUT": str(output)},
                                             capture_output=True, text=True)
-                    if has_contract and entry_kind != "gitlink":
+                    expected = {
+                        "gitlink": f"mode=gitlink\nsha={expected_sha}\n",
+                        # nowledge-co/mem#7222: crates.io HawDB, no checkout.
+                        "registry": "mode=registry\n",
+                    }
+                    if has_contract and entry_kind not in expected:
                         self.assertNotEqual(
                             result.returncode, 0, "Malformed source dependency must stop checkout"
                         )
@@ -238,7 +257,7 @@ class GAPromotionContractTest(unittest.TestCase):
                     else:
                         self.assertEqual(result.returncode, 0, result.stderr)
                         self.assertEqual(output.read_text() if output.exists() else "",
-                                         f"sha={expected_sha}\n" if has_contract else "")
+                                         expected[entry_kind] if has_contract else "")
 
     def test_build_initialization_uses_source_contract_before_cargo_and_propagates_failure(self):
         workflow = (ROOT / ".github" / "workflows" / "release-desktop.yml").read_text()
@@ -1034,6 +1053,7 @@ def meta_context(outputs, extra=None):
         "steps.rpm.outcome": "success",
         "steps.setup_sccache.outcome": "success",
         "steps.desktop_dependency.outputs.sha": NIGHTLY_SHA,
+        "steps.desktop_dependency.outputs.mode": "gitlink",
         "env.RUSTC_WRAPPER": "sccache",
         "env.CLOUDFLARE_ZONE_ID": "zone", "env.CLOUDFLARE_API_TOKEN": "token",
         "inputs.allow_newer_desktop_latest": False,
@@ -1198,11 +1218,13 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
 
     def test_self_hosted_python_uses_preinstalled_runtime_without_system_installer(self):
         setup = self.step("build-windows", name="Set up Desktop build Python")
-        for runner, sha, expected in (("self-hosted", "a" * 40, False),
-                                      ("github-hosted", "a" * 40, True),
-                                      ("github-hosted", "", False)):
+        # Both HawDB modes need Python 3.11+ (tomllib) for the Desktop payload.
+        for runner, mode, expected in (("self-hosted", "gitlink", False),
+                                       ("github-hosted", "gitlink", True),
+                                       ("github-hosted", "registry", True),
+                                       ("github-hosted", "", False)):
             self.assertEqual(github_expr(setup["if"], {"runner.environment": runner,
-                              "steps.desktop_dependency.outputs.sha": sha}), expected)
+                              "steps.desktop_dependency.outputs.mode": mode}), expected)
         configure = self.step("build-windows", name="Configure isolated self-hosted Windows build")
         self.assertIn("sys.version_info[:2] == (3, 12)", configure["run"])
         rust = next(step for step in self.jobs["build-windows"]["steps"]
