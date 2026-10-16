@@ -1,0 +1,97 @@
+# Windows overwrite-install smoke, without compiling anything.
+#
+# Re-bundles the NSIS installer of a candidate nowledge-co/mem source from the
+# binaries of a PUBLISHED Windows installer (tauri bundle --bundles nsis only)
+# and checks, on a real windows-2022 runner, that installing it over an
+# existing install never launches the previous uninstaller
+# (nowledge-co/mem#7283). /P (passive) runs the same reinstall page a
+# double-click install runs, without needing a click.
+#
+#   candidate: the source under test; the previous uninstaller must not run,
+#              the install dir and Start Menu shortcut stay, and the version
+#              moves to the candidate's.
+#   control:   main's unpatched template on a same-version reinstall must run
+#              the previous uninstaller, which proves the probe can see it.
+name: nsis-overwrite-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "nowledge-co/mem ref whose NSIS installer config is tested"
+        required: true
+        default: main
+      control_ref:
+        description: "nowledge-co/mem ref with the upstream (unpatched) template"
+        required: true
+        default: main
+      base_version:
+        description: "Published release whose Windows installer is the base install and payload"
+        required: true
+        default: "0.10.101"
+  pull_request:
+    paths:
+      - .github/workflows/nsis-overwrite-smoke.yml
+      - scripts/nsis-overwrite-smoke.ps1
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - role: candidate
+            # Without inputs (pull_request runs) test the overwrite-install
+            # branch of nowledge-co/mem#7286.
+            ref_input: source_ref
+            default_ref: fix/windows-overwrite-install
+            expect_uninstall: false
+          - role: control
+            ref_input: control_ref
+            default_ref: main
+            expect_uninstall: true
+    name: ${{ matrix.role }}
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      SOURCE_REF: ${{ inputs[matrix.ref_input] || matrix.default_ref }}
+      BASE: ${{ inputs.base_version || '0.10.101' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: release-tools
+          persist-credentials: false
+
+      - name: Checkout installer source (nowledge-co/mem)
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ env.SOURCE_REF }}
+          path: mem
+          fetch-depth: 1
+          submodules: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download the published base installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "v$env:BASE" --repo "$env:GITHUB_REPOSITORY" --pattern '*x64-setup.exe' --dir base
+          $installer = Get-ChildItem base -Filter '*x64-setup.exe' | Select-Object -First 1
+          "BASE_INSTALLER=$($installer.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Overwrite-install smoke (${{ matrix.role }})
+        shell: pwsh
+        run: |
+          $smokeArgs = @{ Source = (Resolve-Path mem).Path; BaseInstaller = $env:BASE_INSTALLER }
+          if ('${{ matrix.expect_uninstall }}' -eq 'true') { $smokeArgs.ExpectUninstall = $true }
+          & release-tools/scripts/nsis-overwrite-smoke.ps1 @smokeArgs
