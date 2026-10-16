@@ -113,6 +113,7 @@ export async function verifyAptDelivery({
 
 export async function verifyStagedGADelivery({
   expectedVersion,
+  pausedVersion,
   platforms,
   baseUrl = 'https://backbone-mem.nowledge.co',
   downloadHost = 'download-mem.nowledge.co',
@@ -120,11 +121,31 @@ export async function verifyStagedGADelivery({
 }) {
   requireCondition(/^\d+\.\d+\.\d+$/.test(expectedVersion || ''),
     'VERIFY_RELEASE_VERSION must be a clean semver');
+  requireCondition(!pausedVersion || /^\d+\.\d+\.\d+$/.test(pausedVersion),
+    'VERIFY_PAUSED_VERSION must be a clean semver');
   requireCondition(platforms?.length > 0, 'VERIFY_PLATFORMS must list required platforms');
   const request = browserRequest(fetcher);
   const base = baseUrl.replace(/\/+$/, '');
   for (const platform of platforms) {
     requireCondition(FILES[platform], `Unknown required platform: ${platform}`);
+    if (pausedVersion === expectedVersion) {
+      // The manifest/R2 identity was verified by the caller. Public routes must
+      // still be closed until the audited route removal; verify exposure after it.
+      for (const url of [
+        `${base}/download/${expectedVersion}/${platform}`,
+        `https://${downloadHost}/app/${expectedVersion}/${FILES[platform]}`,
+      ]) {
+        const blocked = await request(url, { method: 'HEAD', redirect: 'manual' });
+        requireCondition(blocked.status === 503,
+          `${url}: paused exact download expected 503, got ${blocked.status}`);
+        requireCondition((blocked.headers.get('cache-control') || '').toLowerCase().includes('no-store'),
+          `${url}: paused exact download must use no-store`);
+        requireCondition(Boolean(blocked.headers.get('x-mem-upgrade-pause')),
+          `${url}: paused exact download is missing its pause identity`);
+      }
+      console.log(`OK staged ${platform}: exact ${expectedVersion} remains paused`);
+      continue;
+    }
     const response = await request(`${base}/download/${expectedVersion}/${platform}`, {
       method: 'HEAD',
       redirect: 'follow',
@@ -261,6 +282,7 @@ export async function verifyGADelivery({
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const options = {
     expectedVersion: process.env.VERIFY_RELEASE_VERSION,
+    pausedVersion: process.env.VERIFY_PAUSED_VERSION,
     platforms: (process.env.VERIFY_PLATFORMS || '').split(',').map((value) => value.trim()).filter(Boolean),
     scope: (process.env.VERIFY_SCOPE || '').split(',').map((value) => value.trim()).filter(Boolean),
     allowNewerLatest: process.env.VERIFY_ALLOW_NEWER_LATEST === 'true',

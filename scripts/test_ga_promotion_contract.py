@@ -449,6 +449,7 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn('--desktop-only --legacy-only', closed)
         self.assertIn('VERIFY_DESKTOP_MANIFEST: /tmp/desktop-update-manifest.json', closed)
         self.assertIn('VERIFY_AUTHORITY_REVISION:', closed)
+        self.assertIn('VERIFY_PAUSED_VERSION: ${{ inputs.paused_version || inputs.previous_version }}', closed)
         self.assertIn('node scripts/verify-controlled-desktop-update.mjs', closed)
         self.assertIn('nowledge-mem-upgrade-pause', routes)
         self.assertNotIn('wrangler delete', workflow)
@@ -581,6 +582,23 @@ class GAPromotionContractTest(unittest.TestCase):
                         workflow.index('name: Reconcile RPM in Cloudflare R2'))
         self.assertIn('node scripts/reconcile-rpm-release-asset.mjs "v${GA}"', workflow)
 
+    def test_pause_validation_accepts_a_future_withdrawn_version(self):
+        script = step_script(workflow_text('install-desktop-upgrade-pause.yml'),
+                             'Validate the withdrawal boundary')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gh = root / 'gh'
+            gh.write_text('#!/bin/sh\nprintf \'[{"tag_name":"v1.4.0","draft":true,"prerelease":false}]\\n\'\n')
+            gh.chmod(0o755)
+            result = subprocess.run(['bash', '-c', script], cwd=root, text=True,
+                                    capture_output=True, env={
+                                        **os.environ, 'PATH': f'{root}:{os.environ["PATH"]}',
+                                        'GA': '1.4.0', 'REPO': 'test/releases',
+                                        'OPERATION_ID': '00000000-0000-4000-8000-000000000139',
+                                        'GITHUB_ENV': str(root / 'env'),
+                                    })
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_emergency_pause_stages_core_before_apt_and_unpause(self):
         promote = (ROOT / ".github" / "workflows" /
                    "promote-rc-to-ga.yml").read_text()
@@ -627,18 +645,24 @@ class GAPromotionContractTest(unittest.TestCase):
 
         install_pause = (ROOT / ".github/workflows" /
                          "install-desktop-upgrade-pause.yml").read_text()
-        self.assertIn('[[ "$GA" == "0.10.102" ]]', install_pause)
-        self.assertIn('[[ "$PREVIOUS_VERSION" == "0.10.101" ]]', install_pause)
-        self.assertIn("VERIFY_FALLBACK_VERSION: ${{ inputs.previous_version }}", install_pause)
+        self.assertNotIn('"0.10.102"', install_pause)
+        self.assertNotIn('"0.10.101"', install_pause)
+        self.assertNotIn('413349639', install_pause)
+        self.assertIn('gh api --paginate --slurp', install_pause)
+        self.assertIn('node scripts/prepare-desktop-pause.mjs', install_pause)
+        self.assertLess(install_pause.index('prepare-desktop-pause.mjs'),
+                        install_pause.index('npx wrangler deploy'))
+        self.assertIn('--config .desktop-upgrade-pause.generated.json', install_pause)
         self.assertIn('--var "FALLBACK_VERSION:${PREVIOUS_VERSION}"', install_pause)
         self.assertIn('--var "FALLBACK_PUBLISHED_AT:${FALLBACK_PUBLISHED_AT}"', install_pause)
         self.assertIn("node scripts/verify-upgrade-pause.mjs", install_pause)
+        self.assertIn('VERIFY_FALLBACK_PLAN: .desktop-pause-plan.json', install_pause)
 
         finish = (ROOT / ".github/workflows/finish-ga-release.yml").read_text()
         self.assertIn('export VERIFY_FALLBACK_VERSION="${{ inputs.paused_stable_version }}"',
                       finish)
         unpause = (ROOT / ".github/workflows/remove-desktop-upgrade-pause.yml").read_text()
-        self.assertIn("VERIFY_FALLBACK_VERSION: ${{ inputs.previous_version }}", unpause)
+        self.assertIn("VERIFY_FALLBACK_VERSION: ${{ inputs.fallback_version || inputs.previous_version }}", unpause)
 
     def test_apt_landing_is_published_and_verified_after_repository_metadata(self):
         workflows = {

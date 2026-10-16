@@ -7,6 +7,12 @@ const pausedHeaders = {
   'retry-after': '3600',
   'x-mem-upgrade-pause': '2026-10-12',
 };
+const files = {
+  mac: 'aarch64-apple-darwin.dmg', 'mac-intel': 'x86_64-apple-darwin.dmg',
+  win: 'x86_64-pc-windows-msvc.exe', linux: 'x86_64-unknown-linux-gnu.AppImage',
+  'linux-appimage': 'x86_64-unknown-linux-gnu.AppImage',
+  'linux-deb': 'x86_64-unknown-linux-gnu.deb', 'linux-rpm': 'x86_64-unknown-linux-gnu.rpm',
+};
 
 function reply(status, body, headers = {}) {
   return {
@@ -23,6 +29,7 @@ function fixture({
   exposeRelease = false,
   fallbackVersion = '',
   fallbackMarker = fallbackVersion,
+  wrongDownload = false,
 } = {}) {
   return async (value) => {
     const url = new URL(value);
@@ -40,7 +47,7 @@ function fixture({
       return reply(200, {
         platform,
         version: fallbackVersion,
-        download_url: `https://download-mem.nowledge.co/app/${fallbackVersion}/artifact`,
+        download_url: `https://download-mem.nowledge.co/app/${fallbackVersion}/${wrongDownload ? 'wrong-file' : files[platform]}`,
       }, {
         ...pausedHeaders,
         'x-mem-latest-fallback': fallbackMarker,
@@ -49,7 +56,7 @@ function fixture({
     if (fallbackVersion && url.pathname.startsWith('/download/latest/')) {
       return reply(302, '', {
         ...pausedHeaders,
-        location: `https://download-mem.nowledge.co/app/${fallbackVersion}/artifact`,
+        location: `https://download-mem.nowledge.co/app/${fallbackVersion}/${wrongDownload ? 'wrong-file' : files[url.pathname.split('/').at(-1)]}`,
         'x-mem-latest-fallback': fallbackMarker,
       });
     }
@@ -97,6 +104,70 @@ test('rejects fallback metadata that exposes the paused release', async () => {
     fixture({ fallbackVersion: '0.10.100', fallbackMarker: fallbackVersion }),
     { fallbackVersion },
   )), /expected version 0\.10\.99/);
+});
+
+test('rejects a different package under the correct fallback version', async () => {
+  const fallbackVersion = '1.3.100';
+  await assert.rejects(verifyUpgradePause(options(
+    fixture({ fallbackVersion, wrongDownload: true }), { fallbackVersion },
+  )), /artifact|package|file/);
+});
+
+test('downloads a range from every exact selected package after checking its redirect', async () => {
+  const fallbackVersion = '1.3.100';
+  const platforms = ['mac', 'mac-intel', 'win', 'linux-appimage', 'linux-deb', 'linux-rpm'];
+  const fallbackArtifacts = platforms.map((platform) => ({
+    platform: platform === 'mac-intel' ? 'mac_intel' : platform,
+    url: `https://download-mem.nowledge.co/app/${fallbackVersion}/${files[platform]}`, size: 12345,
+  }));
+  const calls = [];
+  const fetcher = async (url, init) => {
+    if (new URL(url).pathname.startsWith('/app/')) {
+      calls.push(url);
+      assert.equal(init.headers.Range, 'bytes=0-0');
+      return new Response(new Uint8Array([42]), { status: 206, headers: {
+        'content-range': 'bytes 0-0/12345', 'content-length': '1',
+      } });
+    }
+    return fixture({ fallbackVersion })(url);
+  };
+  await verifyUpgradePause(options(fetcher, { platforms, fallbackVersion, fallbackArtifacts }));
+  assert.deepEqual(calls, fallbackArtifacts.map((a) => a.url));
+});
+
+test('fails post-deploy when GET availability or size differs from the selected plan', async () => {
+  const fallbackVersion = '1.3.100';
+  const fallbackArtifacts = [{ platform: 'mac', size: 12345,
+    url: `https://download-mem.nowledge.co/app/${fallbackVersion}/${files.mac}` }];
+  for (const [status, range, body] of [
+    [404, '', ''], [200, '', 'not a range'], [206, 'bytes 0-0/999', 'x'],
+    [206, 'bytes 0-0/12345', ''],
+  ]) {
+    const fetcher = async (url) => new URL(url).pathname.startsWith('/app/')
+      ? new Response(body, { status, headers: { 'content-range': range } })
+      : fixture({ fallbackVersion })(url);
+    await assert.rejects(verifyUpgradePause(options(fetcher,
+      { platforms: ['mac'], fallbackVersion, fallbackArtifacts })), /range|Range|size|206/);
+  }
+});
+
+test('accepts a size-matched GET when CDN ignores Range and cancels without downloading the installer', async () => {
+  const fallbackVersion = '1.3.100';
+  let chunks = 0;
+  let cancelled = false;
+  const fetcher = async (url) => {
+    if (!new URL(url).pathname.startsWith('/app/')) return fixture({ fallbackVersion })(url);
+    return new Response(new ReadableStream({
+      pull(controller) { chunks += 1; controller.enqueue(new Uint8Array(1024)); },
+      cancel() { cancelled = true; },
+    }), { headers: { 'content-length': '1000000' } });
+  };
+  await verifyUpgradePause(options(fetcher, { platforms: ['mac'], fallbackVersion,
+    fallbackArtifacts: [{ platform: 'mac', size: 1000000,
+      url: `https://download-mem.nowledge.co/app/${fallbackVersion}/${files.mac}` }],
+  }));
+  assert.equal(cancelled, true);
+  assert.ok(chunks <= 2, 'only a bounded stream prefix is consumed');
 });
 
 test('desktop-only mode does not require the APT route to remain paused', async () => {

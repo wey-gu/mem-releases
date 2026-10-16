@@ -3,7 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
-const ARTIFACTS = [
+export const ARTIFACTS = [
   ['mac', (version) => `Nowledge.Mem_${version}_aarch64.dmg`, 'aarch64-apple-darwin.dmg'],
   ['mac_intel', (version) => `Nowledge.Mem_${version}_x64.dmg`, 'x86_64-apple-darwin.dmg'],
   ['win', (version) => `Nowledge.Mem_${version}_x64-setup.exe`, 'x86_64-pc-windows-msvc.exe'],

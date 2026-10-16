@@ -29,9 +29,22 @@ const PLATFORM_ARTIFACTS = Object.freeze({
   },
 });
 
+export function compareVersions(left, right) {
+  const clean = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+  if (!clean.test(left || '') || !clean.test(right || '')) {
+    throw new Error('Versions must be clean semver');
+  }
+  const a = left.split('.').map(BigInt);
+  const b = right.split('.').map(BigInt);
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return a[i] > b[i] ? 1 : -1;
+  }
+  return 0;
+}
+
 function requireFallback(env) {
-  if (!/^\d+\.\d+\.\d+$/.test(env.FALLBACK_VERSION || '')) {
-    throw new Error('FALLBACK_VERSION must be a clean semver');
+  if (compareVersions(env.FALLBACK_VERSION, env.PAUSED_VERSION) >= 0) {
+    throw new Error('FALLBACK_VERSION must precede PAUSED_VERSION');
   }
   if (Number.isNaN(Date.parse(env.FALLBACK_PUBLISHED_AT || ''))) {
     throw new Error('FALLBACK_PUBLISHED_AT must be an ISO-8601 timestamp');

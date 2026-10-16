@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
+import { ARTIFACTS } from './build-desktop-update-manifest.mjs';
 
 const TARGETS = {
   mac: 'aarch64-apple-darwin',
@@ -19,6 +21,10 @@ const CONTROL_PLATFORMS = {
   'linux-rpm': 'linux-rpm',
   'linux-appimage': 'linux-appimage',
 };
+const FILES = Object.fromEntries(ARTIFACTS.map(([platform, , file]) => [platform, file]));
+function artifactUrl(platform, version) {
+  return `https://download-mem.nowledge.co/app/${version}/${FILES[CONTROL_PLATFORMS[platform]]}`;
+}
 
 function requireCondition(ok, message) {
   if (!ok) throw new Error(message);
@@ -62,21 +68,44 @@ async function assertFallbackLatest(response, platform, version, label) {
     `${label}: expected platform ${platform}, got ${body?.platform || '<missing>'}`);
   requireCondition(body?.version === version,
     `${label}: expected version ${version}, got ${body?.version || '<missing>'}`);
-  const download = new URL(body?.download_url || 'https://invalid.invalid/');
-  requireCondition(download.hostname === 'download-mem.nowledge.co',
-    `${label}: fallback download host is invalid`);
-  requireCondition(download.pathname.startsWith(`/app/${version}/`),
-    `${label}: fallback download does not target ${version}`);
+  requireCondition(body?.download_url === artifactUrl(platform, version),
+    `${label}: fallback download does not target the exact platform artifact`);
 }
 
-function assertFallbackRedirect(response, version, label) {
+function assertFallbackRedirect(response, platform, version, label) {
   requireCondition(response.status === 302, `${label}: expected 302, got ${response.status}`);
   assertFallbackHeaders(response, version, label);
-  const location = new URL(response.headers.get('location') || 'https://invalid.invalid/');
-  requireCondition(location.hostname === 'download-mem.nowledge.co',
-    `${label}: fallback redirect host is invalid`);
-  requireCondition(location.pathname.startsWith(`/app/${version}/`),
-    `${label}: fallback redirect does not target ${version}`);
+  requireCondition(response.headers.get('location') === artifactUrl(platform, version),
+    `${label}: fallback redirect does not target the exact platform artifact`);
+}
+
+async function verifyArtifactRange(artifact, headers, fetcher) {
+  const response = await fetcher(artifact.url, {
+    headers: { ...headers, Range: 'bytes=0-0' }, redirect: 'manual', signal: AbortSignal.timeout(15000),
+  });
+  try {
+    requireCondition(response.status === 206 || response.status === 200,
+      `Fallback range GET: expected 200/206, got ${response.status}`);
+    if (response.status === 206) {
+      requireCondition(response.headers.get('content-range') === `bytes 0-0/${artifact.size}`,
+        'Fallback range size differs from the selected pause plan');
+      requireCondition(response.headers.get('content-length') === '1', 'Fallback range length must be 1');
+    } else {
+      // HTTP permits a server to ignore Range. Read one chunk and cancel, never the full installer.
+      requireCondition(Number(response.headers.get('content-length')) === artifact.size,
+        'Fallback GET size differs from the selected pause plan');
+    }
+    requireCondition(response.body, 'Fallback range body is missing');
+    const reader = response.body.getReader();
+    try {
+      const first = await reader.read();
+      requireCondition(!first.done && first.value.byteLength > 0, 'Fallback range body is empty');
+      if (response.status === 206) {
+        requireCondition(first.value.byteLength === 1, 'Fallback range body must contain one byte');
+        requireCondition((await reader.read()).done, 'Fallback range body exceeds one byte');
+      }
+    } finally { await reader.cancel(); }
+  } finally { if (response.body && !response.bodyUsed) await response.body.cancel(); }
 }
 
 export async function verifyUpgradePause({
@@ -88,6 +117,7 @@ export async function verifyUpgradePause({
   includeControlled = true,
   includeLegacy = true,
   fallbackVersion = '',
+  fallbackArtifacts,
   fetcher = fetch,
   requestIdFactory = randomUUID,
 }) {
@@ -98,12 +128,13 @@ export async function verifyUpgradePause({
     requireCondition(TARGETS[platform], `Unknown required platform: ${platform}`);
   }
   const base = baseUrl.replace(/\/+$/, '');
-  const request = (url) => fetcher(url, {
-    headers: {
+  const headers = {
       'User-Agent': `Nowledge-Mem/${previousVersion} (Tauri)`,
       Origin: 'https://mem.nowledge.co',
       Referer: 'https://mem.nowledge.co/download',
-    },
+  };
+  const request = (url) => fetcher(url, {
+    headers,
     redirect: 'manual',
   });
 
@@ -115,7 +146,14 @@ export async function verifyUpgradePause({
         await assertFallbackLatest(await request(`${base}/latest?platform=${platform}`),
           platform, fallbackVersion, `/latest ${platform}`);
         assertFallbackRedirect(await request(`${base}/download/latest/${platform}`),
-          fallbackVersion, `/download/latest/${platform}`);
+          platform, fallbackVersion, `/download/latest/${platform}`);
+        if (fallbackArtifacts) {
+          const matching = fallbackArtifacts.filter((a) => a.platform === CONTROL_PLATFORMS[platform]);
+          requireCondition(matching.length === 1 && matching[0].url === artifactUrl(platform, fallbackVersion)
+            && Number.isSafeInteger(matching[0].size) && matching[0].size > 0,
+          `Missing or invalid pause plan artifact for ${platform}`);
+          await verifyArtifactRange(matching[0], headers, fetcher);
+        }
       } else {
         await assertPaused(await request(`${base}/latest?platform=${platform}`),
           `/latest ${platform}`);
@@ -165,8 +203,14 @@ export async function verifyUpgradePause({
   console.log(`Upgrade pause verified for ${platforms.length} platforms; apt=${includeApt}`);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  verifyUpgradePause({
+async function main() {
+  let plan;
+  if (process.env.VERIFY_FALLBACK_PLAN) {
+    plan = JSON.parse(await readFile(process.env.VERIFY_FALLBACK_PLAN, 'utf8'));
+    requireCondition(plan.fallback_version === process.env.VERIFY_FALLBACK_VERSION
+      && Array.isArray(plan.fallback_artifacts), 'Fallback pause plan does not match the selected version');
+  }
+  await verifyUpgradePause({
     platforms: (process.env.VERIFY_PLATFORMS || '')
       .split(',').map((value) => value.trim()).filter(Boolean),
     previousVersion: process.env.VERIFY_PREVIOUS_DESKTOP_VERSION,
@@ -176,7 +220,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     includeControlled: !process.argv.includes('--legacy-only'),
     includeLegacy: !process.argv.includes('--controlled-only'),
     fallbackVersion: process.env.VERIFY_FALLBACK_VERSION,
-  }).catch((error) => {
+    fallbackArtifacts: plan?.fallback_artifacts,
+  });
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
     console.error(`Upgrade pause verification failed: ${error.message}`);
     process.exitCode = 1;
   });

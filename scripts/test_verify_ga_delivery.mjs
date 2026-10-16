@@ -8,6 +8,7 @@ import {
   verifyVersionPolicy,
 } from './verify-ga-delivery.mjs';
 import { APT_LANDING_MARKER } from './publish-apt-landing.mjs';
+import pauseWorker from './desktop-upgrade-pause-worker.mjs';
 
 const version = '0.10.94';
 const files = {
@@ -196,6 +197,47 @@ test('staged GA rejects a redirect to another version', async () => {
     verifyStagedGADelivery(options(fetcher, { platforms: ['mac'] })),
     /expected \/app\/0\.10\.94/,
   );
+});
+
+test('same-version unpause confirms all exact routes remain blocked before removal', async () => {
+  const pausedVersion = '1.4.0';
+  const seen = [];
+  const env = {
+    PAUSED_VERSION: pausedVersion, FALLBACK_VERSION: '1.3.100',
+    FALLBACK_PUBLISHED_AT: '2026-10-15T00:00:00Z', PAUSE_OPERATION_ID: 'test-pause',
+  };
+  const platforms = ['mac', 'mac-intel', 'win', 'linux-appimage', 'linux-deb', 'linux-rpm'];
+  await verifyStagedGADelivery({ expectedVersion: pausedVersion, pausedVersion, platforms,
+    fetcher: (url, init) => {
+      seen.push(url);
+      assert.equal(init.method, 'HEAD');
+      return pauseWorker.fetch(new Request(url, init), env);
+    },
+  });
+  assert.equal(seen.length, 12);
+  for (const platform of platforms) {
+    assert.ok(seen.includes(`https://backbone-mem.nowledge.co/download/${pausedVersion}/${platform}`));
+    assert.ok(seen.includes(`https://download-mem.nowledge.co/app/${pausedVersion}/${files[platform]}`));
+  }
+});
+
+test('same-version unpause rejects an exact route that is already open or lacks pause identity', async () => {
+  for (const [status, headers] of [
+    [200, { 'cache-control': 'no-store', 'x-mem-upgrade-pause': 'test-pause' }],
+    [503, { 'cache-control': 'no-store' }],
+    [503, { 'x-mem-upgrade-pause': 'test-pause' }],
+  ]) {
+    await assert.rejects(verifyStagedGADelivery({ expectedVersion: version, pausedVersion: version,
+      platforms: ['mac'], fetcher: async () => new Response(null, { status, headers }),
+    }), /paused|503|no-store|pause/);
+  }
+});
+
+test('a different staged candidate still requires its exact public download to be available', async () => {
+  await verifyStagedGADelivery(options(fixture(), { pausedVersion: '0.10.93' }));
+  await assert.rejects(verifyStagedGADelivery(options(async () => new Response(null, {
+    status: 503, headers: { 'cache-control': 'no-store', 'x-mem-upgrade-pause': 'test-pause' },
+  }), { pausedVersion: '0.10.93' })), /expected 200, got 503/);
 });
 
 test('APT-only verification accepts the exact staged GA', async () => {
