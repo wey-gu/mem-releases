@@ -32,13 +32,19 @@ New-Item -ItemType Directory -Force -Path $work | Out-Null
 $marker = Join-Path $work 'uninstall-ran.txt'
 
 # 1. Base install (silent: never shows the reinstall page).
-function Invoke-Installer([string]$path, [string]$arguments) {
+# Returns the exit code, or $null when the installer is still running after
+# $timeoutSeconds (stuck on a dialog). Then it and any uninstaller it started
+# are stopped, so the caller can still inspect what happened.
+function Invoke-Installer([string]$path, [string]$arguments, [int]$timeoutSeconds = 600) {
   $p = Start-Process -FilePath $path -ArgumentList $arguments -PassThru
-  if (-not $p.WaitForExit(600000)) { $p | Stop-Process -Force; throw "$path $arguments did not finish in 10 minutes" }
-  return $p.ExitCode
+  if ($p.WaitForExit($timeoutSeconds * 1000)) { return $p.ExitCode }
+  Get-Process | Where-Object { $_.Path -and ($_.Path -like "$env:LOCALAPPDATA\Nowledge Mem\*" -or $_.Path -like "$env:TEMP\*") -and $_.ProcessName -match '^(uninstall|Au_|Un_)' } | Stop-Process -Force -ErrorAction SilentlyContinue
+  $p | Stop-Process -Force -ErrorAction SilentlyContinue
+  Write-Host "$([IO.Path]::GetFileName($path)) $arguments still running after $timeoutSeconds s; stopped"
+  return $null
 }
 $code = Invoke-Installer $BaseInstaller '/S'
-if ($code -ne 0) { throw "base install exited $code" }
+if ($code -ne 0) { throw "base install exited $(if ($null -eq $code) { 'timeout' } else { $code })" }
 $installDir = (Get-ItemProperty $uninstKey).InstallLocation.Trim('"')
 $baseVersion = (Get-ItemProperty $uninstKey).DisplayVersion
 Write-Host "base $baseVersion installed at $installDir"
@@ -78,10 +84,10 @@ if ($LASTEXITCODE -ne 0) { throw 'sentinel compile failed' }
 function Run-Candidate([string]$label) {
   Copy-Item $sentinelExe (Join-Path $installDir 'uninstall.exe') -Force
   Remove-Item $marker -ErrorAction SilentlyContinue
-  $code = Invoke-Installer $candidate.FullName '/P'
+  $code = Invoke-Installer $candidate.FullName '/P' $(if ($ExpectUninstall) { 300 } else { 600 })
   $ran = Test-Path $marker
   $reg = Get-ItemProperty $uninstKey
-  Write-Host "[$label] exit=$code uninstaller-ran=$ran version=$($reg.DisplayVersion) dir=$($reg.InstallLocation)"
+  Write-Host "[$label] exit=$(if ($null -eq $code) { 'stuck' } else { $code }) uninstaller-ran=$ran version=$($reg.DisplayVersion) dir=$($reg.InstallLocation)"
   if ($ran) { Write-Host "[$label] uninstaller args: $(Get-Content $marker -Raw)" }
   return [pscustomobject]@{ Exit = $code; Ran = $ran; Reg = $reg }
 }
@@ -91,6 +97,8 @@ $same = Run-Candidate 'same-version /P'
 $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Nowledge Mem.lnk'
 
 if ($ExpectUninstall) {
+  # Upstream runs the previous uninstaller on a same-version /P reinstall
+  # (and, here, stays on a dialog afterwards). Either way the probe saw it.
   Check ($same.Ran) 'control: unpatched template runs the old uninstaller on a same-version /P reinstall'
 } else {
   Check ($upgrade.Exit -eq 0) 'upgrade /P exits 0'
