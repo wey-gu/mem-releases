@@ -2,7 +2,7 @@
 #
 # Source code is fetched at build time from a separate (private) repo
 # via a fine-grained PAT (MEM_REPO_TOKEN, Contents: Read only).
-# Private Skein uses its read-only repository deploy key (SKEIN_REPO_SSH_KEY).
+# Public HawDB is checked out over HTTPS at the source-recorded gitlink.
 # Builds all desktop bundles (macOS arm64 + x86_64, Windows NSIS, Linux .deb +
 # .AppImage + .rpm), signs + notarises macOS, uploads to Cloudflare R2,
 # updates the APT repo, drafts a GitHub Release here.
@@ -12,6 +12,26 @@
 #   push tags v*       — auto-trigger when a tag is pushed to THIS repo.
 #   repository_dispatch [type: release] — for automation where the source
 #                        repo's tag-push fires a dispatch here.
+#   workflow_dispatch with `tag: nightly` — NIGHTLY release-shape build of a
+#                        nowledge-co/mem commit (`source_ref`, default main).
+#                        release-shape-nightly.yml dispatches it daily and
+#                        whenever main's Cargo manifests/lockfiles change.
+#
+# Nightly release-shape build (nowledge-co/mem#7108, W5/W17):
+#   Platform breakage (Windows NSIS, submodule init, PDFium, timeouts) used to
+#   surface only 1.5-3 h into a release, and dependency bumps compiled cold
+#   inside the release. The nightly builds the five default desktop platforms
+#   from one pinned nowledge-co/mem commit with the exact release build
+#   steps, including macOS signing + notarization, so the same breakage turns
+#   a nightly red instead of a release and the compile caches are warm. It has
+#   NO side effects: `meta` resolves it to is_dry_run=false AND
+#   run_publish=false, so the prerelease, -vulkan attach, and publish jobs
+#   (the only jobs that write a GH Release, R2, APT, or the updater feed) are
+#   all skipped; Vulkan is forced off; build artifacts are not uploaded (an
+#   unreleased main build must not become a public download). It runs in its
+#   own concurrency group, so it can never queue behind, replace, or cancel a
+#   release run; release-shape-nightly.yml does not dispatch it while a
+#   release run is in flight.
 #
 # First-time setup: see docs/SETUP.md.
 
@@ -21,9 +41,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Source tag to build (e.g. 0.8.4 or 0.8.4-ci1). Bare semver triggers publish; anything with a `-` suffix is a dry-run."
+        description: "Source tag to build (e.g. 0.8.4 or 0.8.4-ci1). Bare semver triggers publish; anything with a `-` suffix is a dry-run. `nightly` runs the side-effect-free nightly release-shape build."
         required: true
         type: string
+      source_ref:
+        description: "Only with tag=nightly: nowledge-co/mem branch, tag, or SHA to build (default: main). Releases always build v<tag>."
+        required: false
+        type: string
+        default: ""
       publish:
         description: "Run publish job (R2 + APT + GH release). Disable for build-only smoke tests."
         required: false
@@ -41,6 +66,32 @@ on:
         default: false
       build_vulkan:
         description: "ALSO build the OPTIONAL -vulkan GPU variants (Windows + Linux only). Manual downloads only — NEVER added to the auto-updater feed. Off for tag-triggered runs."
+        required: false
+        type: boolean
+        default: false
+      windows_only:
+        description: "Only build standard Windows from the pinned source_ref; accepted only with tag=nightly, never publishes."
+        required: false
+        type: boolean
+        default: false
+      windows_runner_probe:
+        description: "Only run the isolated Windows self-hosted feasibility probe; skip all release jobs."
+        required: false
+        type: boolean
+        default: false
+      windows_runner:
+        description: "Standard Windows runner: auto prefers available windows-book, otherwise GitHub; hosted/self-hosted force a choice."
+        required: false
+        type: choice
+        options: [auto, hosted, self-hosted]
+        default: auto
+      windows_self_hosted:
+        description: "Deprecated: force windows-book; prefer windows_runner selection."
+        required: false
+        type: boolean
+        default: false
+      windows_cache_benchmark:
+        description: "Also measure compatible local-test/runner cache reuse during the isolated Windows probe."
         required: false
         type: boolean
         default: false
@@ -64,8 +115,12 @@ on:
   repository_dispatch:
     types: [release]
 
+# Releases keep the group `release-desktop-<ref>`. A nightly gets its own
+# group: a run in a shared group would replace a PENDING release run (GitHub
+# keeps one pending run per group), and a release dispatched from main shares
+# `refs/heads/main` with the nightly.
 concurrency:
-  group: release-desktop-${{ github.ref }}
+  group: ${{ inputs.windows_only == true && format('windows-qualification-{0}', github.run_id) || (inputs.tag == 'nightly' && 'release-desktop-nightly' || format('release-desktop-{0}', github.ref)) }}
   cancel-in-progress: false
 
 permissions:
@@ -81,11 +136,115 @@ env:
   GCP_BAZEL_CACHE_WORKLOAD_IDENTITY_PROVIDER: projects/789880242959/locations/global/workloadIdentityPools/github-actions/providers/nowledge-mem
 
 jobs:
+  select-windows-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    outputs:
+      label: ${{ steps.select.outputs.label }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Releases (tag push, repository_dispatch, any dispatch tag other than
+      # `nightly`) always build Windows on GitHub-hosted runners; windows-book
+      # is for qualification and nightly runs only (nowledge-co/mem#7108).
+      - id: mode
+        env:
+          MODE: ${{ inputs.windows_runner || 'auto' }}
+          LEGACY_SELF_HOSTED: ${{ inputs.windows_self_hosted }}
+          IS_RELEASE: ${{ !(github.event_name == 'workflow_dispatch' && inputs.tag == 'nightly') }}
+          APP_CONFIGURED: ${{ secrets.RELEASE_APP_ID != '' && secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [[ "$LEGACY_SELF_HOSTED" == "true" && "$MODE" == "auto" ]]; then MODE=self-hosted; fi
+          {
+            echo "mode=$MODE"
+            echo "release=$IS_RELEASE"
+            echo "app_configured=$APP_CONFIGURED"
+          } >> "$GITHUB_OUTPUT"
+      - id: inventory-token
+        if: ${{ steps.mode.outputs.mode == 'auto' && steps.mode.outputs.release != 'true' && steps.mode.outputs.app_configured == 'true' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: mem-releases
+          permission-administration: read
+      - id: select
+        name: Releases use GitHub; nightlies prefer the available Windows machine
+        env:
+          WINDOWS_RUNNER_MODE: ${{ steps.mode.outputs.mode }}
+          WINDOWS_RUNNER_RELEASE: ${{ steps.mode.outputs.release }}
+          RUNNER_INVENTORY_TOKEN: ${{ steps.inventory-token.outputs.token }}
+        run: node scripts/select-windows-runner.mjs
+
+  windows-runner-probe:
+    needs: select-windows-runner
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows_runner_probe == true || inputs.windows_cache_benchmark == true) }}
+    runs-on: windows-book-feasibility
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Verify configured tools and shared cache
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . (Join-Path $env:USERPROFILE 'ci-tools\Enter-BuildEnvironment.ps1')
+          foreach ($tool in @('pwsh','python3','clang','cmake','ninja','protoc','nasm','sccache','makensis')) {
+            $resolved = (Get-Command $tool -ErrorAction Stop).Source
+            Write-Host "$tool available"
+          }
+      - name: Verify native Windows runner and compiler
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'native-runner-proof'
+          New-Item -ItemType Directory -Force -Path (Join-Path $root 'src') | Out-Null
+          @'
+          [package]
+          name="windows-runner-native-proof"
+          version="0.1.0"
+          edition="2024"
+          [workspace]
+          [profile.release]
+          strip="symbols"
+          '@ | Set-Content (Join-Path $root 'Cargo.toml') -Encoding ascii
+          'fn main() { println!("windows-runner-native-proof:ok"); }' |
+            Set-Content (Join-Path $root 'src\main.rs') -Encoding ascii
+          $timer = [Diagnostics.Stopwatch]::StartNew()
+          & cargo +1.98.1 build --release --offline --manifest-path (Join-Path $root 'Cargo.toml') --target-dir (Join-Path $root 'target')
+          if ($LASTEXITCODE -ne 0) { throw 'Native Rust/MSVC build failed' }
+          $result = & (Join-Path $root 'target\release\windows-runner-native-proof.exe')
+          if ($LASTEXITCODE -ne 0 -or $result -ne 'windows-runner-native-proof:ok') {
+            throw 'Native executable did not return the expected result'
+          }
+          $cpu = Get-CimInstance Win32_Processor
+          $memory = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB
+          @"
+          ### Windows runner feasibility
+          - Runner: $env:RUNNER_NAME
+          - CPU: $($cpu.Name); $($cpu.NumberOfCores) cores / $($cpu.NumberOfLogicalProcessors) logical processors
+          - RAM: $([math]::Round($memory, 1)) GiB
+          - Native Rust/MSVC proof: $result ($([math]::Round($timer.Elapsed.TotalSeconds, 2)) seconds)
+          - This small fixture does not measure release build performance.
+          "@ | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8
+      - name: Measure shared compiler cache
+        if: ${{ inputs.windows_cache_benchmark == true }}
+        shell: powershell
+        run: |
+          & (Join-Path $env:USERPROFILE 'ci-tools\pwsh\pwsh.exe') -NoProfile -File (Join-Path $env:USERPROFILE 'ci-tools\Test-SharedCache.ps1')
+          if ($LASTEXITCODE -ne 0) { throw 'Shared cache measurement failed' }
+
   # -----------------------------------------------------------------------
   # Resolve version + flags. Also exposes `source_ref` so build jobs check
   # out the private repo at the right tag.
   # -----------------------------------------------------------------------
   meta:
+    if: ${{ inputs.windows_runner_probe != true && inputs.windows_cache_benchmark != true }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.resolve.outputs.version }}
@@ -93,6 +252,7 @@ jobs:
       is_dry_run: ${{ steps.resolve.outputs.is_dry_run }}
       run_publish: ${{ steps.resolve.outputs.run_publish }}
       run_vulkan: ${{ steps.resolve.outputs.run_vulkan }}
+      is_nightly: ${{ steps.resolve.outputs.is_nightly }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -107,23 +267,41 @@ jobs:
           DISPATCH_TAG: ${{ inputs.tag }}
           DISPATCH_PUBLISH: ${{ inputs.publish }}
           DISPATCH_VULKAN: ${{ inputs.build_vulkan }}
+          DISPATCH_SOURCE_REF: ${{ inputs.source_ref }}
+          WINDOWS_ONLY: ${{ inputs.windows_only }}
+          MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
           PAYLOAD_REF: ${{ github.event.client_payload.ref }}
           PAYLOAD_VERSION: ${{ github.event.client_payload.version }}
           PUSH_REF: ${{ github.ref_name }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          if [[ "${WINDOWS_ONLY:-false}" == "true" && ( "$EVENT_NAME" != "workflow_dispatch" || "$DISPATCH_TAG" != "nightly" ) ]]; then
+            echo "::error::windows_only is accepted only for a non-publishing tag=nightly manual build."
+            exit 1
+          fi
           # VULKAN is the OPTIONAL -vulkan GPU variant gate. It is ONLY ever
           # opt-in via the workflow_dispatch `build_vulkan` input; tag-push and
           # repository_dispatch triggers always leave it off, so the normal
           # automated release path is byte-for-byte unchanged.
           VULKAN="false"
+          NIGHTLY="false"
+          NIGHTLY_REF=""
           case "$EVENT_NAME" in
             workflow_dispatch)
-              VERSION="$DISPATCH_TAG"
-              SOURCE_REF="v${VERSION}"
-              PUBLISH="$DISPATCH_PUBLISH"
-              VULKAN="$DISPATCH_VULKAN"
+              if [[ "$DISPATCH_TAG" == "nightly" ]]; then
+                NIGHTLY="true"
+                NIGHTLY_REF="${DISPATCH_SOURCE_REF:-main}"
+              else
+                if [[ -n "$DISPATCH_SOURCE_REF" ]]; then
+                  echo "::error::source_ref is only accepted with tag=nightly; a release always builds v<tag>."
+                  exit 1
+                fi
+                VERSION="$DISPATCH_TAG"
+                SOURCE_REF="v${VERSION}"
+                PUBLISH="$DISPATCH_PUBLISH"
+                VULKAN="$DISPATCH_VULKAN"
+              fi
               ;;
             push)
               # tag push on THIS repo — assume the same tag exists on source
@@ -141,6 +319,32 @@ jobs:
               exit 1
               ;;
           esac
+          if [[ "$NIGHTLY" == "true" ]]; then
+            # Pin ONE commit so all five build jobs compile the same source
+            # even if main moves during the run.
+            SOURCE_REF="$(GH_TOKEN="$MEM_REPO_TOKEN" gh api "repos/nowledge-co/mem/commits/${NIGHTLY_REF}" --jq .sha)"
+            if ! [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::Could not resolve nowledge-co/mem ref '${NIGHTLY_REF}' to a commit."
+              exit 1
+            fi
+            PKG="$(GH_TOKEN="$MEM_REPO_TOKEN" gh api -H 'Accept: application/vnd.github.raw+json' \
+              "repos/nowledge-co/mem/contents/nowledge-graph/package.json?ref=${SOURCE_REF}" | jq -r .version)"
+            if ! [[ "$PKG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::nowledge-graph/package.json at ${SOURCE_REF} has no X.Y.Z version (got '${PKG}')."
+              exit 1
+            fi
+            # The build jobs compare the part before `-` with package.json, and
+            # build-rust-bundle checks the staged binaries against Cargo.toml,
+            # so `<source version>-nightly.<date>` builds the source unmodified.
+            VERSION="${PKG}-nightly.$(date -u +%Y%m%d)"
+            PUBLISH="false"
+            VULKAN="false"
+            {
+              echo "### Nightly release-shape build"
+              echo "- Source: nowledge-co/mem \`${NIGHTLY_REF}\` @ \`${SOURCE_REF}\`"
+              echo "- Version label: \`${VERSION}\` (artifact names only; nothing is published or uploaded)"
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fi
           # Any pre-release suffix (`-ci*`, `-rc*`, `-beta*`, etc.) is a dry
           # run. Only a bare semver `X.Y.Z` ever publishes. Same gate as
           # the private repo's workflow.
@@ -148,6 +352,11 @@ jobs:
             DRY="true"; PUBLISH="false"
           else
             DRY="false"
+          fi
+          # A nightly is not an rc either: is_dry_run gates the draft
+          # pre-release and the -vulkan attach jobs, so it must stay false.
+          if [[ "$NIGHTLY" == "true" ]]; then
+            DRY="false"; PUBLISH="false"
           fi
           # Normalize VULKAN to a strict true/false ("" from a non-dispatch
           # trigger becomes false). NEVER touches publish/updater.
@@ -157,7 +366,8 @@ jobs:
           echo "is_dry_run=$DRY"         >> "$GITHUB_OUTPUT"
           echo "run_publish=$PUBLISH"    >> "$GITHUB_OUTPUT"
           echo "run_vulkan=$VULKAN"      >> "$GITHUB_OUTPUT"
-          echo "Resolved: version=$VERSION source_ref=$SOURCE_REF dry=$DRY publish=$PUBLISH vulkan=$VULKAN"
+          echo "is_nightly=$NIGHTLY"     >> "$GITHUB_OUTPUT"
+          echo "Resolved: version=$VERSION source_ref=$SOURCE_REF dry=$DRY publish=$PUBLISH vulkan=$VULKAN nightly=$NIGHTLY"
 
       - name: Pre-flight GA policy before build and optional Vulkan jobs
         if: ${{ steps.resolve.outputs.run_publish == 'true' }}
@@ -221,9 +431,18 @@ jobs:
   # -----------------------------------------------------------------------
 
   build-macos-arm64:
+    if: ${{ inputs.windows_only != true }}
     needs: meta
     runs-on: macos-15
-    timeout-minutes: 180
+    # 300, not 180: a cold-cache build (any version bump) runs close to three
+    # hours. On 0.10.101-rc1 (run 38250505560) build-macos-x86_64 finished its
+    # build and uploaded the DMG at minute 175, then the 180-minute limit
+    # killed it while saving the Rust cache; the job was marked cancelled and
+    # the DMG never reached the prerelease (run 38191442711 died the same way
+    # at minute 172). x86_64 also hit the limit mid-build in runs 36888959814,
+    # 36939292858 and 37900837027; arm64 has reached 167 minutes.
+    # GitHub-hosted jobs allow up to 360.
+    timeout-minutes: 300
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
@@ -234,6 +453,14 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      # Build the CLIs after the server, not beside it (nowledge-co/mem#7137
+      # lane policy). On this 7 GB, 3-core runner the overlapped build went
+      # silent right after `Compiling nmem-server` and made no progress for
+      # 246 minutes until cancelled (run 38582266817), while the serial
+      # server compile takes 20-30 minutes (38550080175, 38582183103). The
+      # 14 GB x86_64 runner overlaps fine (server crate in 35 min). Serial
+      # costs about 6 minutes here; arm64 is not the long pole.
+      NMEM_DESKTOP_PARALLEL_CLI: "0"
     steps:
       - name: Checkout private source (nowledge-co/mem)
         uses: actions/checkout@v4
@@ -243,47 +470,55 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - &load_private_hawdb_deploy_key
-        name: Load private HawDB deploy key
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SKEIN_REPO_SSH_KEY }}
-
-      - &authorize_private_hawdb
-        name: Resolve private HawDB submodule over SSH
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config --global \
-            url."git@github.com:nowledge-co/hawdb.git".insteadOf \
-            "https://github.com/nowledge-co/hawdb.git"
-
-      - &resolve_private_desktop_dependency
-        name: Resolve private Desktop dependency
+      - &resolve_hawdb_dependency
+        name: Resolve HawDB dependency
         id: desktop_dependency
         shell: bash
         run: |
           set -euo pipefail
           if grep -q -- '--init-desktop-https' nowledge-graph/scripts/build-rust-bundle.sh; then
-            read -r mode kind sha dependency_path <<< "$(git ls-tree HEAD hawdb)"
-            [[ "$mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ ]]
-            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+            entry="$(git ls-tree HEAD hawdb)"
+            if [[ -z "$entry" ]]; then
+              # nowledge-co/mem#7222: HawDB is a crates.io dependency of the nmem-rs
+              # workspace, pinned (version + checksum) in nmem-rs/Cargo.lock, and the
+              # build script fetches it itself. Nothing to check out, but the build
+              # still needs Python 3.11+ (tomllib) to read that pin.
+              registry="$(awk '
+                /^\[\[package\]\]/ { name = ""; next }
+                /^name = / { name = $3; next }
+                /^source = / && name == "\"hawdb\"" { print $3 }
+              ' nmem-rs/Cargo.lock 2>/dev/null || true)"
+              if [[ "$registry" != '"registry+https://github.com/rust-lang/crates.io-index"' ]]; then
+                echo "::error::Source must pin HawDB as one crates.io package in nmem-rs/Cargo.lock (or, before #7222, as an exact dependency gitlink)." >&2
+                exit 1
+              fi
+              echo "mode=registry" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            read -r entry_mode kind sha dependency_path <<< "$entry"
+            if ! [[ "$entry_mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ && "$dependency_path" == hawdb ]]; then
+              echo "::error::Source must record HawDB as an exact dependency gitlink." >&2
+              exit 1
+            fi
+            {
+              echo "mode=gitlink"
+              echo "sha=$sha"
+            } >> "$GITHUB_OUTPUT"
           fi
 
-      - &checkout_private_desktop_dependency
-        name: Checkout private Desktop dependency
+      - &checkout_hawdb_dependency
+        name: Checkout HawDB dependency
         if: steps.desktop_dependency.outputs.sha != ''
         uses: actions/checkout@v4
         with:
           repository: nowledge-co/hawdb
-          ssh-key: ${{ secrets.SKEIN_REPO_SSH_KEY }}
           ref: ${{ steps.desktop_dependency.outputs.sha }}
           path: hawdb
           persist-credentials: false
 
       - &setup_desktop_python
         name: Set up Desktop build Python
-        if: steps.desktop_dependency.outputs.sha != ''
+        if: steps.desktop_dependency.outputs.mode != '' && runner.environment != 'self-hosted'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -339,8 +574,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
@@ -366,41 +599,58 @@ jobs:
               -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
               submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run by
-          # dtolnay/rust-toolchain; caching it once poisoned every later run).
-          cache-bin: false
-          workspaces: |
-            nowledge-graph/src-tauri
-            nmem-rs
-          # liteparse-pdfium-sys records this path in its build-script output.
-          # Keep the matching runtime library alongside Cargo's target cache.
-          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
-          # Bumped to -v3 (2026-06-27) to invalidate a SECOND poison: the
-          # rust-cache keys on Cargo.lock, not on nmem-rs source, so a
-          # source-only change (no dep bump) restored a STALE nmem-server
-          # from cache and cargo logged 0 "Compiling" lines — rc<=18 shipped
-          # an old backend (missing the feed-503 string, int community ids).
-          # Any future source-behavior fix that lands without a Cargo.lock
-          # change must bump these keys (all 7, not just the 5 GA platforms)
-          # again.
-          # (-v2 had earlier invalidated a poisoned ~/.cargo/bin cargo binary.)
-          #
-          # Bumped again (2026-07-28) for a case worth naming, because it does
-          # not look like a source change at all: a bump of an upstream_forks/
-          # submodule. Those are cargo PATH deps, so their version never moves
-          # and Cargo.lock never changes, yet the C++ they compile is linked
-          # into nmem-server. The trigger here was a ladybug FTS concurrency
-          # backport. Treat a submodule pointer bump as a source-behavior fix.
-          key: macos-aarch64-v5-pdfium
+      # No Swatinem/rust-cache and no setup-node `cache: pnpm` on the macOS and
+      # Linux release jobs (nowledge-co/mem#7108; the Windows job dropped them
+      # in wey-gu/mem-releases#118). Releases run on new tag refs, and a cache
+      # saved by a tag run is visible only to that tag. Every sampled build job
+      # here logged `No cache found.` and `pnpm cache is not found` (0.10.100-rc2
+      # jobs 114574744783/114574744748/114574744757, 0.10.101-rc1 jobs
+      # 114815304627/114815304632), yet each still saved: 58-82 s (arm64),
+      # 80-188 s (x86_64), 30-51 s (Linux) for the ~2 GB target cache, plus
+      # 17-104 s for pnpm. Saving only from the nightly on main (which tag runs
+      # CAN read) was considered and rejected: the three ~2 GB target caches
+      # would hold ~6 GB of the 10 GB repository budget that one rc alone
+      # filled to 9.26 GB, so eviction would decide whether a release restores;
+      # a restored target dir only replaces sccache hits (99.5% on 0.10.100-rc2)
+      # and cannot avoid the version-bump recompiles, because the nightly built
+      # the pre-bump commit; and this cache twice restored a stale binary
+      # (rc<=18 shipped an old nmem-server). sccache on R2 is the compile cache
+      # that carries across tags, and the Unix backend builds through Bazel
+      # with its own remote cache. With no restored target directory,
+      # liteparse-pdfium-sys downloads its runtime into XDG_CACHE_HOME on every
+      # run, as it already did whenever the cache missed.
 
       # SOTA build-cache: sccache → R2 (S3). Content-keyed, unbounded, shared
       # across runs/branches. Caches BOTH rust (RUSTC_WRAPPER) and the heavy C++
       # (ladybug + llama.cpp via cmake, which reads CMAKE_<LANG>_COMPILER_LAUNCHER
       # from env — no source patch). Degrades gracefully: if R2 is unreachable
       # sccache compiles locally, the build still succeeds.
-      - name: Setup sccache
+      # Setting up sccache downloads the sccache binary from GitHub Releases.
+      # That download is the only part of the cache that could fail the job:
+      # on 0.10.101-rc1 (run 38250505560) the then-separate RPM job died after 1.9 min
+      # on an HTTP 504 here, and because GitHub only reruns a failed job after
+      # the WHOLE run finishes, the 2-minute flake cost about 3 hours of wall
+      # clock. So: try once, wait, try again, and if sccache is still missing
+      # build uncached (slower, identical output). `continue-on-error` is also
+      # inherited by the action's post step (the stats summary), which
+      # otherwise fails the job with "Unable to locate executable file:
+      # undefined" when setup never installed the binary.
+      - &setup_sccache
+        name: Setup sccache
+        id: setup_sccache
+        if: runner.environment != 'self-hosted'
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - &wait_before_sccache_retry
+        name: Wait before retrying sccache setup
+        if: steps.setup_sccache.outcome == 'failure'
+        shell: bash
+        run: sleep 30
+      - &retry_setup_sccache
+        name: Retry sccache setup
+        id: retry_setup_sccache
+        if: steps.setup_sccache.outcome == 'failure'
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.9
       - name: Point sccache at R2
         shell: bash
@@ -409,7 +659,14 @@ jobs:
           R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
         run: |
+          # Export the compiler wrappers only when sccache actually runs;
+          # a wrapper that does not exist would fail every compile.
+          if ! sccache --version; then
+            echo "::warning title=sccache unavailable::sccache setup failed twice; building without the compile cache (slower, identical output)."
+            exit 0
+          fi
           {
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -500,7 +757,7 @@ jobs:
           unset APPLE_CERTIFICATE
           unset APPLE_CERTIFICATE_PASSWORD
           rm -rf python-standalone rust-backend
-          ./scripts/build-rust-bundle.sh --target aarch64-apple-darwin --bazel-public-binaries --bazel-hawdb-server
+          ./scripts/build-rust-bundle.sh --channel production --target aarch64-apple-darwin --bazel-public-binaries
           ./scripts/build-macos.sh --arch arm64 --skip-python
 
       - name: Locate + rename DMG
@@ -515,7 +772,33 @@ jobs:
           mv -f "$DMG" "$OUT"
           echo "dmg=$OUT" >> "$GITHUB_OUTPUT"
 
+      # Scriptable rc smoke on the signed, notarized DMG this job built: the
+      # same checks as the human `release-smoke.sh`, minus semantic search
+      # and the headline proof. Runs before upload; a failure withholds the
+      # DMG, so the rc is not promotable. About a minute on this long-pole job.
+      - &smoke_packaged_backend
+        name: Smoke the packaged backend in isolation
+        timeout-minutes: 5
+        shell: bash
+        env:
+          PACKAGE: ${{ steps.locate.outputs.dmg || steps.locate.outputs.deb }}
+        run: |
+          set -euo pipefail
+          # Source refs older than the script cannot run it; say so loudly
+          # instead of failing a historical rebuild.
+          if [[ ! -f scripts/release-smoke-core.sh ]]; then
+            echo "::warning title=Release smoke skipped::This source ref predates scripts/release-smoke-core.sh; run ./scripts/release-smoke.sh by hand before promoting."
+            exit 0
+          fi
+          bash scripts/release-smoke-core.sh \
+            --package "$PACKAGE" \
+            --expect-version "$VERSION" \
+            --expect-sha "$(git rev-parse HEAD)"
+
+      # A nightly builds main, which may hold unreleased work: keep it off
+      # the public repository's downloadable workflow artifacts.
       - uses: actions/upload-artifact@v4
+        if: needs.meta.outputs.is_nightly != 'true'
         with:
           name: macos-arm64
           path: ${{ steps.locate.outputs.dmg }}
@@ -523,9 +806,11 @@ jobs:
           retention-days: 7
 
   build-macos-x86_64:
+    if: ${{ inputs.windows_only != true }}
     needs: meta
     runs-on: macos-15-intel
-    timeout-minutes: 180
+    # 300, not 180: see build-macos-arm64 (0.10.101-rc1 evidence).
+    timeout-minutes: 300
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
@@ -545,11 +830,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -564,8 +846,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
@@ -580,21 +860,12 @@ jobs:
               -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
               submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run by
-          # dtolnay/rust-toolchain; caching it once poisoned every later run).
-          cache-bin: false
-          workspaces: |
-            nowledge-graph/src-tauri
-            nmem-rs
-          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
-          # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
-          key: macos-x86_64-v4-pdfium
+      # No target cache: see build-macos-arm64 (it never restores on tag runs).
 
       # sccache → R2 (see build-macos-arm64 for rationale).
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+      - *setup_sccache
+      - *wait_before_sccache_retry
+      - *retry_setup_sccache
       - name: Point sccache at R2
         shell: bash
         env:
@@ -602,7 +873,14 @@ jobs:
           R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
         run: |
+          # Export the compiler wrappers only when sccache actually runs;
+          # a wrapper that does not exist would fail every compile.
+          if ! sccache --version; then
+            echo "::warning title=sccache unavailable::sccache setup failed twice; building without the compile cache (slower, identical output)."
+            exit 0
+          fi
           {
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -676,7 +954,7 @@ jobs:
           unset APPLE_CERTIFICATE
           unset APPLE_CERTIFICATE_PASSWORD
           rm -rf python-standalone rust-backend
-          ./scripts/build-rust-bundle.sh --target x86_64-apple-darwin --bazel-public-binaries --bazel-hawdb-server
+          ./scripts/build-rust-bundle.sh --channel production --target x86_64-apple-darwin --bazel-public-binaries
           ./scripts/build-macos.sh --arch x86_64 --skip-python
 
       - name: Locate + rename DMG
@@ -691,7 +969,10 @@ jobs:
           mv -f "$DMG" "$OUT"
           echo "dmg=$OUT" >> "$GITHUB_OUTPUT"
 
+      # A nightly builds main, which may hold unreleased work: keep it off
+      # the public repository's downloadable workflow artifacts.
       - uses: actions/upload-artifact@v4
+        if: needs.meta.outputs.is_nightly != 'true'
         with:
           name: macos-x86_64
           path: ${{ steps.locate.outputs.dmg }}
@@ -699,13 +980,54 @@ jobs:
           retention-days: 7
 
   build-windows:
-    needs: meta
-    runs-on: windows-2022
-    timeout-minutes: 180
+    needs: [meta, select-windows-runner]
+    runs-on: ${{ needs.select-windows-runner.outputs.label }}
+    # 300, not 180, as for the macOS jobs. A cold-cache build runs past three
+    # hours: the self-hosted run 38557298581 hit the 180-minute limit with
+    # the backend 159 minutes in and still compiling, and the hosted run
+    # 38556301085 (1028 Rust misses, debug-logging sccache daemon) took 134
+    # minutes for the backend and 18 for the Tauri shell. GitHub-hosted jobs
+    # allow up to 360.
+    timeout-minutes: 300
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
+      # Deterministic MSVC links (nowledge-co/mem#7108, W8). sccache cannot
+      # cache proc-macro crates (rustc links them), so every build relinks
+      # them, and link.exe without /Brepro stamps each DLL with a fresh
+      # TimeDateStamp and PDB GUID. sccache hashes the bytes of every
+      # --extern file, so each crate that directly depends on a proc macro
+      # (serde, thiserror, tokio, datafusion-common via paste, ...) missed on
+      # every run: about 110 backend + 60 Tauri units, the ~200-miss Windows
+      # floor. Runs 38555213068 and 38556301085 built 25 proc-macro units
+      # with identical Cargo metadata hashes; all 25 DLLs differed, while 324
+      # of the 325 rlibs both runs built matched byte for byte. link.exe
+      # reads extra options from LINK; the variable also reaches the host
+      # proc-macro links that RUSTFLAGS skips under --target.
+      LINK: /Brepro
     steps:
+      - &configure_windows_self_hosted
+        name: Configure isolated self-hosted Windows build
+        if: runner.environment == 'self-hosted'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . (Join-Path $env:USERPROFILE 'ci-tools\Enter-BuildEnvironment.ps1')
+          & python3 -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
+          if ($LASTEXITCODE -ne 0) { throw 'Preinstalled Python 3.12 is required on this runner' }
+          & rustup which --toolchain 1.98.1 rustc | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Preinstalled Rust 1.98.1 is required on this runner' }
+          $env:RUSTUP_TOOLCHAIN = '1.98.1'
+          if ((Get-PSDrive C).Free -lt 40GB) { throw 'At least 40 GiB free is required before a Desktop build' }
+          $env:CARGO_TARGET_DIR = Join-Path $env:USERPROFILE 'ci-cache\runner-target'
+          $env:XDG_CACHE_HOME = Join-Path $env:USERPROFILE 'ci-cache\pdfium'
+          # action-setup recreates PNPM_HOME; keep package downloads outside it.
+          $env:NMEM_PNPM_STORE_DIR = Join-Path $env:USERPROFILE 'ci-cache\pnpm-store'
+          foreach ($name in @('RUSTUP_TOOLCHAIN','RUSTC_WRAPPER','SCCACHE_DIR','SCCACHE_CACHE_SIZE','SCCACHE_IDLE_TIMEOUT',
+            'SCCACHE_IGNORE_SERVER_IO_ERROR','CMAKE_C_COMPILER_LAUNCHER','CMAKE_CXX_COMPILER_LAUNCHER',
+            'CARGO_TARGET_DIR','XDG_CACHE_HOME','NMEM_PNPM_STORE_DIR')) {
+            "$name=$([Environment]::GetEnvironmentVariable($name))" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          }
       # The inline fragment bootstrap is pinned by its exact bytes in the CSP.
       # Windows checkout conversion must not rewrite those bytes to CRLF.
       - &preserve_windows_checkout_lf
@@ -722,12 +1044,10 @@ jobs:
           token: ${{ secrets.MEM_REPO_TOKEN }}
           ref: ${{ env.SOURCE_REF }}
           submodules: false
+          persist-credentials: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -736,46 +1056,57 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 11.22.0
+      # No `cache: pnpm` here, for the same tag-scope reason as the
+      # rust-cache note below: "pnpm cache is not found" on every sampled
+      # build-windows run, and the save added about a minute after the build.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@1.98.1
+        if: runner.environment != 'self-hosted'
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Initialize Rust path dependencies before cache restore
-        shell: pwsh
+      - &initialize_windows_path_dependencies
+        name: Initialize Rust path dependencies before cache restore
+        shell: bash
         run: |
-          "XDG_CACHE_HOME=$env:RUNNER_TEMP/nmem-pdfium-cache" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git `
-              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git `
-              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          set -euo pipefail
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/nmem-pdfium-cache" >> "$GITHUB_ENV"
+          if [[ -x scripts/init-release-rust-submodules.sh ]]; then
+            scripts/init-release-rust-submodules.sh --init-https
+          else
+            echo "::warning::Source ref predates the release submodule helper; using the legacy contract."
+            git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git \
+                -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
+                submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
+          fi
 
       # BoringSSL (boring-sys2) assembles its crypto with NASM. The pinned
       # windows-2022 image (MSVC 14.44, needed because 14.51 breaks ladybug's
       # C++ link) does not expose NASM on PATH, so install it explicitly.
       - uses: ilammy/setup-nasm@v1
+        if: runner.environment != 'self-hosted'
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run by
-          # dtolnay/rust-toolchain; caching it once poisoned every later run).
-          cache-bin: false
-          workspaces: |
-            nowledge-graph/src-tauri
-            nmem-rs
-          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
-          # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
-          key: windows-x86_64-v4-pdfium
+      # No Swatinem/rust-cache on the Windows critical path. Releases run on
+      # tag refs, and a GitHub Actions cache written by a tag run is visible
+      # only to that same tag, so a new release tag can only restore a cache
+      # written on main. Restore found nothing on every build-windows run
+      # sampled from 0.10.97-rc1 to 0.10.101-rc1 (jobs 113173922102,
+      # 113748960917, 114111958682, 114472171952, 114574744764, 114624893823,
+      # 114815304503), including 0.10.97-rc1 two days after a main-branch run
+      # (job 112261213691) saved one: 2+ GB entries do not survive the 10 GB
+      # repository cache budget. Each save still uploaded 2.2-2.65 GB and held
+      # the job 2-4.6 minutes after the installer was built. sccache on R2 is
+      # the compile cache that carries across tags.
 
       # A Cargo target cache can restore liteparse-pdfium-sys build output from
       # another runner. Point bundle staging at this runner's restored DLL when
       # it exists; otherwise invalidate only that package so the normal release
-      # build repopulates the exact locked PDFium runtime.
+      # build repopulates the exact locked PDFium runtime. This job no longer
+      # restores a target cache, so it takes the invalidate branch on an empty
+      # target dir (a few seconds); it stays as a guard if a cache returns.
       - name: Resolve or repair the PDFium runtime cache
         working-directory: nmem-rs
         shell: pwsh
@@ -795,16 +1126,25 @@ jobs:
 
       # sccache → R2 (see build-macos-arm64 for rationale). MSVC + cmake are
       # both sccache-cacheable; graceful local fallback on any backend error.
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+      - *setup_sccache
+      - *wait_before_sccache_retry
+      - *retry_setup_sccache
       - name: Point sccache at R2
+        if: runner.environment != 'self-hosted'
         shell: bash
         env:
           CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
         run: |
+          # Export the compiler wrappers only when sccache actually runs;
+          # a wrapper that does not exist would fail every compile.
+          if ! sccache --version; then
+            echo "::warning title=sccache unavailable::sccache setup failed twice; building without the compile cache (slower, identical output)."
+            exit 0
+          fi
           {
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -819,7 +1159,14 @@ jobs:
 
       - name: Install pnpm deps
         working-directory: nowledge-graph
-        run: pnpm install --frozen-lockfile --prefer-offline
+        shell: pwsh
+        run: |
+          $installArgs = @('install', '--frozen-lockfile', '--prefer-offline')
+          if ($env:NMEM_PNPM_STORE_DIR) {
+            $installArgs += @('--store-dir', $env:NMEM_PNPM_STORE_DIR)
+          }
+          & pnpm @installArgs
+          if ($LASTEXITCODE -ne 0) { throw "pnpm install failed ($LASTEXITCODE)" }
 
       # The hosted Windows image already includes LLVM/clang, CMake, and Ninja.
       # Install only protoc from its upstream GitHub release so a Chocolatey
@@ -880,12 +1227,49 @@ jobs:
           Set-Content -Path $scriptPath -Value $scriptContent -NoNewline -Encoding utf8
           Write-Host "Applied Windows PDFium runtime staging compatibility backport."
 
+      # Diagnostics for the Windows sccache miss floor (nowledge-co/mem#7108,
+      # W8). On 0.10.100-rc2, whose sources differ from rc1 in two crates,
+      # macOS and Linux missed 2 Rust compiles and this job missed 200 (job
+      # 114574744764). No Cargo-built Windows run since 0.10.93-rc3 has missed
+      # fewer than 200. The job log says how many missed, not which.
+      # Starting the daemon here with debug logging records one hit/miss line
+      # and hash key per compile, and the collection step after the build adds
+      # content hashes of the inputs sccache hashes (rlibs, proc-macro DLLs,
+      # native static libs, build-script outputs). Two runs' manifests then
+      # show which artifacts change between runs with unchanged sources.
+      # Only the daemon gets SCCACHE_LOG: compiler wrappers inherit the job
+      # env, and debug output on their stderr would reach Cargo. Remove both
+      # steps once the root cause is fixed.
+      - name: Start sccache daemon with debug logging (Windows miss diagnostics)
+        if: runner.environment != 'self-hosted' && env.RUSTC_WRAPPER == 'sccache'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          diag="$RUNNER_TEMP/sccache-diag"
+          mkdir -p "$diag"
+          sccache --stop-server >/dev/null 2>&1 || true
+          # Run 38556301085 had a non-empty daemon log but an empty
+          # events.txt. The likely cause is color: the daemon starts on a
+          # hidden console, so env_logger may add ANSI codes that defeat the
+          # patterns in the collection step. Disable color here; that step
+          # also strips any codes and prints raw counts.
+          RUST_LOG_STYLE=never SCCACHE_LOG=sccache=debug SCCACHE_LOG_MILLIS=1 \
+            SCCACHE_ERROR_LOG="$diag/daemon.log" sccache --start-server
+
+      - name: Prepare shared sccache diagnostics without restarting (Windows)
+        if: runner.environment == 'self-hosted'
+        continue-on-error: true
+        shell: powershell
+        run: |
+          & (Join-Path $env:USERPROFILE 'ci-tools\Prepare-CacheDiagnostics.ps1')
+
       - name: Build Rust backend bundle (Windows)
         working-directory: nowledge-graph
         shell: pwsh
         # Restore the Cargo entry point used by the successful v0.10.91-rc2
         # Windows build. Bazel validation lives in test-windows-bazel.yml.
-        run: .\scripts\build-rust-bundle.ps1 -Target x86_64-pc-windows-msvc
+        run: .\scripts\build-rust-bundle.ps1 -Channel production -Target x86_64-pc-windows-msvc
 
       - name: Build Tauri (NSIS)
         working-directory: nowledge-graph
@@ -897,21 +1281,112 @@ jobs:
         working-directory: nowledge-graph
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *.exe -Recurse | Select-Object -First 1
+          $bundleRoot = if ($env:CARGO_TARGET_DIR) { Join-Path $env:CARGO_TARGET_DIR "release/bundle/nsis" } else { "src-tauri/target/release/bundle/nsis" }
+          $exe = Get-ChildItem -Path $bundleRoot -Filter *.exe -Recurse | Select-Object -First 1
           if (-not $exe) { Write-Error "::error::No NSIS installer produced"; exit 1 }
           $out = Join-Path $env:RUNNER_TEMP "Nowledge Mem_${env:VERSION}_x64-setup.exe"
           Move-Item -Force $exe.FullName $out
           "exe=$out" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
+      # A nightly builds main, which may hold unreleased work: keep it off
+      # the public repository's downloadable workflow artifacts.
       - uses: actions/upload-artifact@v4
+        if: needs.meta.outputs.is_nightly != 'true'
         with:
           name: windows-x86_64
           path: ${{ steps.locate.outputs.exe }}
           if-no-files-found: error
           retention-days: 7
 
+      # Collection half of the Windows sccache miss diagnostics above. The
+      # repository is public, so the artifact holds only what the job log
+      # already exposes: unit names, hit/miss, hash keys, and content hashes.
+      # Compiler arguments and the raw daemon log stay on the runner.
+      - name: Collect sccache miss diagnostics (Windows)
+        if: always() && env.RUSTC_WRAPPER != ''
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          diag="$RUNNER_TEMP/sccache-diag"
+          out="$diag/out"
+          mkdir -p "$out"
+          log="$diag/daemon.log"
+          if [[ -n "${SCCACHE_DIAGNOSTIC_LOG:-}" ]]; then
+            shared_log="$(cygpath -u "$SCCACHE_DIAGNOSTIC_LOG")"
+            # Keep raw shared logs local; extract only this job's time window.
+            tail -c "+$(( ${SCCACHE_DIAGNOSTIC_OFFSET:-0} + 1 ))" "$shared_log" > "$diag/window.log"
+            log="$diag/window.log"
+            sccache --show-stats --stats-format json > "$out/stats-after.json"
+          fi
+          if [[ -s "$log" ]]; then
+            # Drop ANSI color codes and CRs in case the daemon still colored.
+            perl -pe 's/\e\[[0-9;]*m//g; s/\r$//' "$log" > "$diag/plain.log"
+            log="$diag/plain.log"
+            echo "raw daemon lines: $(wc -l < "$log"); hash keys: $(grep -c ': Hash key: ' "$log"); hits: $(grep -c ': Cache hit in ' "$log"); misses: $(grep -c ': Cache miss in ' "$log")"
+            # One line per daemon event, in log order: "<time> <unit> <event>
+            # <value>". <unit> is the Rust crate name or the C/C++ object
+            # name. For a Rust compile only Cargo's extra-filename is kept
+            # from the argument list, to tell feature variants of one crate
+            # apart; the hash key line follows it, then the hit/miss line.
+            ansi_escape=$(printf '\033')
+            sed -E "s/${ansi_escape}\\[[0-9;]*[mK]//g" "$log" | sed -nE '
+              s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: get_cached_or_compile: .*"extra-filename=([^"]+)".*/\1 \2 args \3/p
+              t
+              s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: get_cached_or_compile: .*/\1 \2 args -/p
+              t
+              s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: Hash key: ([0-9a-f]+).*/\1 \2 key \3/p
+              t
+              s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: Cache (hit|miss|none|recache) in ([0-9.]+) s.*/\1 \2 \3 \4/p
+              t
+              s/^\[([^ ]+) [A-Z]+ [^]]*\] \[([^]]+)\]: (Cache read error|Failed to decompress).*/\1 \2 cache-error -/p
+            ' > "$out/events.txt"
+            echo "events: $(awk '{print $3}' "$out/events.txt" | sort | uniq -c | tr '\n' ' ')"
+            if [[ -z "${SCCACHE_DIAGNOSTIC_LOG:-}" ]]; then
+              echo "::group::Compile units that missed the cache"
+              awk '$3 == "miss" {print $2}' "$out/events.txt" | sort | uniq -c
+              echo "::endgroup::"
+            else
+              echo "Shared cache events may include developer clients; unit names stay local."
+            fi
+          else
+            echo "::warning title=sccache diagnostics::No daemon debug log at $log"
+          fi
+          # Content hashes of every input sccache hashes into a Rust key, plus
+          # native objects, so a cross-run diff names the unstable artifact.
+          roots=(nmem-rs/target nowledge-graph/src-tauri/target)
+          if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then roots+=("$(cygpath -u "$CARGO_TARGET_DIR")"); fi
+          for root in "${roots[@]}"; do
+            [[ -d "$root" ]] || continue
+            find "$root" -type f \( \
+                \( -path '*/deps/*' \( -name '*.rlib' -o -name '*.dll' \) \) -o \
+                \( -path '*/build/*' \( -name '*.lib' -o -name '*.a' -o -name '*.obj' \
+                   -o -name '*.o' -o -name '*.rs' -o -name 'output' \) \) \) -print0 \
+              | xargs -0 -r sha256sum
+          done | sort -k2 > "$out/artifact-sha256.txt"
+          echo "artifact hashes: $(wc -l < "$out/artifact-sha256.txt")"
+
+      - name: Upload sccache miss diagnostics (Windows)
+        if: always() && runner.environment != 'self-hosted' && env.RUSTC_WRAPPER == 'sccache'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-sccache-diagnostics
+          path: ${{ runner.temp }}/sccache-diag/out
+          if-no-files-found: warn
+          retention-days: 14
+
   build-linux-deb-appimage:
+    if: ${{ inputs.windows_only != true }}
     needs: meta
+    # Builds every default Linux artifact (.deb, .AppImage, .rpm) from ONE
+    # backend bundle and ONE Tauri shell build, against one explicit runtime
+    # floor. Ubuntu 22.04 gives all three packages the supported GLIBC 2.35
+    # floor (Fedora 40 once raised the RPM to GLIBC_2.39/CXXABI_1.3.15, so it
+    # could not run on Fedora 39). Tauri's RPM bundler only archives the
+    # already-built ELF files and does not change their ABI, so the RPM is
+    # bundled here from the same binaries instead of in a duplicate job that
+    # rebuilt the backend and shell from scratch.
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     env:
@@ -926,11 +1401,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -945,7 +1417,7 @@ jobs:
             patchelf zstd build-essential curl wget file \
             libfuse2 \
             cmake clang libclang-dev pkg-config protobuf-compiler \
-            gcc-12 g++-12
+            gcc-12 g++-12 rpm cpio
           # ladybug's bundled simsimd uses AVX512-FP16 (__m512h); ubuntu-22.04's
           # default gcc-11 lacks the intrinsic type (docker's gcc-12 compiles it
           # fine, and the Fedora rpm job's gcc-14 too). Make gcc-12 the default
@@ -956,6 +1428,8 @@ jobs:
           sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-12 100
           # cmake/clang/libclang/pkg-config: native Rust backend toolchain
           # (llama.cpp / ladybug / bindgen). build-essential is already above.
+          # rpm/cpio: rpm2cpio + cpio let verify-linux-package.sh inspect the
+          # RPM payload. Tauri itself writes the RPM in-process (rpm-rs).
           # libfuse2: required to run `linuxdeploy-plugin-appimage`'s
           # AppImage during Tauri's AppImage bundling step. ubuntu-22.04
           # GH runner images used to ship libfuse2 pre-installed; the
@@ -969,8 +1443,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@1.98.1
 
@@ -983,21 +1455,12 @@ jobs:
               -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
               submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run by
-          # dtolnay/rust-toolchain; caching it once poisoned every later run).
-          cache-bin: false
-          workspaces: |
-            nowledge-graph/src-tauri
-            nmem-rs
-          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
-          # -v2 (2026-06-27): invalidate stale-nmem-server cache poison (see macos-aarch64-v3).
-          key: linux-deb-appimage-v4-pdfium
+      # No target cache: see build-macos-arm64 (it never restores on tag runs).
 
       # sccache → R2 (see build-macos-arm64 for rationale).
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+      - *setup_sccache
+      - *wait_before_sccache_retry
+      - *retry_setup_sccache
       - name: Point sccache at R2
         shell: bash
         env:
@@ -1005,7 +1468,14 @@ jobs:
           R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
         run: |
+          # Export the compiler wrappers only when sccache actually runs;
+          # a wrapper that does not exist would fail every compile.
+          if ! sccache --version; then
+            echo "::warning title=sccache unavailable::sccache setup failed twice; building without the compile cache (slower, identical output)."
+            exit 0
+          fi
           {
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -1038,7 +1508,7 @@ jobs:
 
       - name: Build Rust backend bundle (Linux x86_64)
         working-directory: nowledge-graph
-        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --bazel-public-binaries --bazel-hawdb-server
+        run: ./scripts/build-rust-bundle.sh --channel production --target x86_64-unknown-linux-gnu --bazel-public-binaries
 
       - name: Build .deb + .AppImage (Tauri native)
         working-directory: nowledge-graph
@@ -1075,7 +1545,19 @@ jobs:
           ./scripts/verify-linux-package.sh "${{ steps.locate.outputs.deb }}"
           ./scripts/verify-linux-package.sh "${{ steps.locate.outputs.appimage }}"
 
+      # The scriptable part of the rc smoke, on the artifact this job built:
+      # boot the packaged nmem-server in proven isolation (scratch roots, heal
+      # disabled, open-file proof), assert version + build_sha, write, read
+      # back, lexical search, negative control, restart persistence. It runs
+      # BEFORE the artifact upload, so a failure leaves the rc without its
+      # Linux packages and therefore not promotable. Semantic search and the
+      # release's headline claim stay with the human smoke.
+      - *smoke_packaged_backend
+
+      # A nightly builds main, which may hold unreleased work: keep it off
+      # the public repository's downloadable workflow artifacts.
       - uses: actions/upload-artifact@v4
+        if: needs.meta.outputs.is_nightly != 'true'
         with:
           name: linux-deb-appimage
           path: |
@@ -1084,157 +1566,71 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  build-linux-rpm:
-    needs: meta
-    # Build every default Linux artifact against one explicit runtime floor.
-    # Fedora 40 raised the RPM to GLIBC_2.39/CXXABI_1.3.15, so it could not run
-    # on Fedora 39 (GLIBC 2.38) even though the Ubuntu-built AppImage/DEB could.
-    # Ubuntu 22.04 gives all three packages the supported GLIBC 2.35 floor;
-    # rpmbuild only creates the archive and does not change the ELF ABI.
-    runs-on: ubuntu-22.04
-    timeout-minutes: 180
-    env:
-      VERSION: ${{ needs.meta.outputs.version }}
-      SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
-    steps:
-      - name: Checkout private source (nowledge-co/mem)
-        uses: actions/checkout@v4
-        with:
-          repository: nowledge-co/mem
-          token: ${{ secrets.MEM_REPO_TOKEN }}
-          ref: ${{ env.SOURCE_REF }}
-          submodules: false
-
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
-
-      - *setup_desktop_python
-
-      - *restore_desktop_release_lock
-
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libssl-dev libgtk-3-dev \
-            librsvg2-dev libayatana-appindicator3-dev libxdo-dev \
-            patchelf zstd build-essential curl wget file \
-            cmake clang libclang-dev pkg-config protobuf-compiler \
-            gcc-12 g++-12 rpm cpio
-          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100
-          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100
-          sudo update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-12 100
-          sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-12 100
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11.22.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-          cache-dependency-path: nowledge-graph/pnpm-lock.yaml
-
-      - uses: dtolnay/rust-toolchain@1.98.1
-
-      - name: Initialize Rust path dependencies before cache restore
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "XDG_CACHE_HOME=$RUNNER_TEMP/nmem-pdfium-cache" >> "$GITHUB_ENV"
-          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git \
-              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
-              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # Do NOT cache ~/.cargo/bin/ (small, rebuilt fresh each run by
-          # dtolnay/rust-toolchain; caching it once poisoned every later run).
-          cache-bin: false
-          workspaces: |
-            nowledge-graph/src-tauri
-            nmem-rs
-          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
-          # Separate from the retired Fedora-40 ABI and stale binary caches.
-          key: linux-rpm-ubuntu22-v3-pdfium
-
-      # sccache → R2 (see build-macos-arm64 for rationale).
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-      - name: Point sccache at R2
-        shell: bash
-        env:
-          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-          R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
-        run: |
-          {
-            echo "RUSTC_WRAPPER=sccache"
-            echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
-            echo "SCCACHE_IDLE_TIMEOUT=0"
-            echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
-            echo "SCCACHE_GHA_ENABLED=false"
-            echo "SCCACHE_BUCKET=nowledge-mem-sccache"
-            echo "SCCACHE_REGION=auto"
-            echo "SCCACHE_ENDPOINT=https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
-            echo "AWS_ACCESS_KEY_ID=${R2_KEY}"
-            echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET}"
-          } >> "$GITHUB_ENV"
-
-      - name: Install pnpm deps
-        working-directory: nowledge-graph
-        run: pnpm install --frozen-lockfile --prefer-offline
-
-      - name: Set up Bazel
-        uses: bazel-contrib/setup-bazel@0.19.0
-        with:
-          bazelisk-cache: true
-          repository-cache: true
-
-      - name: Authenticate Bazel remote cache
+      # RPM from the binaries above. `tauri bundle` reuses the release shell
+      # and the staged rust-backend; it does not rebuild the frontend or the
+      # Rust code. rpm-rs compression is slow at every algorithm and level
+      # (tauri-apps/tauri#13273), so the RPM payload is stored uncompressed.
+      # nowledge-co/mem#7113 sets that in tauri.linux.conf.json, but a source
+      # ref cut before it (release/0.10.102 at v0.10.102-rc1) still says gzip
+      # level 1, and that bundling ran past 45 minutes and shipped no RPM.
+      # So this step forces { "type": "none" } with --config (a JSON merge
+      # patch applied last, over the platform config) whatever the source
+      # says; uncompressed it takes seconds. "level": null is required: the
+      # merge is recursive, so without it an old source's gzip level stays
+      # and RpmCompression's deny_unknown_fields rejects {type: none, level: 1}
+      # (checked with tauri-cli 2.11.4 against both configs). Even a pre-#7113 payload (every binary twice) stays
+      # under GitHub's 2 GiB release-asset limit uncompressed (~1.5 GB).
+      #
+      # The RPM steps run after the DEB/AppImage artifact is saved and use
+      # continue-on-error, so an RPM failure never blocks the core Linux
+      # artifacts (RPM promotion is deferred; see promote-rpm-to-ga.yml).
+      # It is never silent: the `linux-rpm` artifact is then absent, so
+      # prerelease-upload-linux-rpm fails and direct-GA `publish` refuses
+      # before any public write ("Missing artifact").
+      - name: Build, locate, and verify native .rpm (Tauri bundle)
+        id: rpm
         continue-on-error: true
-        uses: google-github-actions/auth@v3
-        with:
-          project_id: ${{ env.GCP_BAZEL_CACHE_PROJECT_ID }}
-          workload_identity_provider: ${{ env.GCP_BAZEL_CACHE_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.GCP_BAZEL_CACHE_SERVICE_ACCOUNT }}
-
-      - name: Build Rust backend bundle (Linux x86_64)
-        working-directory: nowledge-graph
-        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --bazel-public-binaries --bazel-hawdb-server
-
-      - name: Build native .rpm (Tauri rpmbuild)
-        # Tauri's rpm-rs compression is universally slow regardless of
-        # algorithm; tauri.linux.conf.json sets compression: { type: "none" }
-        # to bypass it. See feedback memory + tauri-apps/tauri#13273.
-        working-directory: nowledge-graph
-        run: npm run tauri build -- --bundles rpm
-
-      - name: Locate .rpm
-        id: locate
+        timeout-minutes: 20
         working-directory: nowledge-graph
         shell: bash
         run: |
           set -euo pipefail
-          RPM="$(find src-tauri/target/release/bundle/rpm -name '*.rpm' -print -quit)"
-          [[ -f "$RPM" ]] || { echo "::error::No .rpm produced"; exit 1; }
-          OUT="$RUNNER_TEMP/$(basename "$RPM")"
-          mv -f "$RPM" "$OUT"
+          RPM_DIR=src-tauri/target/release/bundle/rpm
+          rm -rf "$RPM_DIR"
+          pnpm run tauri bundle --bundles rpm \
+            --config '{"bundle":{"linux":{"rpm":{"compression":{"type":"none","level":null}}}}}'
+          mapfile -t rpms < <(find "$RPM_DIR" -name '*.rpm' -type f)
+          if [[ "${#rpms[@]}" != "1" ]]; then
+            echo "::error::Expected exactly one .rpm; found ${#rpms[@]}"
+            exit 1
+          fi
+          OUT="$RUNNER_TEMP/$(basename "${rpms[0]}")"
+          mv -f "${rpms[0]}" "$OUT"
+          echo "RPM size: $(stat -c %s "$OUT") bytes ($OUT)"
+          ./scripts/verify-linux-package.sh "$OUT"
           echo "rpm=$OUT" >> "$GITHUB_OUTPUT"
 
-      - name: Verify Linux payloads and ABI floor
-        working-directory: nowledge-graph
-        run: ./scripts/verify-linux-package.sh "${{ steps.locate.outputs.rpm }}"
+      - name: Report RPM failure
+        if: steps.rpm.outcome != 'success'
+        run: |
+          echo "::error::RPM build or verification failed; the linux-rpm artifact is not uploaded. DEB/AppImage artifacts are unaffected."
 
       - uses: actions/upload-artifact@v4
+        if: steps.rpm.outcome == 'success' && needs.meta.outputs.is_nightly != 'true'
         with:
           name: linux-rpm
-          path: ${{ steps.locate.outputs.rpm }}
+          path: ${{ steps.rpm.outputs.rpm }}
           if-no-files-found: error
           retention-days: 7
+
+      # A release learns about a failed RPM from the missing artifact (the
+      # prerelease upload or publish fails). A nightly uploads nothing, so it
+      # fails this job instead of staying green.
+      - name: Fail the nightly on an RPM failure
+        if: steps.rpm.outcome != 'success' && needs.meta.outputs.is_nightly == 'true'
+        run: |
+          echo "::error::Nightly: the RPM build or verification failed (see 'Build, locate, and verify native .rpm')."
+          exit 1
 
   # =======================================================================
   # OPTIONAL -vulkan GPU variant jobs (Windows + Linux only).
@@ -1263,11 +1659,14 @@ jobs:
     needs: meta
     if: ${{ needs.meta.outputs.run_vulkan == 'true' }}
     runs-on: windows-2022
-    timeout-minutes: 180
+    # 300, not 180: see build-windows.
+    timeout-minutes: 300
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
       IS_DRY_RUN: ${{ needs.meta.outputs.is_dry_run }}
+      # Deterministic MSVC links: see build-windows.
+      LINK: /Brepro
     steps:
       - *preserve_windows_checkout_lf
 
@@ -1279,11 +1678,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -1295,41 +1691,23 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Initialize Rust path dependencies before cache restore
-        shell: pwsh
-        run: |
-          "XDG_CACHE_HOME=$env:RUNNER_TEMP/nmem-pdfium-cache" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git `
-              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git `
-              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - *initialize_windows_path_dependencies
 
       # BoringSSL (boring-sys2) assembles its crypto with NASM. The pinned
       # windows-2022 image (MSVC 14.44, needed because 14.51 breaks ladybug's
       # C++ link) does not expose NASM on PATH, so install it explicitly.
       - uses: ilammy/setup-nasm@v1
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-          workspaces: |
-            nowledge-graph/src-tauri
-            nmem-rs
-          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
-          # Separate cache key from the CPU windows job: the GPU feature pulls
-          # in the GGML Vulkan backend, so the compiled artifacts differ and
-          # must not share/poison the CPU build cache.
-          key: windows-x86_64-vulkan-v3-pdfium
+      # No target cache: see build-macos-arm64 (it never restores on tag runs).
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+      - *setup_sccache
+      - *wait_before_sccache_retry
+      - *retry_setup_sccache
       - name: Point sccache at R2
         shell: bash
         env:
@@ -1337,7 +1715,30 @@ jobs:
           R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
         run: |
+          # Force the Ninja generator for ALL CMake invocations from the
+          # `cmake` Rust crate (llama-cpp-sys-2). This is the load-bearing fix
+          # for the -vulkan build: ggml-vulkan builds `vulkan-shaders-gen` as a
+          # nested ExternalProject_Add, and an ExternalProject inherits the
+          # PARENT's generator. With the default Visual Studio generator the
+          # nested host-tool TryCompile runs parallel CL.exe writing one shared
+          # vc145.pdb -> `error C1041 ... please use /FS` -> CMake declares the
+          # C compiler "broken" -> no cmake_install.cmake -> "Not a file". Ninja
+          # writes per-object PDBs and runs no MSBuild PDB race, so both the
+          # parent and the inherited nested build configure cleanly. Ninja with
+          # MSVC needs the dev environment active (cl.exe + INCLUDE/LIB), set up
+          # by the ilammy/msvc-dev-cmd step below. Scoped to this -vulkan job;
+          # the CPU windows job is untouched.
+          # Exported before the sccache check: this job needs Ninja with or
+          # without the compile cache.
+          echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
+          # Export the compiler wrappers only when sccache actually runs;
+          # a wrapper that does not exist would fail every compile.
+          if ! sccache --version; then
+            echo "::warning title=sccache unavailable::sccache setup failed twice; building without the compile cache (slower, identical output)."
+            exit 0
+          fi
           {
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -1348,20 +1749,6 @@ jobs:
             echo "SCCACHE_ENDPOINT=https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
             echo "AWS_ACCESS_KEY_ID=${R2_KEY}"
             echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET}"
-            # Force the Ninja generator for ALL CMake invocations from the
-            # `cmake` Rust crate (llama-cpp-sys-2). This is the load-bearing fix
-            # for the -vulkan build: ggml-vulkan builds `vulkan-shaders-gen` as a
-            # nested ExternalProject_Add, and an ExternalProject inherits the
-            # PARENT's generator. With the default Visual Studio generator the
-            # nested host-tool TryCompile runs parallel CL.exe writing one shared
-            # vc145.pdb -> `error C1041 ... please use /FS` -> CMake declares the
-            # C compiler "broken" -> no cmake_install.cmake -> "Not a file". Ninja
-            # writes per-object PDBs and runs no MSBuild PDB race, so both the
-            # parent and the inherited nested build configure cleanly. Ninja with
-            # MSVC needs the dev environment active (cl.exe + INCLUDE/LIB), set up
-            # by the ilammy/msvc-dev-cmd step below. Scoped to this -vulkan job;
-            # the CPU windows job is untouched.
-            echo "CMAKE_GENERATOR=Ninja"
           } >> "$GITHUB_ENV"
 
       - name: Install pnpm deps
@@ -1426,7 +1813,7 @@ jobs:
       - name: Build Rust backend bundle (Windows, Vulkan)
         working-directory: nowledge-graph
         shell: pwsh
-        run: .\scripts\build-rust-bundle.ps1 -Target x86_64-pc-windows-msvc -Gpu vulkan
+        run: .\scripts\build-rust-bundle.ps1 -Channel production -Target x86_64-pc-windows-msvc -Gpu vulkan
 
       - name: Build Tauri (NSIS)
         working-directory: nowledge-graph
@@ -1510,11 +1897,8 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - *load_private_hawdb_deploy_key
-      - *authorize_private_hawdb
-
-      - *resolve_private_desktop_dependency
-      - *checkout_private_desktop_dependency
+      - *resolve_hawdb_dependency
+      - *checkout_hawdb_dependency
 
       - *setup_desktop_python
 
@@ -1569,8 +1953,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: nowledge-graph/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@1.98.1
 
@@ -1583,19 +1965,11 @@ jobs:
               -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
               submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-          workspaces: |
-            nowledge-graph/src-tauri
-            nmem-rs
-          cache-directories: ${{ runner.temp }}/nmem-pdfium-cache/pdfium-rs
-          # Separate cache key from the CPU linux job (GPU feature -> different
-          # compiled artifacts; must not poison the CPU build cache).
-          key: linux-vulkan-v3-pdfium
+      # No target cache: see build-macos-arm64 (it never restores on tag runs).
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+      - *setup_sccache
+      - *wait_before_sccache_retry
+      - *retry_setup_sccache
       - name: Point sccache at R2
         shell: bash
         env:
@@ -1603,7 +1977,14 @@ jobs:
           R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
         run: |
+          # Export the compiler wrappers only when sccache actually runs;
+          # a wrapper that does not exist would fail every compile.
+          if ! sccache --version; then
+            echo "::warning title=sccache unavailable::sccache setup failed twice; building without the compile cache (slower, identical output)."
+            exit 0
+          fi
           {
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -1636,7 +2017,7 @@ jobs:
 
       - name: Build Rust backend bundle (Linux x86_64, Vulkan)
         working-directory: nowledge-graph
-        run: ./scripts/build-rust-bundle.sh --target x86_64-unknown-linux-gnu --gpu vulkan --bazel-public-binaries
+        run: ./scripts/build-rust-bundle.sh --channel production --target x86_64-unknown-linux-gnu --gpu vulkan --bazel-public-binaries
 
       - name: Build .deb + .AppImage (Tauri native)
         working-directory: nowledge-graph
@@ -1815,7 +2196,7 @@ jobs:
       artifact_name: linux-deb-appimage
 
   prerelease-upload-linux-rpm:
-    needs: [meta, prerelease-prepare, build-linux-rpm]
+    needs: [meta, prerelease-prepare, build-linux-deb-appimage]
     if: needs.meta.outputs.is_dry_run == 'true'
     uses: ./.github/workflows/upload-prerelease-desktop-artifact.yml
     with:
@@ -1861,7 +2242,6 @@ jobs:
       - build-macos-x86_64
       - build-windows
       - build-linux-deb-appimage
-      - build-linux-rpm
     if: needs.meta.outputs.run_publish == 'true'
     runs-on: ubuntu-22.04
     environment: release-publish
@@ -1931,8 +2311,9 @@ jobs:
           node-version: "22"
 
       - name: Install mem-backbone npm deps
-        working-directory: mem-backbone
-        run: npm ci --no-audit --no-fund
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm ci --prefix mem-backbone --no-audit --no-fund
 
       - name: Pre-flight desktop version and APT policy
         env:
@@ -2049,6 +2430,10 @@ jobs:
         working-directory: mem-backbone
         if: ${{ !inputs.allow_newer_desktop_latest }}
         run: node scripts/update-apt-repo.cjs "$VERSION" "${{ steps.paths.outputs.deb }}"
+
+      - name: Publish APT landing
+        if: ${{ !inputs.allow_newer_desktop_latest }}
+        run: node scripts/publish-apt-landing.mjs
 
       - name: Verify download delivery (R2 + optional APT + Worker)
         working-directory: mem-backbone
@@ -2185,3 +2570,69 @@ jobs:
           echo "- R2 prefix:  app/$VERSION/"                     >> "$GITHUB_STEP_SUMMARY"
           echo "- GH release: v$VERSION (draft, on this repo)"   >> "$GITHUB_STEP_SUMMARY"
           echo "- Updater:    latest/update delivery verified"    >> "$GITHUB_STEP_SUMMARY"
+
+  # -----------------------------------------------------------------------
+  # Nightly report: one tracking issue in THIS repository. A failed nightly
+  # opens it (or comments on the open one); the next green nightly comments
+  # and closes it. Its token can only touch issues. Release runs never reach
+  # this job: the condition is the nightly concurrency selector.
+  # -----------------------------------------------------------------------
+  nightly-report:
+    needs:
+      - meta
+      - build-macos-arm64
+      - build-macos-x86_64
+      - build-windows
+      - build-linux-deb-appimage
+    if: ${{ always() && inputs.tag == 'nightly' && inputs.windows_only != true }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      SOURCE_REF: ${{ needs.meta.outputs.source_ref }}
+      RESULT_META: ${{ needs.meta.result }}
+      RESULT_MACOS_ARM64: ${{ needs.build-macos-arm64.result }}
+      RESULT_MACOS_X86_64: ${{ needs.build-macos-x86_64.result }}
+      RESULT_WINDOWS: ${{ needs.build-windows.result }}
+      RESULT_LINUX: ${{ needs.build-linux-deb-appimage.result }}
+    steps:
+      - name: Report the nightly result
+        run: |
+          set -euo pipefail
+          TITLE="Nightly release-shape build is failing"
+          table="| job | result |"$'\n'"| --- | --- |"
+          failed="false"
+          for pair in "meta:$RESULT_META" \
+                      "build-macos-arm64:$RESULT_MACOS_ARM64" \
+                      "build-macos-x86_64:$RESULT_MACOS_X86_64" \
+                      "build-windows:$RESULT_WINDOWS" \
+                      "build-linux-deb-appimage (+ RPM):$RESULT_LINUX"; do
+            job="${pair%%:*}"; result="${pair#*:}"
+            table+=$'\n'"| ${job} | ${result} |"
+            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then failed="true"; fi
+          done
+          {
+            echo "### Nightly release-shape result"
+            echo "Source: nowledge-co/mem @ \`${SOURCE_REF:-unresolved}\`, version label \`${VERSION:-unresolved}\`"
+            echo
+            echo "$table"
+          } >> "$GITHUB_STEP_SUMMARY"
+          open_issue="$(gh issue list -R "$REPO" --state open --search "in:title \"${TITLE}\"" \
+            --json number,title | jq -r --arg t "$TITLE" '[.[] | select(.title == $t)][0].number // empty')"
+          body="Nightly release-shape build of nowledge-co/mem @ \`${SOURCE_REF:-unresolved}\` (\`${VERSION:-unresolved}\`): ${RUN_URL}"$'\n\n'"${table}"
+          if [[ "$failed" == "true" ]]; then
+            if [[ -n "$open_issue" ]]; then
+              gh issue comment "$open_issue" -R "$REPO" --body "Still failing. ${body}"
+            else
+              gh issue create -R "$REPO" --title "$TITLE" --body "${body}"$'\n\n'"Fix the source or this workflow before the next release; the next green nightly closes this issue."
+            fi
+            echo "::error::Nightly release-shape build failed: ${RUN_URL}"
+          elif [[ -n "$open_issue" ]]; then
+            gh issue comment "$open_issue" -R "$REPO" --body "Passing again. ${body}"
+            gh issue close "$open_issue" -R "$REPO"
+          fi

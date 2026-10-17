@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "nowledge-mem-desktop-update-operator",
+  "main": "scripts/desktop-update-operator-worker.mjs",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["rpc", "fetcher_no_get_put_delete"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "secrets_store_secrets": [
+    {
+      "binding": "DESKTOP_UPDATE_OPERATOR_TOKENS_STORE",
+      "store_id": "92a61a98dffc4a1eb7f6220d7332a713",
+      "secret_name": "nmem_backbone__production__desktop_update_operators__v1"
+    }
+  ]
+}

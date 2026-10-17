@@ -65,6 +65,7 @@ jobs:
       source_ref: ${{ steps.v.outputs.source_ref }}
       source_sha: ${{ steps.sha.outputs.source_sha }}
       push_latest: ${{ steps.v.outputs.push_latest }}
+      is_prerelease: ${{ steps.v.outputs.is_prerelease }}
     steps:
       - id: v
         run: |
@@ -83,12 +84,17 @@ jobs:
             exit 1
           fi
           # Pre-release tags must NOT mark :latest.
+          IS_PRERELEASE="false"
           if [[ "$VERSION" == *-* || "$VERSION" == *.dev* ]]; then
             PUSH_LATEST="false"
+            IS_PRERELEASE="true"
           fi
-          echo "version=$VERSION"        >> "$GITHUB_OUTPUT"
-          echo "source_ref=$SOURCE_REF"  >> "$GITHUB_OUTPUT"
-          echo "push_latest=$PUSH_LATEST" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$VERSION"
+            echo "source_ref=$SOURCE_REF"
+            echo "push_latest=$PUSH_LATEST"
+            echo "is_prerelease=$IS_PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
 
       # Resolve the source commit once, so both arch builds bake the same
       # build-provenance sha into nmem-server (the build context has no .git).
@@ -166,6 +172,19 @@ jobs:
           platforms: linux/amd64
           build-args: |
             NMEM_BUILD_SHA_FULL=${{ needs.meta.outputs.source_sha }}
+          # Rust/C++ compile cache: the same sccache R2 bucket release-desktop
+          # uses. The registry layer cache cannot help the cargo step (the source
+          # COPY busts it on every release), so without this every rc compiled
+          # the whole dependency graph from scratch. Passed as BuildKit secrets,
+          # never build args: secrets stay out of image layers and out of the
+          # mode=max provenance, and do not affect layer cache keys. Source refs
+          # whose Dockerfile predates `with-sccache` ignore them and build
+          # uncached, exactly as before.
+          secrets: &sccache_secrets |
+            sccache_bucket=nowledge-mem-sccache
+            sccache_endpoint=https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+            sccache_access_key_id=${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+            sccache_secret_access_key=${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
           push: true
           provenance: mode=max
           sbom: true
@@ -225,6 +244,7 @@ jobs:
           platforms: linux/arm64
           build-args: |
             NMEM_BUILD_SHA_FULL=${{ needs.meta.outputs.source_sha }}
+          secrets: *sccache_secrets
           push: true
           provenance: mode=max
           sbom: true
@@ -240,13 +260,17 @@ jobs:
   # its `publish` manifest job, so it never blocks or alters the CPU release. The
   # binary's runtime auto-detects the GPU and falls back to CPU, so the image is
   # usable without --gpus, just slower.
+  #
+  # Runs on rc tags too, in parallel with the desktop build, so GA promotion
+  # re-tags `:<rc>-cuda` instead of rebuilding it (promote-gpu-variant.yml).
+  # A pre-release pushes ONLY the exact rc-scoped tag `:<rc>-cuda`; the
+  # floating `:<X.Y>-cuda` tag moves only for a clean GA version. GPU images
+  # are never `:latest`.
   build-cuda:
     needs: meta
-    # Build the ~3GB GPU image only on GA (push_latest=true → non-prerelease tag)
-    # or a manual dispatch — NOT on every rc. rc-stage GPU verification is done
-    # locally on a GPU host; the published `:cuda` tag is reserved for GA/on-demand.
-    if: ${{ needs.meta.outputs.push_latest == 'true' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
+    env:
+      VARIANT: cuda
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -277,14 +301,24 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - id: tags
+      - &gpu_tags
+        name: Resolve GPU image tags
+        id: tags
+        env:
+          V: ${{ needs.meta.outputs.version }}
+          PUSH_LATEST: ${{ needs.meta.outputs.push_latest }}
         run: |
           set -euo pipefail
-          V="${{ needs.meta.outputs.version }}"
-          MINOR="${V%.*}"
-          # CUDA image is never :latest (no arm64 + GPU is opt-in). A pre-release
-          # version already carries a dash (0.10.0-rc1 -> 0.10.0-rc1-cuda).
-          echo "list=${IMAGE}:${V}-cuda,${IMAGE}:${MINOR}-cuda" >> "$GITHUB_OUTPUT"
+          # GPU images are never :latest (amd64-only + GPU is opt-in). A
+          # pre-release version already carries a dash (0.10.0-rc1 ->
+          # 0.10.0-rc1-cuda). Only a GA allowed to move :latest moves the floating
+          # :<X.Y>-<variant>; `${V%.*}` of an rc is the GA minor line (0.10).
+          if [[ "$PUSH_LATEST" == "true" ]]; then
+            MINOR="${V%.*}"
+            echo "list=${IMAGE}:${V}-${VARIANT},${IMAGE}:${MINOR}-${VARIANT}" >> "$GITHUB_OUTPUT"
+          else
+            echo "list=${IMAGE}:${V}-${VARIANT}" >> "$GITHUB_OUTPUT"
+          fi
       - id: build
         uses: docker/build-push-action@v6
         with:
@@ -293,6 +327,7 @@ jobs:
           platforms: linux/amd64
           build-args: |
             NMEM_BUILD_SHA_FULL=${{ needs.meta.outputs.source_sha }}
+          secrets: *sccache_secrets
           push: true
           provenance: mode=max
           sbom: true
@@ -303,13 +338,26 @@ jobs:
           cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:cuda-amd64
           cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:cuda-amd64,mode=max
 
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign GPU image (keyless via OIDC)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Sign the digest at build time, like the CPU manifest. GA promotion
+          # re-tags this same digest and verifies this signature first.
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
   build-vulkan:
     needs: meta
-    # Vulkan GPU image (AMD/Intel via Mesa, NVIDIA via the Vulkan ICD). Same gate
-    # as :cuda — GA or manual dispatch only, NOT every rc. Independent of the CPU
-    # publish/manifest job (separate :<ver>-vulkan tag, never folded into :latest).
-    if: ${{ needs.meta.outputs.push_latest == 'true' || github.event_name == 'workflow_dispatch' }}
+    # Vulkan GPU image (AMD/Intel via Mesa, NVIDIA via the Vulkan ICD). Same
+    # schedule and tag policy as :cuda — built on rc tags so GA promotion is a
+    # re-tag. Independent of the CPU publish/manifest job (separate
+    # :<ver>-vulkan tag, never folded into :latest).
     runs-on: ubuntu-latest
+    env:
+      VARIANT: vulkan
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -340,14 +388,7 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - id: tags
-        run: |
-          set -euo pipefail
-          V="${{ needs.meta.outputs.version }}"
-          MINOR="${V%.*}"
-          # Vulkan image is never :latest (amd64-only + GPU is opt-in). A
-          # pre-release version already carries a dash (0.10.0-rc1 -> -rc1-vulkan).
-          echo "list=${IMAGE}:${V}-vulkan,${IMAGE}:${MINOR}-vulkan" >> "$GITHUB_OUTPUT"
+      - *gpu_tags
       - id: build
         uses: docker/build-push-action@v6
         with:
@@ -356,6 +397,7 @@ jobs:
           platforms: linux/amd64
           build-args: |
             NMEM_BUILD_SHA_FULL=${{ needs.meta.outputs.source_sha }}
+          secrets: *sccache_secrets
           push: true
           provenance: mode=max
           sbom: true
@@ -365,6 +407,17 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:vulkan-amd64
           cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:vulkan-amd64,mode=max
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign GPU image (keyless via OIDC)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Sign the digest at build time, like the CPU manifest. GA promotion
+          # re-tags this same digest and verifies this signature first.
+          cosign sign --yes "${IMAGE}@${DIGEST}"
 
   publish:
     needs: [meta, build-amd64, build-arm64]
@@ -384,12 +437,18 @@ jobs:
           set -euo pipefail
           V="${{ needs.meta.outputs.version }}"
           MINOR="${V%.*}"
+          # Floating tags (:latest, :X.Y) are GA pointers. Only a GA that is
+          # allowed to move :latest moves them; an rc (push_latest forced
+          # false in meta) or an older out-of-band GA pushes only its own
+          # immutable :<version>. `${V%.*}` of 0.10.80-rc1 is 0.10, so without
+          # this gate every rc moved :0.10.
           {
             echo "primary=${IMAGE}:${V}"
-            echo "minor=${IMAGE}:${MINOR}"
             if [[ "${{ needs.meta.outputs.push_latest }}" == "true" ]]; then
+              echo "minor=${IMAGE}:${MINOR}"
               echo "latest=${IMAGE}:latest"
             else
+              echo "minor="
               echo "latest="
             fi
           } >> "$GITHUB_OUTPUT"
@@ -401,8 +460,10 @@ jobs:
           ARM="${IMAGE}@${{ needs.build-arm64.outputs.digest }}"
           declare -a TAGS=(
             "${{ steps.tags.outputs.primary }}"
-            "${{ steps.tags.outputs.minor }}"
           )
+          if [[ -n "${{ steps.tags.outputs.minor }}" ]]; then
+            TAGS+=( "${{ steps.tags.outputs.minor }}" )
+          fi
           if [[ -n "${{ steps.tags.outputs.latest }}" ]]; then
             TAGS+=( "${{ steps.tags.outputs.latest }}" )
           fi
@@ -434,9 +495,23 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
+      # The scriptable rc smoke probe, from the exact commit the image was
+      # built from. Only this one file: the verify job needs no build tree.
+      - name: Fetch the release smoke probe
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ needs.meta.outputs.source_sha }}
+          path: mem-src
+          fetch-depth: 1
+          sparse-checkout: scripts/release_smoke_probe.py
+          sparse-checkout-cone-mode: false
+
       - name: Pull and smoke-test
         env:
           TAG: ${{ needs.meta.outputs.version }}
+          SOURCE_SHA: ${{ needs.meta.outputs.source_sha }}
         run: |
           set -euo pipefail
           docker pull "${IMAGE}:${TAG}"
@@ -479,6 +554,33 @@ jobs:
           else:
               raise AssertionError(f"version mismatch: binary={v} tag={t}")
           '
+
+          # Scriptable rc smoke: build_sha, write, read back, lexical search,
+          # negative control, then restart the container and read back again.
+          # Isolation is the container itself: freshly created, no host bind
+          # mounts (asserted), so it can only see its own empty data volume.
+          PROBE=mem-src/scripts/release_smoke_probe.py
+          if [[ ! -f "$PROBE" ]]; then
+            echo "::warning title=Release smoke skipped::The source commit predates scripts/release_smoke_probe.py; smoke this image by hand before promoting."
+            exit 0
+          fi
+          BINDS=$(docker inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}} {{end}}{{end}}' "$CID")
+          if [[ -n "$BINDS" ]]; then
+            echo "::error::smoke container has host bind mounts ($BINDS); refusing to write test data"
+            exit 1
+          fi
+          probe() {
+            python3 "$PROBE" "$1" --base-url http://127.0.0.1:14242 \
+              --expect-version "$TAG" --expect-sha "$SOURCE_SHA" \
+              --state "$RUNNER_TEMP/smoke-state.json"
+          }
+          probe write || { echo "::error::release smoke failed (write phase); this image is not promotable"; exit 1; }
+          docker restart "$CID" >/dev/null
+          for _ in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:14242/health >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          probe reread || { echo "::error::release smoke failed after restart; this image is not promotable"; exit 1; }
 
       - uses: sigstore/cosign-installer@v3
       - name: Verify cosign signature

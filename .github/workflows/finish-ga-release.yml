@@ -15,6 +15,14 @@ on:
         description: "For an older out-of-band GA only: allow desktop latest to remain at a newer GA"
         type: boolean
         default: false
+      desktop_upgrade_pause_active:
+        description: "Recover exact GA artifacts while the emergency Desktop upgrade pause remains active"
+        type: boolean
+        default: false
+      paused_stable_version:
+        description: "Previous stable Desktop version used for native pause probes"
+        type: string
+        default: ""
 
 concurrency:
   group: finish-ga-${{ github.event.inputs.ga_tag }}
@@ -52,6 +60,17 @@ jobs:
           if [[ "${RC%%-*}" != "$GA" ]]; then
             echo "::error::RC base '${RC%%-*}' does not match GA '$GA'."
             exit 1
+          fi
+          if [[ "${{ inputs.allow_newer_desktop_latest }}" == "true" && "${{ inputs.desktop_upgrade_pause_active }}" == "true" ]]; then
+            echo "::error::The older-patch and emergency-pause recovery modes are mutually exclusive."
+            exit 1
+          fi
+          if [[ "${{ inputs.desktop_upgrade_pause_active }}" == "true" ]]; then
+            PAUSED_STABLE="${{ inputs.paused_stable_version }}"
+            if ! [[ "$PAUSED_STABLE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$PAUSED_STABLE" == "$GA" ]]; then
+              echo "::error::paused_stable_version must be a clean semver different from GA."
+              exit 1
+            fi
           fi
 
       - name: Refuse to modify a published GA Release
@@ -117,6 +136,32 @@ jobs:
         working-directory: mem-backbone
         run: |
           set -euo pipefail
+          if [[ "${{ inputs.desktop_upgrade_pause_active }}" == "true" ]]; then
+            export VERIFY_PREVIOUS_DESKTOP_VERSION="${{ inputs.paused_stable_version }}"
+            export VERIFY_FALLBACK_VERSION="${{ inputs.paused_stable_version }}"
+            export VERIFY_PLATFORMS="mac,mac-intel,win,linux,linux-deb,linux-appimage"
+            node ../scripts/verify-upgrade-pause.mjs
+            attempts=5
+            delay=15
+            for i in $(seq 1 "$attempts"); do
+              echo "::group::Verify staged recovery while upgrades remain paused (attempt $i/$attempts)"
+              export VERIFY_RELEASE_VERSION="$GA"
+              if VERIFY_SCOPE=direct timeout -k 10s 90s node scripts/verify-download-delivery.mjs &&
+                 timeout -k 10s 90s node ../scripts/verify-ga-delivery.mjs --staged-while-paused; then
+                echo "::endgroup::"
+                echo "Staged recovery verified on attempt $i."
+                exit 0
+              fi
+              echo "::endgroup::"
+              if [[ "$i" -lt "$attempts" ]]; then
+                echo "::warning::Staged recovery attempt $i/$attempts failed; retrying in ${delay}s..."
+                sleep "$delay"
+              fi
+            done
+            echo "::error::Staged recovery did not verify after ${attempts} attempts."
+            exit 1
+          fi
+
           echo "Pre-settle 20s before first verify attempt..."
           sleep 20
 
@@ -214,10 +259,14 @@ jobs:
         run: |
           {
             echo "### Finished GA ${GA}"
-            echo "- Desktop latest: dynamically discovered from R2 (verified)"
-            if [[ "${{ inputs.allow_newer_desktop_latest }}" == "true" ]]; then
+            if [[ "${{ inputs.desktop_upgrade_pause_active }}" == "true" ]]; then
+              echo "- Desktop latest: emergency pause retained; exact GA direct downloads verified"
+              echo "- APT: deferred to promote-apt-to-ga"
+            elif [[ "${{ inputs.allow_newer_desktop_latest }}" == "true" ]]; then
+              echo "- Desktop latest: newer GA retained"
               echo "- Delivery verified for: latest, latest redirect, direct downloads, update feed (APT unchanged)"
             else
+              echo "- Desktop latest: dynamically discovered from R2 (verified)"
               echo "- Delivery verified for: latest, latest redirect, direct downloads, update feed, APT"
             fi
             echo "- GH release tag: v${GA} (draft)"

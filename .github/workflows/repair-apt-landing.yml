@@ -1,0 +1,64 @@
+name: repair-apt-landing
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation_id:
+        description: "Fresh UUID for the audited APT landing repair"
+        required: true
+        type: string
+
+concurrency:
+  group: repair-apt-landing
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-22.04
+    environment: release-publish
+    timeout-minutes: 10
+    env:
+      OPERATION_ID: ${{ inputs.operation_id }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Validate repair operation
+        run: |
+          set -euo pipefail
+          [[ "$OPERATION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
+            echo "::error::operation_id must be a lowercase UUID v4."
+            exit 1
+          }
+
+      - name: Publish and verify APT landing
+        run: node scripts/publish-apt-landing.mjs
+
+      - name: Summary
+        run: |
+          {
+            echo "### APT landing repaired"
+            echo "- Operator: ${{ github.actor }}"
+            echo "- Operation: ${OPERATION_ID}"
+            echo "- https://${CUSTOM_DOMAIN:-download-mem.nowledge.co}/apt: verified"
+            echo "- https://${CUSTOM_DOMAIN:-download-mem.nowledge.co}/apt/: verified"
+            echo "- APT package metadata and stable version: unchanged"
+          } >> "$GITHUB_STEP_SUMMARY"

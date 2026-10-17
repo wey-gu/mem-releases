@@ -49,38 +49,50 @@ jobs:
           "NMEM_BUILD_SHA_FULL=$sourceSha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Testing Windows Bazel source $sourceSha (package $version)"
-      - name: Load private HawDB deploy key
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: "${{ secrets.SKEIN_REPO_SSH_KEY }}"
-      - name: Resolve private HawDB submodule over SSH
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config --global \
-            url."git@github.com:nowledge-co/hawdb.git".insteadOf \
-            "https://github.com/nowledge-co/hawdb.git"
-      - name: Resolve private Desktop dependency
+      - name: Resolve HawDB dependency
         id: desktop_dependency
         shell: bash
         run: |
           set -euo pipefail
           if grep -q -- '--init-desktop-https' nowledge-graph/scripts/build-rust-bundle.sh; then
-            read -r mode kind sha dependency_path <<< "$(git ls-tree HEAD hawdb)"
-            [[ "$mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ ]]
-            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+            entry="$(git ls-tree HEAD hawdb)"
+            if [[ -z "$entry" ]]; then
+              # nowledge-co/mem#7222: HawDB is a crates.io dependency of the nmem-rs
+              # workspace, pinned (version + checksum) in nmem-rs/Cargo.lock, and the
+              # build script fetches it itself. Nothing to check out, but the build
+              # still needs Python 3.11+ (tomllib) to read that pin.
+              registry="$(awk '
+                /^\[\[package\]\]/ { name = ""; next }
+                /^name = / { name = $3; next }
+                /^source = / && name == "\"hawdb\"" { print $3 }
+              ' nmem-rs/Cargo.lock 2>/dev/null || true)"
+              if [[ "$registry" != '"registry+https://github.com/rust-lang/crates.io-index"' ]]; then
+                echo "::error::Source must pin HawDB as one crates.io package in nmem-rs/Cargo.lock (or, before #7222, as an exact dependency gitlink)." >&2
+                exit 1
+              fi
+              echo "mode=registry" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            read -r entry_mode kind sha dependency_path <<< "$entry"
+            if ! [[ "$entry_mode" == 160000 && "$kind" == commit && "$sha" =~ ^[0-9a-f]{40}$ && "$dependency_path" == hawdb ]]; then
+              echo "::error::Source must record HawDB as an exact dependency gitlink." >&2
+              exit 1
+            fi
+            {
+              echo "mode=gitlink"
+              echo "sha=$sha"
+            } >> "$GITHUB_OUTPUT"
           fi
-      - name: Checkout private Desktop dependency
+      - name: Checkout HawDB dependency
         if: steps.desktop_dependency.outputs.sha != ''
         uses: actions/checkout@v4
         with:
           repository: nowledge-co/hawdb
-          ssh-key: "${{ secrets.SKEIN_REPO_SSH_KEY }}"
           ref: "${{ steps.desktop_dependency.outputs.sha }}"
           path: hawdb
           persist-credentials: false
       - name: Set up Desktop build Python
-        if: steps.desktop_dependency.outputs.sha != ''
+        if: steps.desktop_dependency.outputs.mode != ''
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -128,13 +140,18 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
       - name: Initialize Rust path dependencies before cache restore
-        shell: pwsh
+        shell: bash
         run: |
-          "XDG_CACHE_HOME=$env:RUNNER_TEMP/nmem-pdfium-cache" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git `
-              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git `
-              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          set -euo pipefail
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/nmem-pdfium-cache" >> "$GITHUB_ENV"
+          if [[ -x scripts/init-release-rust-submodules.sh ]]; then
+            scripts/init-release-rust-submodules.sh --init-https
+          else
+            echo "::warning::Source ref predates the release submodule helper; using the legacy contract."
+            git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git \
+                -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
+                submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
+          fi
       - uses: ilammy/setup-nasm@v1
       - uses: Swatinem/rust-cache@v2
         with:
@@ -160,7 +177,19 @@ jobs:
           Write-Host "PDFium runtime cache is incomplete; invalidating liteparse-pdfium-sys build artifacts."
           cargo clean -p liteparse-pdfium-sys --release --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { throw "cargo clean failed ($LASTEXITCODE)" }
+      # Non-fatal sccache setup; see release-desktop.yml build-macos-arm64.
       - name: Setup sccache
+        id: setup_sccache
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Wait before retrying sccache setup
+        if: steps.setup_sccache.outcome == 'failure'
+        shell: bash
+        run: sleep 30
+      - name: Retry sccache setup
+        id: retry_setup_sccache
+        if: steps.setup_sccache.outcome == 'failure'
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.9
       - name: Point sccache at R2
         shell: bash
@@ -169,7 +198,14 @@ jobs:
           R2_KEY: "${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}"
           R2_SECRET: "${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}"
         run: |
+          # Export the compiler wrappers only when sccache actually runs;
+          # a wrapper that does not exist would fail every compile.
+          if ! sccache --version; then
+            echo "::warning title=sccache unavailable::sccache setup failed twice; building without the compile cache (slower, identical output)."
+            exit 0
+          fi
           {
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
             echo "RUSTC_WRAPPER=sccache"
             echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -216,7 +252,7 @@ jobs:
       - name: Build Rust backend bundle (Windows)
         working-directory: nowledge-graph
         shell: bash
-        run: "./scripts/build-rust-bundle.sh --target x86_64-pc-windows-msvc --bazel-public-binaries --bazel-hawdb-server"
+        run: "./scripts/build-rust-bundle.sh --channel production --target x86_64-pc-windows-msvc --bazel-public-binaries"
       - name: Build Tauri (NSIS)
         working-directory: nowledge-graph
         shell: pwsh

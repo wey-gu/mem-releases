@@ -1,6 +1,7 @@
 // Release-owned exact-version gate. The Backbone verifier checks transport
 // health but intentionally permits missing platforms and older releases.
 import { pathToFileURL } from 'node:url';
+import { verifyAptLanding } from './publish-apt-landing.mjs';
 
 const FILES = {
   mac: 'aarch64-apple-darwin.dmg',
@@ -49,6 +50,113 @@ function assertArtifactUrl(value, host, version, file, label) {
     `${label}: wrong download host ${url.host}`);
   requireCondition(url.pathname === `/app/${version}/${file}`,
     `${label}: expected /app/${version}/${file}, got ${url.pathname}`);
+}
+
+function browserRequest(fetcher) {
+  return (url, init = {}) => fetcher(url, {
+    ...init,
+    headers: BROWSER_HEADERS,
+    redirect: init.redirect || 'manual',
+  });
+}
+
+function parseAptVersion(packagesText) {
+  const stanzas = packagesText.split(/\n\s*\n/);
+  const packageStanza = stanzas.find((stanza) => /^Package:\s+nowledge-mem\s*$/m.test(stanza));
+  requireCondition(packageStanza, 'APT Packages: nowledge-mem entry missing');
+  const version = packageStanza.match(/^Version:\s+(.+)\s*$/m)?.[1]?.trim();
+  const file = packageStanza.match(/^Filename:\s+(.+)\s*$/m)?.[1]?.trim();
+  requireCondition(/^\d+\.\d+\.\d+$/.test(version || ''),
+    `APT Packages: invalid version ${version || '<missing>'}`);
+  return { version, file };
+}
+
+export async function verifyAptPromotionPolicy({
+  expectedVersion,
+  downloadHost = 'download-mem.nowledge.co',
+  fetcher = fetch,
+}) {
+  requireCondition(/^\d+\.\d+\.\d+$/.test(expectedVersion || ''),
+    'VERIFY_RELEASE_VERSION must be a clean semver');
+  const response = await browserRequest(fetcher)(
+    `https://${downloadHost}/apt/dists/stable/main/binary-amd64/Packages`,
+    { redirect: 'follow' },
+  );
+  requireCondition(response.status === 200,
+    `APT preflight Packages: expected 200, got ${response.status}`);
+  const { version } = parseAptVersion(await response.text());
+  requireCondition(compareVersions(version, expectedVersion) <= 0,
+    `APT preflight refuses ${expectedVersion} behind live ${version}`);
+  console.log(`APT promotion policy verified: GA=${expectedVersion}, live=${version}`);
+}
+
+export async function verifyAptDelivery({
+  expectedVersion,
+  downloadHost = 'download-mem.nowledge.co',
+  fetcher = fetch,
+}) {
+  requireCondition(/^\d+\.\d+\.\d+$/.test(expectedVersion || ''),
+    'VERIFY_RELEASE_VERSION must be a clean semver');
+  await verifyAptLanding({ host: downloadHost, fetcher });
+  const response = await browserRequest(fetcher)(
+    `https://${downloadHost}/apt/dists/stable/main/binary-amd64/Packages`,
+    { redirect: 'follow' },
+  );
+  requireCondition(response.status === 200, `APT Packages: expected 200, got ${response.status}`);
+  const { version, file } = parseAptVersion(await response.text());
+  requireCondition(version === expectedVersion,
+    `APT Packages: expected ${expectedVersion}, got ${version}`);
+  requireCondition(file === `pool/nowledge-mem_${expectedVersion}_amd64.deb`,
+    `APT Packages: wrong pool file ${file || '<missing>'}`);
+  console.log(`OK exact APT: ${expectedVersion}`);
+}
+
+export async function verifyStagedGADelivery({
+  expectedVersion,
+  pausedVersion,
+  platforms,
+  baseUrl = 'https://backbone-mem.nowledge.co',
+  downloadHost = 'download-mem.nowledge.co',
+  fetcher = fetch,
+}) {
+  requireCondition(/^\d+\.\d+\.\d+$/.test(expectedVersion || ''),
+    'VERIFY_RELEASE_VERSION must be a clean semver');
+  requireCondition(!pausedVersion || /^\d+\.\d+\.\d+$/.test(pausedVersion),
+    'VERIFY_PAUSED_VERSION must be a clean semver');
+  requireCondition(platforms?.length > 0, 'VERIFY_PLATFORMS must list required platforms');
+  const request = browserRequest(fetcher);
+  const base = baseUrl.replace(/\/+$/, '');
+  for (const platform of platforms) {
+    requireCondition(FILES[platform], `Unknown required platform: ${platform}`);
+    if (pausedVersion === expectedVersion) {
+      // The manifest/R2 identity was verified by the caller. Public routes must
+      // still be closed until the audited route removal; verify exposure after it.
+      for (const url of [
+        `${base}/download/${expectedVersion}/${platform}`,
+        `https://${downloadHost}/app/${expectedVersion}/${FILES[platform]}`,
+      ]) {
+        const blocked = await request(url, { method: 'HEAD', redirect: 'manual' });
+        requireCondition(blocked.status === 503,
+          `${url}: paused exact download expected 503, got ${blocked.status}`);
+        requireCondition((blocked.headers.get('cache-control') || '').toLowerCase().includes('no-store'),
+          `${url}: paused exact download must use no-store`);
+        requireCondition(Boolean(blocked.headers.get('x-mem-upgrade-pause')),
+          `${url}: paused exact download is missing its pause identity`);
+      }
+      console.log(`OK staged ${platform}: exact ${expectedVersion} remains paused`);
+      continue;
+    }
+    const response = await request(`${base}/download/${expectedVersion}/${platform}`, {
+      method: 'HEAD',
+      redirect: 'follow',
+    });
+    requireCondition(response.status === 200,
+      `/download/${expectedVersion}/${platform}: expected 200, got ${response.status}`);
+    assertArtifactUrl(response.url, downloadHost, expectedVersion, FILES[platform],
+      `/download/${expectedVersion}/${platform}`);
+    console.log(`OK staged ${platform}: direct=${expectedVersion}`);
+  }
+  console.log(`Staged GA delivery verified while upgrades remain paused: ${expectedVersion}`);
 }
 
 export async function verifyVersionPolicy({
@@ -112,11 +220,7 @@ export async function verifyGADelivery({
   for (const required of ['latest', 'latest-redirect', 'direct', 'update']) {
     requireCondition(scopes.has(required), `Missing required verification scope: ${required}`);
   }
-  const request = (url, init = {}) => fetcher(url, {
-    ...init,
-    headers: BROWSER_HEADERS,
-    redirect: init.redirect || 'manual',
-  });
+  const request = browserRequest(fetcher);
   let liveLatest = '';
   for (const platform of platforms) {
     const response = await request(`${base}/latest?platform=${platform}`);
@@ -170,19 +274,7 @@ export async function verifyGADelivery({
   }
 
   if (scopes.has('apt')) {
-    const response = await request(`https://${downloadHost}/apt/dists/stable/main/binary-amd64/Packages`,
-      { redirect: 'follow' });
-    requireCondition(response.status === 200, `APT Packages: expected 200, got ${response.status}`);
-    const stanzas = (await response.text()).split(/\n\s*\n/);
-    const packageStanza = stanzas.find((stanza) => /^Package:\s+nowledge-mem\s*$/m.test(stanza));
-    requireCondition(packageStanza, 'APT Packages: nowledge-mem entry missing');
-    const version = packageStanza.match(/^Version:\s+(.+)\s*$/m)?.[1]?.trim();
-    const file = packageStanza.match(/^Filename:\s+(.+)\s*$/m)?.[1]?.trim();
-    requireCondition(version === expectedVersion,
-      `APT Packages: expected ${expectedVersion}, got ${version || '<missing>'}`);
-    requireCondition(file === `pool/nowledge-mem_${expectedVersion}_amd64.deb`,
-      `APT Packages: wrong pool file ${file || '<missing>'}`);
-    console.log(`OK exact APT: ${expectedVersion}`);
+    await verifyAptDelivery({ expectedVersion, downloadHost, fetcher });
   }
   console.log(`Exact GA delivery verified: ${expectedVersion}; latest=${liveLatest}`);
 }
@@ -190,15 +282,29 @@ export async function verifyGADelivery({
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const options = {
     expectedVersion: process.env.VERIFY_RELEASE_VERSION,
+    pausedVersion: process.env.VERIFY_PAUSED_VERSION,
     platforms: (process.env.VERIFY_PLATFORMS || '').split(',').map((value) => value.trim()).filter(Boolean),
     scope: (process.env.VERIFY_SCOPE || '').split(',').map((value) => value.trim()).filter(Boolean),
     allowNewerLatest: process.env.VERIFY_ALLOW_NEWER_LATEST === 'true',
     baseUrl: process.env.VERIFY_BASE_URL,
     downloadHost: process.env.EXPECT_CUSTOM_DOMAIN,
   };
+  const modes = [
+    process.argv.includes('--preflight'),
+    process.argv.includes('--staged-while-paused'),
+    process.argv.includes('--apt-preflight'),
+    process.argv.includes('--apt-only'),
+  ].filter(Boolean).length;
+  if (modes > 1) throw new Error('Choose only one verification mode');
   const run = process.argv.includes('--preflight')
     ? verifyVersionPolicy(options)
-    : verifyGADelivery(options);
+    : process.argv.includes('--staged-while-paused')
+      ? verifyStagedGADelivery(options)
+      : process.argv.includes('--apt-preflight')
+        ? verifyAptPromotionPolicy(options)
+        : process.argv.includes('--apt-only')
+          ? verifyAptDelivery(options)
+          : verifyGADelivery(options);
   run.catch((error) => {
     console.error(`Exact GA delivery failed: ${error.message}`);
     process.exitCode = 1;
