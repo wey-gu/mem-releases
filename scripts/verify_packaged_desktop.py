@@ -24,6 +24,10 @@ import urllib.request
 
 
 PLATFORMS = ("mac", "mac_intel", "win", "linux-deb", "linux-rpm", "linux-appimage")
+PLATFORM_ARTIFACTS = {
+    "mac": "macos-arm64", "mac_intel": "macos-x86_64", "win": "windows-x86_64",
+    "linux-deb": "linux-deb-appimage", "linux-appimage": "linux-deb-appimage", "linux-rpm": "linux-rpm",
+}
 VERSION = re.compile(r"[1-9][0-9]*\.[0-9]+\.[0-9]+|0\.[1-9][0-9]*\.[0-9]+|0\.0\.[1-9][0-9]*")
 
 
@@ -120,14 +124,31 @@ def cli_command(path):
     return [str(path), "--version"]
 
 
+def terminal_path(env):
+    if os.name == "nt":
+        import winreg
+
+        values = []
+        for hive, key in ((winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+                          (winreg.HKEY_CURRENT_USER, "Environment")):
+            with winreg.OpenKey(hive, key) as handle:
+                values.append(winreg.QueryValueEx(handle, "Path")[0])
+        return os.path.expandvars(os.pathsep.join(values))
+    output = command(["/bin/bash", "-lc", 'printf "NMEM_TERMINAL_PATH=%s\\n" "$PATH"'], env=env, timeout=10)
+    lines = [line.removeprefix("NMEM_TERMINAL_PATH=") for line in output.splitlines()
+             if line.startswith("NMEM_TERMINAL_PATH=")]
+    return unique(lines, "fresh login PATH")
+
+
 def installed_cli(env):
     search = []
     if os.name == "nt":
         search.append(Path(env["LOCALAPPDATA"]) / "Nowledge Mem CLI/bin")
     else:
         search.extend((Path(env["HOME"]) / ".local/bin", Path("/usr/local/bin")))
-    existing = env["PATH"].split(os.pathsep)
-    env["PATH"] = os.pathsep.join([str(p) for p in search if str(p) not in existing] + existing)
+    # Observe installation's discoverability in a fresh terminal; never repair
+    # its PATH here, which would hide an installer/boot ownership failure.
+    env["PATH"] = terminal_path(env)
     found = shutil.which("nmem", path=env["PATH"])
     if found is None:
         return None
@@ -155,6 +176,10 @@ def runtime_is_ready(details):
 def verify(args):
     require(VERSION.fullmatch(args.version) is not None, "Expected a concrete nonzero version")
     require(re.fullmatch(r"[0-9a-f]{40}", args.source_sha) is not None, "Expected a full source SHA")
+    require(re.fullmatch(rf"v{re.escape(args.version)}-rc[1-9][0-9]*", args.release_tag) is not None, "RC identity mismatch")
+    require(re.fullmatch(r"[0-9a-f]{40}", args.build_workflow_sha) is not None, "Expected build workflow SHA")
+    require(args.build_attempt.isdigit() and int(args.build_attempt) > 0, "Invalid build attempt")
+    require(args.artifact_id.isdigit() and int(args.artifact_id) > 0, "Invalid artifact ID")
     require(args.package.is_file(), "Package is missing")
     require(not args.receipt.exists(), "Receipt already exists")
     require(os.environ.get("GITHUB_ACTIONS") == "true", "Disposable native GitHub Actions runner required")
@@ -216,6 +241,8 @@ def verify(args):
             receipt = {
                 "schema": 1, "passed": True, "platform": args.platform, "version": args.version,
                 "source_sha": args.source_sha, "build_run_id": args.build_run_id,
+                "release_tag": args.release_tag, "build_workflow_sha": args.build_workflow_sha,
+                "build_attempt": args.build_attempt, "artifact_id": args.artifact_id,
                 "package": str(args.package), "package_sha256": package_sha,
                 "app_command": [str(item) for item in app], "app_output": app_output,
                 "server": str(server), "server_output": server_output, "health_details": details,
@@ -242,6 +269,10 @@ def main():
     parser.add_argument("--version", required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--build-run-id", required=True)
+    parser.add_argument("--release-tag", required=True)
+    parser.add_argument("--build-workflow-sha", required=True)
+    parser.add_argument("--build-attempt", required=True)
+    parser.add_argument("--artifact-id", required=True)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
     args = parser.parse_args()
