@@ -131,8 +131,13 @@ def terminal_path(env):
         values = []
         for hive, key in ((winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
                           (winreg.HKEY_CURRENT_USER, "Environment")):
-            with winreg.OpenKey(hive, key) as handle:
-                values.append(winreg.QueryValueEx(handle, "Path")[0])
+            try:
+                with winreg.OpenKey(hive, key) as handle:
+                    values.append(winreg.QueryValueEx(handle, "Path")[0])
+            except FileNotFoundError:
+                # Boot installs wrappers on an owned worker thread. An absent
+                # user PATH remains undiscoverable until that write completes.
+                values.append("")
         return os.path.expandvars(os.pathsep.join(values))
     output = command(["/bin/bash", "-lc", 'printf "NMEM_TERMINAL_PATH=%s\\n" "$PATH"'], env=env, timeout=10)
     lines = [line.removeprefix("NMEM_TERMINAL_PATH=") for line in output.splitlines()
