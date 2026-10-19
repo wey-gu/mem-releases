@@ -50,6 +50,8 @@ elif args[0] == 'create':
     assert '--user' not in args and '--volume' not in args and '-v' not in args
     assert args[args.index('--network') + 1] == 'none'
     (root / args[args.index('--name') + 1]).write_text(args[-1])
+    if os.environ.get('FIXTURE_CREATE_FAIL'):
+        sys.exit(19)
     print('container')
 elif args[0] == 'start':
     shell = (root / args[-1]).read_text().removeprefix('exec ')
@@ -64,6 +66,7 @@ elif args[0] == 'start':
         sys.exit(17)
     print(outputs[shell])
 elif args[0] == 'rm':
+    assert '--force' in args and '--volumes' in args
     if os.environ.get('FIXTURE_CLEANUP_FAIL'):
         sys.exit(18)
     (root / args[-1]).unlink()
@@ -114,6 +117,12 @@ class NativeBoundary(unittest.TestCase):
 
     def test_previous_cli_rejected(self):
         self.assert_cli_mismatch_rejected()
+
+    def test_uncertain_create_failure_still_removes_container_and_volumes(self):
+        result = self.run_probe(FIXTURE_CREATE_FAIL="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.receipt.exists())
+        self.assertEqual(list(self.root.glob("nmem-version-*")), [])
 
     def test_bad_runtime_boundaries_fail_without_receipt(self):
         for changes in ({"FIXTURE_CLI": ""}, {"FIXTURE_CLI": "nmem 0.0.0"},

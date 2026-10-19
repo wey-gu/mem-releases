@@ -173,16 +173,16 @@ def probe(identity, arch):
     def execute(shell):
         # Keep the image's default user, PATH, filesystem and dependencies.
         name = "nmem-version-" + uuid.uuid4().hex
-        command(["docker", "create", "--name", name, "--network", "none", "--entrypoint", "/bin/sh",
-                 child, "-ec", "exec " + shell])
         try:
+            command(["docker", "create", "--name", name, "--network", "none", "--entrypoint", "/bin/sh",
+                     child, "-ec", "exec " + shell])
             output = command(["docker", "start", "--attach", name], timeout=90)
             state = json.loads(command(["docker", "inspect", "--format", "{{json .State}}", name]))
             require(state["Status"] == "exited" and state["ExitCode"] == 0 and not state["OOMKilled"],
                     "Packaged command did not exit successfully")
             return output
         finally:
-            command(["docker", "rm", "--force", name])
+            command(["docker", "rm", "--force", "--volumes", name])
 
     uid, gid = execute("id -u"), execute("id -g")
     require(uid == "10001" and gid == "10001", "Runtime is not the default unprivileged user")
