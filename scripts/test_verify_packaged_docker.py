@@ -28,7 +28,29 @@ root = pathlib.Path(os.environ['FIXTURE_ROOT'])
 arch = os.environ['FIXTURE_ARCH']
 index = 'sha256:' + 'c' * 64
 child = 'sha256:' + 'd' * 64
-if pathlib.Path(sys.argv[0]).name == 'cosign':
+if pathlib.Path(sys.argv[0]).name == 'gh':
+    assert args[0] == 'api'
+    path = args[1]
+    if path.endswith('/logs'):
+        if '--allow-escape-sequences' not in args:
+            sys.exit('the response contains terminal escape sequences')
+        print('\x1b[0mPublished manifest digest: ' + os.environ.get('FIXTURE_PUBLISHED_DIGEST', index))
+    elif path.endswith('/actions/runs/123'):
+        print(json.dumps({'id': 123, 'run_attempt': 1, 'repository': {'full_name': 'wey-gu/mem-releases'},
+              'path': '.github/workflows/release-docker.yml', 'event': os.environ.get('FIXTURE_EVENT', 'push'),
+              'head_branch': 'v0.10.104-rc2', 'head_sha': 'b' * 40,
+              'status': 'in_progress', 'conclusion': None}))
+    elif '/commits/' in path:
+        print(json.dumps({'sha': ('a' if '/nowledge-co/mem/' in path else 'b') * 40}))
+    elif '/jobs?' in path:
+        names = ['meta', 'build-amd64', 'build-arm64', 'publish',
+                 'verify (ubuntu-latest, amd64)', 'verify (ubuntu-24.04-arm, arm64)']
+        jobs = [{'id': i + 1, 'name': name, 'status': 'completed', 'conclusion': 'success'}
+                for i, name in enumerate(names)]
+        print(json.dumps({'total_count': len(jobs), 'jobs': jobs}))
+    else:
+        raise AssertionError(path)
+elif pathlib.Path(sys.argv[0]).name == 'cosign':
     print(json.dumps([{'critical': {'image': {'docker-manifest-digest': index}}}]))
 elif args[0] == 'info':
     print(arch)
@@ -84,7 +106,7 @@ class NativeBoundary(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for binary in ("docker", "cosign"):
+        for binary in ("docker", "cosign", "gh"):
             path = self.root / binary
             path.write_text(FIXTURE)
             path.chmod(0o755)
@@ -108,6 +130,22 @@ class NativeBoundary(unittest.TestCase):
         receipt = json.loads(self.receipt.read_text())
         verify.validate_receipt(receipt)
         self.assertEqual(set(receipt["outputs"]), set(verify.SURFACES))
+
+    def test_real_gh_command_captures_escaped_logs_and_binds_digest(self):
+        env = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ["PATH"],
+                   FIXTURE_ROOT=str(self.root), FIXTURE_ARCH=self.arch, MEM_READ_TOKEN="fixture-token")
+        argv = [sys.executable, verify.__file__, "identity", "--build-run-id", "123",
+                "--release-tag", IDENTITY["release_tag"], "--source-sha", SOURCE,
+                "--variant", "cpu", "--digest", INDEX, "--output", str(self.receipt)]
+        result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result_identity = json.loads(self.receipt.read_text())
+        self.assertEqual(result_identity["digest"], INDEX)
+        self.receipt.unlink()
+        env["FIXTURE_PUBLISHED_DIGEST"] = "sha256:" + "0" * 64
+        result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.receipt.exists())
 
     def assert_cli_mismatch_rejected(self, script=None):
         result = self.run_probe(script=script, FIXTURE_CLI="nmem 0.10.103")

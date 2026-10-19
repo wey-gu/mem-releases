@@ -31,7 +31,10 @@ def api(path, *, source=False, raw=False):
     env = dict(os.environ)
     if source:
         env["GH_TOKEN"] = env["MEM_READ_TOKEN"]
-    output = command(["gh", "api", path], env=env, timeout=90)
+    argv = ["gh", "api", path]
+    if raw:
+        argv.append("--allow-escape-sequences")
+    output = command(argv, env=env, timeout=90)
     return output if raw else json.loads(output)
 
 
