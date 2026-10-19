@@ -28,6 +28,14 @@ Rust runtime version. `browse-now` retains its independent component version.
 Detailed backend status, database connection and services must all be ready.
 CLI discovery observes a fresh login/Windows registry PATH; the verifier never
 adds a missing wrapper directory to make installation appear successful.
+The selected entry's parent must resolve to an existing approved installation
+directory, including directory aliases such as Fedora's
+[`/usr/local/sbin -> bin`](https://fedoraproject.org/wiki/Changes/Unify_bin_and_sbin).
+Preserve and execute the selected path. Resolve only its parent: package-owned
+leaf links may target a resource payload, while an entry in a foreign directory
+must fail even when its leaf link targets an installed wrapper. A missing
+per-user installation directory must not prevent a system-installed CLI from
+passing. `InstalledCliDirectoryContract` protects these filesystem boundaries.
 Windows also reads the NSIS uninstall registration for that exact App path and
 requires its DisplayVersion, product name and executable identity to agree.
 

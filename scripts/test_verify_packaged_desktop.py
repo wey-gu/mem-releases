@@ -18,6 +18,63 @@ from verify_packaged_desktop import cli_command
 from verify_packaged_desktop import validate_windows_package_record, windows_package_registration
 
 
+@unittest.skipIf(os.name == "nt", "POSIX installed CLI directory identity")
+class InstalledCliDirectoryContract(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="installed cli ")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.home = self.root / "home"
+        self.wrapper = self.home / ".local/bin/nmem"
+        self.wrapper.parent.mkdir(parents=True)
+        self.wrapper.write_text("#!/bin/sh\nprintf 'nmem 0.10.104\\n'\n")
+        self.wrapper.chmod(0o755)
+        self.env = {"HOME": str(self.home), "PATH": "/old-terminal-path"}
+
+    def discover(self, directory):
+        with patch("verify_packaged_desktop.terminal_path", return_value=str(directory)):
+            return installed_cli(self.env)
+
+    def test_directory_alias_preserves_terminal_selection_and_execution(self):
+        alias = self.root / "terminal bin"
+        alias.symlink_to(self.wrapper.parent, target_is_directory=True)
+        selected = self.discover(alias)
+        self.assertEqual(selected, alias / "nmem")
+        self.assertEqual(self.env["PATH"], str(alias))
+        self.assertEqual(command(cli_command(selected), env=self.env), "nmem 0.10.104")
+
+    def test_foreign_directory_with_matching_executable_is_rejected(self):
+        foreign = self.root / "foreign bin/nmem"
+        foreign.parent.mkdir()
+        foreign.write_bytes(self.wrapper.read_bytes())
+        foreign.chmod(0o755)
+        with self.assertRaisesRegex(RuntimeError, "Foreign CLI selected"):
+            self.discover(foreign.parent)
+
+    def test_foreign_leaf_link_to_installed_wrapper_is_rejected(self):
+        foreign = self.root / "foreign bin/nmem"
+        foreign.parent.mkdir()
+        foreign.symlink_to(self.wrapper)
+        with self.assertRaisesRegex(RuntimeError, "Foreign CLI selected"):
+            self.discover(foreign.parent)
+
+    def test_direct_resource_payload_is_rejected(self):
+        resource = self.root / "resources/nmem"
+        resource.parent.mkdir()
+        self.wrapper.rename(resource)
+        with self.assertRaisesRegex(RuntimeError, "Foreign CLI selected"):
+            self.discover(resource.parent)
+
+    def test_installed_leaf_link_to_resource_payload_remains_executable(self):
+        resource = self.root / "resources/nmem"
+        resource.parent.mkdir()
+        self.wrapper.rename(resource)
+        self.wrapper.symlink_to(resource)
+        selected = self.discover(self.wrapper.parent)
+        self.assertEqual(selected, self.wrapper)
+        self.assertEqual(command(cli_command(selected), env=self.env), "nmem 0.10.104")
+
+
 class PackagedVersionContract(unittest.TestCase):
     def test_windows_installer_and_executable_must_share_identity(self):
         app = r'C:\Users\fixture\Nowledge Mem\nowledge-mem.exe'
