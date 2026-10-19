@@ -198,8 +198,10 @@ def installed_cli(env):
     if found is None:
         return None
     path = Path(found)
-    # Package-installed links or App-installed wrappers, never the resource CLI.
-    require(any(path.parent == directory for directory in search), f"Foreign CLI selected: {path}")
+    # Directory aliases may select an installed entry. Resolve only its parent:
+    # package-owned leaf links legitimately point into the resource payload.
+    parent = path.parent.resolve()
+    require(any(parent == directory.resolve() for directory in search), f"Foreign CLI selected: {path}")
     return path
 
 
