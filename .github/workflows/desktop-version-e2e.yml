@@ -1,0 +1,265 @@
+name: desktop-version-e2e
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Completed release-desktop run containing the exact RC packages
+        required: true
+        type: string
+      release_tag:
+        description: Source RC tag, including v (for example v0.10.104-rc1)
+        required: true
+        type: string
+      source_sha:
+        description: Exact 40-hex Mem RELEASE_SHA
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - .github/workflows/desktop-version-e2e.yml
+      - scripts/verify_packaged_desktop.py
+      - scripts/test_verify_packaged_desktop.py
+      - scripts/desktop_version_receipts.py
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m unittest discover -s scripts -p test_verify_packaged_desktop.py -v
+
+  windows-command-contract:
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - working-directory: scripts
+        run: python -m unittest test_verify_packaged_desktop.WindowsCommandContract -v
+
+  identity:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      build_workflow_sha: ${{ steps.identity.outputs.build_workflow_sha }}
+      build_attempt: ${{ steps.identity.outputs.build_attempt }}
+      artifacts: ${{ steps.identity.outputs.artifacts }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM_READ_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, sys
+          sys.path.insert(0, 'scripts')
+          from desktop_version_receipts import validate_build_identity
+          env = os.environ
+          assert re.fullmatch(r'[1-9][0-9]*', env['BUILD_RUN_ID'])
+          match = re.fullmatch(r'v([0-9]+\.[0-9]+\.[0-9]+)-rc[1-9][0-9]*', env['RELEASE_TAG'])
+          assert match and re.fullmatch(r'[0-9a-f]{40}', env['SOURCE_SHA'])
+          def api(path, token=None):
+              child = dict(env)
+              if token is not None:
+                  child['GH_TOKEN'] = token
+              return json.loads(subprocess.check_output(['gh', 'api', path], env=child, text=True, timeout=30))
+          repo = env['GITHUB_REPOSITORY']
+          run = api(f'repos/{repo}/actions/runs/{env["BUILD_RUN_ID"]}')
+          assert run['repository']['full_name'] == repo
+          # Only the tag-push RC path carries a verifiable tag identity in the
+          # run metadata. Manual/repository dispatch needs a build attestation.
+          validate_build_identity(run, env['RELEASE_TAG'])
+          source = api(f'repos/nowledge-co/mem/commits/{env["RELEASE_TAG"]}', env['MEM_READ_TOKEN'])
+          assert source['sha'] == env['SOURCE_SHA']
+          artifacts = api(f'repos/{repo}/actions/runs/{env["BUILD_RUN_ID"]}/artifacts?per_page=100')['artifacts']
+          selected = {}
+          for name in ('macos-arm64', 'macos-x86_64', 'windows-x86_64', 'linux-deb-appimage', 'linux-rpm'):
+              matches = [a for a in artifacts if a['name'] == name and not a['expired']]
+              assert len(matches) == 1, name
+              selected[name] = str(matches[0]['id'])
+          with open(env['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={match.group(1)}\n')
+              output.write(f'build_workflow_sha={run["head_sha"]}\n')
+              output.write(f'build_attempt={run["run_attempt"]}\n')
+              output.write(f'artifacts={json.dumps(selected)}\n')
+          PY
+
+  native:
+    needs: [contract, windows-command-contract, identity]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: mac
+            runner: macos-15
+            artifact: macos-arm64
+            extension: dmg
+          - platform: mac_intel
+            runner: macos-15-intel
+            artifact: macos-x86_64
+            extension: dmg
+          - platform: win
+            runner: windows-2022
+            artifact: windows-x86_64
+            extension: exe
+          - platform: linux-deb
+            runner: ubuntu-22.04
+            artifact: linux-deb-appimage
+            extension: deb
+          - platform: linux-appimage
+            runner: ubuntu-22.04
+            artifact: linux-deb-appimage
+            extension: AppImage
+          - platform: linux-rpm
+            runner: ubuntu-22.04
+            artifact: linux-rpm
+            extension: rpm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      VERIFY_PLATFORM: ${{ matrix.platform }}
+      VERIFY_VERSION: ${{ needs.identity.outputs.version }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      BUILD_WORKFLOW_SHA: ${{ needs.identity.outputs.build_workflow_sha }}
+      BUILD_ATTEMPT: ${{ needs.identity.outputs.build_attempt }}
+      ARTIFACT_ID: ${{ fromJSON(needs.identity.outputs.artifacts)[matrix.artifact] }}
+      PACKAGE_EXTENSION: ${{ matrix.extension }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ fromJSON(needs.identity.outputs.artifacts)[matrix.artifact] }}
+          path: packages
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - name: Select exactly one original package
+        id: package
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          packages = list(Path('packages').rglob('*.' + os.environ['PACKAGE_EXTENSION']))
+          assert len(packages) == 1, packages
+          package = packages[0].resolve()
+          assert os.environ['VERIFY_VERSION'] in package.name
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'path={package}\n')
+          PY
+      - name: Install Linux runtime dependencies and DEB
+        if: startsWith(matrix.platform, 'linux-') && matrix.platform != 'linux-rpm'
+        env:
+          PACKAGE: ${{ steps.package.outputs.path }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb dbus-x11 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libfuse2
+          if [[ "$VERIFY_PLATFORM" == linux-deb ]]; then sudo apt-get install -y "$PACKAGE"; fi
+      - name: Install original NSIS package
+        if: matrix.platform == 'win'
+        env:
+          PACKAGE: ${{ steps.package.outputs.path }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'version-e2e-install'
+          subprocess.run([os.environ['PACKAGE'], '/S', '/D=' + str(root)], check=True, timeout=480)
+          assert (root / 'nowledge-mem.exe').is_file()
+          PY
+      - name: Execute App, owned backend and installed CLI
+        if: matrix.platform != 'linux-rpm'
+        env:
+          PACKAGE: ${{ steps.package.outputs.path }}
+          NO_AT_BRIDGE: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--package "$PACKAGE" --platform "$VERIFY_PLATFORM" --version "$VERIFY_VERSION"
+                --source-sha "$SOURCE_SHA" --build-run-id "$BUILD_RUN_ID"
+                --release-tag "$RELEASE_TAG" --build-workflow-sha "$BUILD_WORKFLOW_SHA"
+                --build-attempt "$BUILD_ATTEMPT" --artifact-id "$ARTIFACT_ID"
+                --work "$RUNNER_TEMP/version-e2e" --receipt "receipts/$VERIFY_PLATFORM.json")
+          case "$VERIFY_PLATFORM" in
+            win) args+=(--app "$RUNNER_TEMP/version-e2e-install/nowledge-mem.exe") ;;
+            linux-deb) args+=(--app /usr/bin/nowledge-mem) ;;
+          esac
+          if [[ "$VERIFY_PLATFORM" == linux-* ]]; then
+            dbus-run-session -- xvfb-run -a python scripts/verify_packaged_desktop.py "${args[@]}"
+          else
+            python scripts/verify_packaged_desktop.py "${args[@]}"
+          fi
+      - name: Install and execute original RPM on Fedora
+        if: matrix.platform == 'linux-rpm'
+        env:
+          PACKAGE: ${{ steps.package.outputs.path }}
+        run: |
+          set -euo pipefail
+          mkdir -p receipts "$RUNNER_TEMP/rpm-version-e2e"
+          docker run --rm -v "$GITHUB_WORKSPACE:/workspace" \
+            -v "$RUNNER_TEMP/rpm-version-e2e:/acceptance" -w /workspace \
+            -e PACKAGE="/workspace/${PACKAGE#"$GITHUB_WORKSPACE/"}" \
+            -e VERIFY_VERSION -e SOURCE_SHA -e BUILD_RUN_ID -e GITHUB_ACTIONS \
+            -e RELEASE_TAG -e BUILD_WORKFLOW_SHA -e BUILD_ATTEMPT -e ARTIFACT_ID fedora:44 bash -euc '
+              dnf -y install python3 xorg-x11-server-Xvfb dbus-x11 procps-ng "$PACKAGE"
+              useradd -m acceptance
+              chown acceptance:acceptance /workspace/receipts /acceptance
+              runuser -u acceptance -- dbus-run-session -- xvfb-run -a python3 scripts/verify_packaged_desktop.py \
+                --package "$PACKAGE" --app /usr/bin/nowledge-mem --platform linux-rpm --version "$VERIFY_VERSION" \
+                --source-sha "$SOURCE_SHA" --build-run-id "$BUILD_RUN_ID" \
+                --release-tag "$RELEASE_TAG" --build-workflow-sha "$BUILD_WORKFLOW_SHA" \
+                --build-attempt "$BUILD_ATTEMPT" --artifact-id "$ARTIFACT_ID" \
+                --work /acceptance/work --receipt receipts/linux-rpm.json
+            '
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: version-e2e-${{ matrix.platform }}
+          path: |
+            receipts/*.json
+            ${{ runner.temp }}/version-e2e/app.log
+            ${{ runner.temp }}/rpm-version-e2e/work/app.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  accepted:
+    needs: [identity, native]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: version-e2e-*
+          path: receipts
+      - env:
+          VERIFY_VERSION: ${{ needs.identity.outputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          BUILD_WORKFLOW_SHA: ${{ needs.identity.outputs.build_workflow_sha }}
+          BUILD_ATTEMPT: ${{ needs.identity.outputs.build_attempt }}
+          ARTIFACTS: ${{ needs.identity.outputs.artifacts }}
+        run: python3 scripts/desktop_version_receipts.py receipts
