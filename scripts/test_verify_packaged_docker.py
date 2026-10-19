@@ -28,6 +28,8 @@ root = pathlib.Path(os.environ['FIXTURE_ROOT'])
 arch = os.environ['FIXTURE_ARCH']
 index = 'sha256:' + 'c' * 64
 child = 'sha256:' + 'd' * 64
+gpu = 'GPU-12345678-1234-1234-1234-123456789abc'
+gpu_output = gpu + ', 560.35.03'
 if pathlib.Path(sys.argv[0]).name == 'gh':
     assert args[0] == 'api'
     path = args[1]
@@ -52,8 +54,13 @@ if pathlib.Path(sys.argv[0]).name == 'gh':
         raise AssertionError(path)
 elif pathlib.Path(sys.argv[0]).name == 'cosign':
     print(json.dumps([{'critical': {'image': {'docker-manifest-digest': index}}}]))
+elif pathlib.Path(sys.argv[0]).name == 'nvidia-smi':
+    print(os.environ.get('FIXTURE_HOST_GPU', gpu_output))
 elif args[0] == 'info':
-    print(arch)
+    if args[-1] == '{{json .Runtimes}}':
+        print(json.dumps({} if os.environ.get('FIXTURE_NO_TOOLKIT') else {'nvidia': {}}))
+    else:
+        print(arch)
 elif args[:3] == ['buildx', 'imagetools', 'inspect']:
     if '--raw' in args:
         print(json.dumps({'manifests': [{'digest': child, 'platform': {'os': 'linux', 'architecture': item}}
@@ -71,6 +78,10 @@ elif args[:2] == ['image', 'inspect']:
 elif args[0] == 'create':
     assert '--user' not in args and '--volume' not in args and '-v' not in args
     assert args[args.index('--network') + 1] == 'none'
+    cuda = os.environ.get('FIXTURE_VARIANT') == 'cuda'
+    assert ('--gpus' in args) == cuda
+    if cuda:
+        assert args[args.index('--gpus') + 1] == 'all'
     (root / args[args.index('--name') + 1]).write_text(args[-1])
     if os.environ.get('FIXTURE_CREATE_FAIL'):
         sys.exit(19)
@@ -78,6 +89,8 @@ elif args[0] == 'create':
 elif args[0] == 'start':
     shell = (root / args[-1]).read_text().removeprefix('exec ')
     outputs = {'id -u': '10001', 'id -g': '10001',
+               'nvidia-smi --query-gpu=uuid,driver_version --format=csv,noheader,nounits':
+                   os.environ.get('FIXTURE_CONTAINER_GPU', gpu_output),
                'nmem-server --version': 'nmem-server 0.10.104\nnmem-build-sha:' + 'a' * 40,
                'nmem --version': os.environ.get('FIXTURE_CLI', 'nmem 0.10.104'),
                'nmem tui --version': 'nmem-tui 0.10.104',
@@ -108,7 +121,7 @@ class NativeBoundary(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for binary in ("docker", "cosign", "gh"):
+        for binary in ("docker", "cosign", "gh", "nvidia-smi"):
             path = self.root / binary
             path.write_text(FIXTURE)
             path.chmod(0o755)
@@ -132,6 +145,68 @@ class NativeBoundary(unittest.TestCase):
         receipt = json.loads(self.receipt.read_text())
         verify.validate_receipt(receipt)
         self.assertEqual(set(receipt["outputs"]), set(verify.SURFACES))
+
+    def assert_cuda_runtime(self, script=None, **changes):
+        identity = dict(IDENTITY, variant="cuda")
+        self.identity.write_text(json.dumps(identity))
+        result = self.run_probe(script=script, FIXTURE_VARIANT="cuda", **changes)
+        self.assertEqual(result.returncode, 0, "CUDA probe failed: " + result.stderr)
+        receipt = json.loads(self.receipt.read_text())
+        verify.validate_receipt(receipt)
+        runtime = receipt["cuda_runtime"]
+        self.assertEqual(runtime["device_request"], "all")
+        self.assertEqual(runtime["host_gpus"], runtime["container_gpus"])
+        self.assertEqual(len(runtime["host_gpus"]), 1)
+        self.assertEqual(list(self.root.glob("nmem-version-*")), [])
+        return receipt
+
+    def test_cuda_uses_nvidia_runtime_and_binds_driver_receipts(self):
+        receipt = self.assert_cuda_runtime()
+        directory = self.root / "receipts"
+        directory.mkdir()
+        path = directory / "amd64.json"
+        path.write_text(json.dumps(receipt))
+        self.assertTrue(verify.aggregate(directory, receipt["identity"])["accepted"])
+        for runtime in (None, dict(receipt["cuda_runtime"], device_request=""),
+                        dict(receipt["cuda_runtime"], container_gpus={})):
+            with self.subTest(runtime=runtime), self.assertRaises(RuntimeError):
+                path.write_text(json.dumps(dict(receipt, cuda_runtime=runtime)))
+                verify.aggregate(directory, receipt["identity"])
+
+    def test_cuda_missing_or_mismatched_runtime_fails_without_receipt(self):
+        self.identity.write_text(json.dumps(dict(IDENTITY, variant="cuda")))
+        for changes in ({"FIXTURE_HOST_GPU": ""}, {"FIXTURE_HOST_GPU": "not a GPU"},
+                        {"FIXTURE_NO_TOOLKIT": "1"}, {"FIXTURE_CONTAINER_GPU": ""},
+                        {"FIXTURE_CONTAINER_GPU": "GPU-12345678-1234-1234-1234-123456789abc, 555.42.02"}):
+            with self.subTest(changes=changes):
+                result = self.run_probe(FIXTURE_VARIANT="cuda", **changes)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertFalse(self.receipt.exists())
+                self.assertEqual(list(self.root.glob("nmem-version-*")), [])
+
+    def test_cuda_device_request_removal_is_caught_by_unchanged_assertion(self):
+        source = Path(verify.__file__).read_text()
+        target = 'device_options = ["--gpus", "all"] if identity["variant"] == "cuda" else []'
+        self.assertEqual(source.count(target), 1)
+        mutant = self.root / "mutant-cuda.py"
+        mutant.write_text(source.replace(target, "device_options = []"))
+        old = os.environ.get("PYTHONPATH")
+        os.environ["PYTHONPATH"] = str(Path(verify.__file__).parent)
+        try:
+            with self.assertRaisesRegex(AssertionError, "CUDA probe failed"):
+                self.assert_cuda_runtime(mutant)
+        finally:
+            if old is None:
+                os.environ.pop("PYTHONPATH", None)
+            else:
+                os.environ["PYTHONPATH"] = old
+        print("Mutation RED: unchanged CUDA assertion caught missing NVIDIA device request")
+
+    def test_vulkan_keeps_the_original_non_cuda_runtime(self):
+        self.identity.write_text(json.dumps(dict(IDENTITY, variant="vulkan")))
+        result = self.run_probe(FIXTURE_VARIANT="vulkan")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("cuda_runtime", json.loads(self.receipt.read_text()))
 
     def test_real_gh_command_captures_escaped_logs_and_binds_digest(self):
         env = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ["PATH"],
@@ -230,6 +305,25 @@ class NativeBoundary(unittest.TestCase):
 
 
 class IdentityAndAggregation(unittest.TestCase):
+    def test_real_matrix_command_requires_explicit_cuda_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "matrix.json"
+            for variant, runner, expected in (
+                    ("cpu", "", ["ubuntu-22.04", "ubuntu-24.04-arm"]),
+                    ("vulkan", "", ["ubuntu-22.04"]), ("cuda", "approved-nvidia", ["approved-nvidia"])):
+                argv = [sys.executable, verify.__file__, "matrix", "--variant", variant,
+                        "--cuda-runner", runner, "--output", str(output)]
+                result = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual([row["runner"] for row in json.loads(output.read_text())["include"]], expected)
+                output.unlink()
+            for variant, runner in (("cuda", ""), ("cuda", "label\ninjection"), ("cpu", "approved-nvidia")):
+                result = subprocess.run([sys.executable, verify.__file__, "matrix", "--variant", variant,
+                                         "--cuda-runner", runner, "--output", str(output)],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(output.exists())
+
     def test_producer_must_be_original_exact_tag_push(self):
         run = {"repository": {"full_name": verify.REPOSITORY}, "path": ".github/workflows/release-docker.yml",
                "event": "push", "head_branch": IDENTITY["release_tag"], "head_sha": TOOLS, "status": "in_progress"}

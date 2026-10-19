@@ -24,6 +24,11 @@ on:
         description: Original published image index digest including sha256
         required: true
         type: string
+      cuda_runner:
+        description: Approved existing NVIDIA runner label; required for CUDA
+        required: false
+        default: ''
+        type: string
   pull_request:
     paths:
       - .github/workflows/docker-version-e2e.yml
@@ -70,14 +75,16 @@ jobs:
       - id: matrix
         env:
           VARIANT: ${{ inputs.variant }}
+          CUDA_RUNNER: ${{ inputs.cuda_runner }}
         run: |
+          python scripts/verify_packaged_docker.py matrix --variant "$VARIANT" \
+            --cuda-runner "$CUDA_RUNNER" --output matrix.json
           python - <<'PY'
           import json, os
-          rows = [{'arch': 'amd64', 'runner': 'ubuntu-22.04'}]
-          if os.environ['VARIANT'] == 'cpu':
-              rows.append({'arch': 'arm64', 'runner': 'ubuntu-24.04-arm'})
+          with open('matrix.json') as source:
+              matrix = json.load(source)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write('matrix=' + json.dumps({'include': rows}) + '\n')
+              output.write('matrix=' + json.dumps(matrix) + '\n')
           PY
       - uses: actions/upload-artifact@v4
         with:
