@@ -9,10 +9,19 @@ import tempfile
 import unittest
 
 from desktop_version_receipts import accept
-from verify_packaged_desktop import PLATFORMS, command, exact_version, unique
+from verify_packaged_desktop import PLATFORMS, command, exact_version, runtime_is_ready, unique
 
 
 class PackagedVersionContract(unittest.TestCase):
+    def test_public_liveness_does_not_replace_detailed_readiness(self):
+        healthy = {"status": "ok", "database_connected": True, "services_ready": True}
+        self.assertTrue(runtime_is_ready(healthy))
+        for field, bad in (("status", "error"), ("database_connected", False),
+                           ("services_ready", False), ("services_ready", "true")):
+            with self.subTest(field=field, bad=bad):
+                self.assertFalse(runtime_is_ready(dict(healthy, **{field: bad})))
+        self.assertFalse(runtime_is_ready({"status": "ok"}))
+
     def test_concrete_matching_version_required(self):
         self.assertEqual(exact_version("nmem 0.10.104", "nmem", "0.10.104"), "0.10.104")
         for output in ("", "nmem 0", "nmem 0.0.0", "nmem @VERSION@", "nmem 0.10.103",
@@ -37,7 +46,8 @@ class PackagedVersionContract(unittest.TestCase):
         template = {
             "schema": 1, "passed": True, "version": "0.10.104", "source_sha": sha,
             "build_run_id": "123", "package_sha256": "b" * 64,
-            "health_details": {"version": "0.10.104", "build_sha": sha},
+            "health_details": {"version": "0.10.104", "build_sha": sha, "status": "ok",
+                               "database_connected": True, "services_ready": True},
             "cli_output": "nmem 0.10.104",
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -60,6 +70,11 @@ class PackagedVersionContract(unittest.TestCase):
                 first.write_text(json.dumps(mutant))
                 with self.subTest(field=field), self.assertRaises(RuntimeError):
                     accept(root, "0.10.104", sha, "123")
+            mutant = copy.deepcopy(originals[first])
+            mutant['health_details'].update(status='error', database_connected=False, services_ready=False)
+            first.write_text(json.dumps(mutant))
+            with self.assertRaises(RuntimeError):
+                accept(root, "0.10.104", sha, "123")
             first.unlink()
             with self.assertRaises(RuntimeError):
                 accept(root, "0.10.104", sha, "123")

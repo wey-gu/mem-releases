@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import sys
 
-from verify_packaged_desktop import PLATFORMS, require
+from verify_packaged_desktop import PLATFORMS, require, runtime_is_ready
 
 
 def accept(root, version, source_sha, build_run_id):
@@ -26,6 +26,7 @@ def accept(root, version, source_sha, build_run_id):
         require(receipt.get("app_output") == f"Nowledge Mem {version} ({platform})", f"App mismatch: {path}")
         require(receipt.get("health_details", {}).get("version") == version, f"Runtime mismatch: {path}")
         require(receipt.get("health_details", {}).get("build_sha") == source_sha, f"Runtime SHA mismatch: {path}")
+        require(runtime_is_ready(receipt.get("health_details", {})), f"Backend is not ready: {path}")
         require(receipt.get("cli_output") == f"nmem {version}", f"CLI mismatch: {path}")
         seen.add(platform)
     require(seen == set(PLATFORMS), "Incomplete packaging coverage")

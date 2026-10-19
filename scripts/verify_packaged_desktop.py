@@ -126,7 +126,8 @@ def installed_cli(env):
         search.append(Path(env["LOCALAPPDATA"]) / "Nowledge Mem CLI/bin")
     else:
         search.extend((Path(env["HOME"]) / ".local/bin", Path("/usr/local/bin")))
-    env["PATH"] = os.pathsep.join(str(p) for p in search) + os.pathsep + env["PATH"]
+    existing = env["PATH"].split(os.pathsep)
+    env["PATH"] = os.pathsep.join([str(p) for p in search if str(p) not in existing] + existing)
     found = shutil.which("nmem", path=env["PATH"])
     if found is None:
         return None
@@ -143,6 +144,12 @@ def get_json(port, route):
         result = json.load(response)
     require(isinstance(result, dict), f"Non-object {route} response")
     return result
+
+
+def runtime_is_ready(details):
+    return (details.get("status") == "ok"
+            and details.get("database_connected") is True
+            and details.get("services_ready") is True)
 
 
 def verify(args):
@@ -192,10 +199,13 @@ def verify(args):
                     details = get_json(14249, "/health/details")
                     require(details.get("version") == args.version, f"Runtime version mismatch: {details!r}")
                     require(details.get("build_sha") == args.source_sha, f"Runtime SHA mismatch: {details!r}")
-                    cli = installed_cli(env)
-                    if cli is not None:
-                        break
-                    last_error = "Installed CLI is not on PATH"
+                    if runtime_is_ready(details):
+                        cli = installed_cli(env)
+                        if cli is not None:
+                            break
+                        last_error = "Installed CLI is not on PATH"
+                    else:
+                        last_error = f"Backend details are not ready: {details!r}"
                 except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
                     last_error = str(error)
                 time.sleep(0.5)
