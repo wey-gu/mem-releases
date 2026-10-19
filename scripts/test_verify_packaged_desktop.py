@@ -15,9 +15,20 @@ from desktop_version_receipts import accept, validate_build_identity
 from verify_packaged_desktop import PLATFORM_ARTIFACTS, PLATFORMS, command, exact_version, installed_cli, runtime_is_ready, unique
 from verify_packaged_desktop import validate_server_output, verify
 from verify_packaged_desktop import cli_command
+from verify_packaged_desktop import validate_windows_package_record, windows_package_registration
 
 
 class PackagedVersionContract(unittest.TestCase):
+    def test_windows_installer_and_executable_must_share_identity(self):
+        app = r'C:\Users\fixture\Nowledge Mem\nowledge-mem.exe'
+        good = {'DisplayName':'Nowledge Mem', 'DisplayVersion':'0.10.104',
+                'InstallLocation':r'"C:\Users\fixture\Nowledge Mem"', 'MainBinaryName':'nowledge-mem.exe'}
+        validate_windows_package_record(good, app, '0.10.104')
+        for field, bad in (('DisplayVersion','0.10.103'), ('DisplayVersion','0.0.0'),
+                           ('InstallLocation',r'C:\other\Nowledge Mem'), ('MainBinaryName','other.exe')):
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                validate_windows_package_record(dict(good, **{field:bad}), app, '0.10.104')
+
     def test_server_marker_must_be_unique_and_correct(self):
         sha = 'a' * 40
         good = f'nmem-server 0.10.104 (aaaaaaaaaaaa, built 1)\nnmem-build-sha:{sha}'
@@ -96,10 +107,22 @@ class PackagedVersionContract(unittest.TestCase):
             for platform in PLATFORMS:
                 receipt = dict(template, platform=platform, app_output=f"Nowledge Mem 0.10.104 ({platform})",
                                artifact_id=identity["artifacts"][PLATFORM_ARTIFACTS[platform]])
+                if platform == 'win':
+                    receipt['app_command'] = [r'C:\fixture\Nowledge Mem\nowledge-mem.exe']
+                    receipt['windows_package_registration'] = {
+                        'DisplayName':'Nowledge Mem', 'DisplayVersion':'0.10.104',
+                        'InstallLocation':r'"C:\fixture\Nowledge Mem"', 'MainBinaryName':'nowledge-mem.exe'}
                 path = root / f"{platform}.json"
                 originals[path] = receipt
                 path.write_text(json.dumps(receipt))
             self.assertEqual(accept(root, "0.10.104", sha, "123", identity), set(PLATFORMS))
+            windows = root / 'win.json'
+            mutant = copy.deepcopy(originals[windows])
+            mutant['windows_package_registration']['DisplayVersion'] = '0.10.103'
+            windows.write_text(json.dumps(mutant))
+            with self.assertRaisesRegex(RuntimeError, 'version'):
+                accept(root, "0.10.104", sha, "123", identity)
+            windows.write_text(json.dumps(originals[windows]))
             first = next(iter(originals))
             for field, bad in (("passed", False), ("version", "0.0.0"), ("source_sha", "c" * 40),
                                ("build_run_id", "122"), ("package_sha256", ""),
@@ -126,6 +149,26 @@ class PackagedVersionContract(unittest.TestCase):
 
 @unittest.skipUnless(os.name == 'nt', 'Requires real Windows cmd.exe')
 class WindowsCommandContract(unittest.TestCase):
+    def test_real_registry_readback_requires_installed_version(self):
+        import uuid
+        import winreg
+
+        key = 'Software\\NowledgeMemReleaseAcceptance-' + str(uuid.uuid4())
+        app = r'C:\fixture\Nowledge Mem\nowledge-mem.exe'
+        handle = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_ALL_ACCESS | winreg.KEY_WOW64_64KEY)
+        try:
+            with handle:
+                for name, value in {'DisplayName':'Nowledge Mem', 'DisplayVersion':'0.10.104',
+                                    'InstallLocation':r'"C:\fixture\Nowledge Mem"',
+                                    'MainBinaryName':'nowledge-mem.exe'}.items():
+                    winreg.SetValueEx(handle, name, 0, winreg.REG_SZ, value)
+                self.assertEqual(windows_package_registration(app, '0.10.104', key)['DisplayVersion'], '0.10.104')
+                winreg.SetValueEx(handle, 'DisplayVersion', 0, winreg.REG_SZ, '0.10.103')
+                with self.assertRaises(RuntimeError):
+                    windows_package_registration(app, '0.10.104', key)
+        finally:
+            winreg.DeleteKeyEx(winreg.HKEY_CURRENT_USER, key, winreg.KEY_WOW64_64KEY)
+
     def test_spaced_wrapper_path_stdout_and_nonzero_exit(self):
         with tempfile.TemporaryDirectory(prefix='nmem CLI path ') as directory:
             wrapper = Path(directory) / 'nmem.cmd'
@@ -181,6 +224,24 @@ class ProducerFailureContract(unittest.TestCase):
         receipt = json.loads(self.args.receipt.read_text())
         self.assertTrue(receipt['passed'])
         self.assertEqual(receipt['source_sha'], self.sha)
+
+    def test_windows_registration_mismatch_never_writes_success(self):
+        self.args.platform = 'win'
+        app = r'C:\fixture\Nowledge Mem\nowledge-mem.exe'
+        self.mocks['installed_app'].return_value = ([app], self.args.package.parent, {})
+        self.mocks['command'].side_effect = ['Nowledge Mem 0.10.104 (win)', *self.outputs[1:]]
+        record = {'DisplayName':'Nowledge Mem', 'DisplayVersion':'0.10.103',
+                  'InstallLocation':r'"C:\fixture\Nowledge Mem"', 'MainBinaryName':'nowledge-mem.exe'}
+
+        def read_registration(executable, version):
+            validate_windows_package_record(record, executable, version)
+            return record
+
+        with patch('verify_packaged_desktop.windows_package_registration', side_effect=read_registration) as read:
+            with self.assertRaisesRegex(RuntimeError, 'version'):
+                verify(self.args)
+            read.assert_called_once_with(app, '0.10.104')
+        self.assertFalse(self.args.receipt.exists())
 
     def test_not_ready_same_version_and_sha_never_writes_success(self):
         self.details.update(status='error', database_connected=False, services_ready=False)

@@ -8,6 +8,7 @@ import re
 import sys
 
 from verify_packaged_desktop import PLATFORM_ARTIFACTS, PLATFORMS, require, runtime_is_ready, validate_server_output
+from verify_packaged_desktop import validate_windows_package_record
 
 
 def validate_build_identity(run, release_tag):
@@ -36,6 +37,10 @@ def accept(root, version, source_sha, build_run_id, identity):
         require(re.fullmatch(r"[0-9a-f]{64}", receipt.get("package_sha256", "")) is not None,
                 f"Missing package digest: {path}")
         require(receipt.get("app_output") == f"Nowledge Mem {version} ({platform})", f"App mismatch: {path}")
+        if platform == "win":
+            app = receipt.get("app_command", [])
+            require(len(app) == 1, "Missing installed Windows executable path")
+            validate_windows_package_record(receipt.get("windows_package_registration") or {}, app[0], version)
         server_output = receipt.get("server_output", "")
         validate_server_output(server_output, version, source_sha)
         require(receipt.get("health_details", {}).get("version") == version, f"Runtime mismatch: {path}")
