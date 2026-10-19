@@ -24,8 +24,8 @@ against the exact tag-push workflow identity. Runtime checks preserve the
 image's default user, PATH, dependencies and filesystem. No replacement binary,
 host bind mount, user override or injected dependency is used. Every created
 container is removed even when execution fails; cleanup failure is fatal.
-Failed version commands report their exact invocation, exit code and bounded
-captured stdout/stderr before cleanup, so a runtime loader failure is actionable.
+Failed version commands retain their exact invocation, exit code and bounded
+captured stdout/stderr through cleanup, so a runtime loader failure is actionable.
 
 The actual installed server, CLI, both TUI invocation paths and legacy reader
 execute in the final image. Server, CLI and TUI report the numeric App version;
