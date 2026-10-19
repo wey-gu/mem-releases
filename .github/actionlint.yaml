@@ -1,0 +1,6 @@
+self-hosted-runner:
+  # Custom labels of the repository's self-hosted runners.
+  labels:
+    - mac-mini-m4
+    - windows-book
+    - windows-book-feasibility
