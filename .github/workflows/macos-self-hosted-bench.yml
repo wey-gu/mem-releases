@@ -1,0 +1,227 @@
+# Release-shape macOS build on the self-hosted Mac mini (M4), for timing only.
+#
+# nowledge-co/mem#7108 P5: the hosted macOS jobs are the release long pole
+# (0.10.103-rc2: arm64 59 min, x86_64 94 min on macos-15-intel). This runs the
+# same two build commands the release jobs run, on the `mac-mini-m4` runner,
+# so the two can be compared step by step:
+#   arm64:  native, same flags as build-macos-arm64;
+#   x86_64: cross-compiled from Apple Silicon. build-rust-bundle.sh only allows
+#           the Bazel public binaries for the host target, so this leg builds
+#           every binary with Cargo.
+#
+#   intel-x86_64: native x86_64 on the `macbook-intel` runner (i5-8259U),
+#           also a real-Intel reference for the cross-compiled binary.
+#
+# UNSIGNED (owner-approved for the comparison): no Apple secret is exposed to
+# these jobs; build-macos.sh --unsigned signs ad hoc and never notarizes. The
+# DMG is not uploaded anywhere. This workflow has no side effects and cannot
+# publish: it only builds, checks the architecture of what it built, and
+# prints timings. Dispatch only; no pull_request trigger can reach the runner.
+name: macos-self-hosted-bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "nowledge-co/mem branch, tag, or SHA to build (needs build-macos.sh --unsigned)"
+        required: true
+        default: main
+      legs:
+        description: "Comma-separated legs: mini-arm64, mini-x86_64 (cross), intel-x86_64 (native, MacBook Pro i5)"
+        required: true
+        default: "mini-arm64,mini-x86_64"
+      use_sccache:
+        description: "Use the shared R2 sccache like the hosted jobs (off = local cold compile)"
+        required: false
+        type: boolean
+        default: true
+
+# One runner: never run two benches at once (they would share the machine).
+concurrency:
+  group: macos-self-hosted-bench
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  NMEM_BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-nowledge
+  GCP_BAZEL_CACHE_PROJECT_ID: ci-cd-503413
+  GCP_BAZEL_CACHE_SERVICE_ACCOUNT: github-bazel-cache@ci-cd-503413.iam.gserviceaccount.com
+  GCP_BAZEL_CACHE_WORKLOAD_IDENTITY_PROVIDER: projects/789880242959/locations/global/workloadIdentityPools/github-actions/providers/nowledge-mem
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        shell: python
+        env:
+          LEGS: ${{ inputs.legs }}
+        run: |
+          import json, os
+          known = {
+              "mini-arm64": {"leg": "mini-arm64", "runner": "mac-mini-m4", "arch": "arm64",
+                             "target": "aarch64-apple-darwin", "bundle_flags": "--bazel-public-binaries"},
+              # build-rust-bundle.sh allows the Bazel public binaries only for the host target.
+              "mini-x86_64": {"leg": "mini-x86_64", "runner": "mac-mini-m4", "arch": "x86_64",
+                              "target": "x86_64-apple-darwin", "bundle_flags": ""},
+              "intel-x86_64": {"leg": "intel-x86_64", "runner": "macbook-intel", "arch": "x86_64",
+                               "target": "x86_64-apple-darwin", "bundle_flags": "--bazel-public-binaries"},
+          }
+          legs = [l.strip() for l in os.environ["LEGS"].split(",") if l.strip()]
+          unknown = [l for l in legs if l not in known]
+          if unknown or not legs:
+              raise SystemExit(f"unknown or empty legs {unknown}; choose from {sorted(known)}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write("matrix=" + json.dumps({"include": [known[l] for l in legs]}) + "\n")
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: ${{ matrix.leg }}
+    runs-on: [self-hosted, macOS, "${{ matrix.runner }}"]
+    timeout-minutes: 240
+    env:
+      ARCH: ${{ matrix.arch }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Checkout private source (nowledge-co/mem)
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: ${{ inputs.source_ref }}
+          submodules: false
+          persist-credentials: false
+
+      - name: Toolchain report
+        shell: bash
+        run: |
+          set -euo pipefail
+          sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
+          sw_vers
+          for t in python3 cmake ninja protoc bazel cargo rustc rustup; do
+            printf '%-8s ' "$t"; command -v "$t" || { echo "::error::$t not on PATH (see ~/actions-runner/.path)"; exit 1; }
+          done
+          python3 --version
+          rustup default 1.98.1
+          rustup target add "$TARGET"
+          rustc --version
+          df -h "$GITHUB_WORKSPACE" | tail -1
+
+      - name: Initialize Rust path dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/nmem-pdfium-cache" >> "$GITHUB_ENV"
+          git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git \
+              -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
+              submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
+          # lbug builds its extension archives inside the source tree, and the
+          # checkout's clean step does not reach into submodules. A previous
+          # leg for the other architecture would leave archives this link
+          # cannot use ("Undefined symbols for architecture ...").
+          rm -rf upstream_forks/ladybug/extension/*/build
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup sccache
+        if: inputs.use_sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Point sccache at R2
+        if: inputs.use_sccache
+        shell: bash
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_KEY: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          R2_SECRET: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        run: |
+          sccache --version
+          {
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
+            echo "RUSTC_WRAPPER=sccache"
+            echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
+            echo "SCCACHE_GHA_ENABLED=false"
+            echo "SCCACHE_BUCKET=nowledge-mem-sccache"
+            echo "SCCACHE_REGION=auto"
+            echo "SCCACHE_ENDPOINT=https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+            echo "AWS_ACCESS_KEY_ID=${R2_KEY}"
+            echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET}"
+          } >> "$GITHUB_ENV"
+
+      - name: Install pnpm deps
+        working-directory: nowledge-graph
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Install deterministic DMG layout tool
+        working-directory: nowledge-graph
+        run: python3 -m pip install --disable-pip-version-check --no-input --requirement scripts/requirements-dmg-layout.txt
+
+      - name: Authenticate Bazel remote cache
+        if: matrix.bundle_flags != ''
+        continue-on-error: true
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.GCP_BAZEL_CACHE_PROJECT_ID }}
+          workload_identity_provider: ${{ env.GCP_BAZEL_CACHE_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_BAZEL_CACHE_SERVICE_ACCOUNT }}
+
+      - name: Build rust backend (${{ matrix.arch }})
+        working-directory: nowledge-graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf python-standalone rust-backend
+          start=$(date +%s)
+          ./scripts/build-rust-bundle.sh --channel production --target "$TARGET" ${{ matrix.bundle_flags }}
+          echo "BUNDLE_SECONDS=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
+
+      - name: Build app + DMG (${{ matrix.arch }}, unsigned)
+        working-directory: nowledge-graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          ./scripts/build-macos.sh --arch "$ARCH" --skip-python --unsigned
+          echo "APP_SECONDS=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
+
+      - name: Check what was built
+        working-directory: nowledge-graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          DMG="$(find "src-tauri/target/$TARGET/release/bundle/dmg" -name '*.dmg' -print -quit)"
+          [[ -n "$DMG" && -f "$DMG" ]] || { echo "::error::No DMG produced"; exit 1; }
+          ls -lh "$DMG"
+          for bin in rust-backend/nmem-server rust-backend/nmem; do
+            [[ -f "$bin" ]] || continue
+            archs="$(lipo -archs "$bin")"
+            echo "$bin: $archs"
+            [[ "$archs" == "$ARCH" ]] || { echo "::error::$bin is $archs, expected $ARCH"; exit 1; }
+          done
+          otool -l rust-backend/nmem-server | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print "minos", $2; exit}'
+          if [[ "$ARCH" == x86_64 ]]; then
+            # Rosetta runs the cross-compiled server: a real start, not just a header check.
+            arch -x86_64 rust-backend/nmem-server --version
+          fi
+          if command -v sccache >/dev/null && [[ -n "${RUSTC_WRAPPER:-}" ]]; then sccache --show-stats || true; fi
+          {
+            echo "### ${{ matrix.leg }} (${{ matrix.runner }})"
+            echo "| step | minutes |"
+            echo "|---|---|"
+            echo "| build-rust-bundle.sh | $(( BUNDLE_SECONDS / 60 )) |"
+            echo "| build-macos.sh (unsigned) | $(( APP_SECONDS / 60 )) |"
+          } >> "$GITHUB_STEP_SUMMARY"
