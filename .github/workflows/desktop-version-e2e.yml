@@ -188,17 +188,18 @@ jobs:
           PACKAGE: ${{ steps.package.outputs.path }}
         run: |
           set -euo pipefail
-          mkdir -p receipts
-          docker run --rm -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
+          mkdir -p receipts "$RUNNER_TEMP/rpm-version-e2e"
+          docker run --rm -v "$GITHUB_WORKSPACE:/workspace" \
+            -v "$RUNNER_TEMP/rpm-version-e2e:/acceptance" -w /workspace \
             -e PACKAGE="/workspace/${PACKAGE#"$GITHUB_WORKSPACE/"}" \
             -e VERIFY_VERSION -e SOURCE_SHA -e BUILD_RUN_ID -e GITHUB_ACTIONS fedora:44 bash -euc '
               dnf -y install python3 xorg-x11-server-Xvfb dbus-x11 procps-ng "$PACKAGE"
               useradd -m acceptance
-              chown acceptance:acceptance /workspace/receipts
+              chown acceptance:acceptance /workspace/receipts /acceptance
               runuser -u acceptance -- dbus-run-session -- xvfb-run -a python3 scripts/verify_packaged_desktop.py \
                 --package "$PACKAGE" --app /usr/bin/nowledge-mem --platform linux-rpm --version "$VERIFY_VERSION" \
                 --source-sha "$SOURCE_SHA" --build-run-id "$BUILD_RUN_ID" \
-                --work /tmp/version-e2e --receipt receipts/linux-rpm.json
+                --work /acceptance/work --receipt receipts/linux-rpm.json
             '
       - uses: actions/upload-artifact@v4
         if: always()
@@ -207,6 +208,7 @@ jobs:
           path: |
             receipts/*.json
             ${{ runner.temp }}/version-e2e/app.log
+            ${{ runner.temp }}/rpm-version-e2e/work/app.log
           if-no-files-found: warn
           retention-days: 14
 
