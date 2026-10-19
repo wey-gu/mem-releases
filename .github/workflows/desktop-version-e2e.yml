@@ -191,7 +191,7 @@ jobs:
           mkdir -p receipts
           docker run --rm -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
             -e PACKAGE="/workspace/${PACKAGE#"$GITHUB_WORKSPACE/"}" \
-            -e VERIFY_VERSION -e SOURCE_SHA -e BUILD_RUN_ID fedora:44 bash -euc '
+            -e VERIFY_VERSION -e SOURCE_SHA -e BUILD_RUN_ID -e GITHUB_ACTIONS fedora:44 bash -euc '
               dnf -y install python3 xorg-x11-server-Xvfb dbus-x11 procps-ng "$PACKAGE"
               useradd -m acceptance
               chown acceptance:acceptance /workspace/receipts
