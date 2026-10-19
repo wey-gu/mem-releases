@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from desktop_version_receipts import accept, validate_build_identity
 from verify_packaged_desktop import PLATFORM_ARTIFACTS, PLATFORMS, command, exact_version, installed_cli, runtime_is_ready, unique
 from verify_packaged_desktop import validate_server_output, verify
+from verify_packaged_desktop import cli_command
 
 
 class PackagedVersionContract(unittest.TestCase):
@@ -121,6 +122,18 @@ class PackagedVersionContract(unittest.TestCase):
             first.unlink()
             with self.assertRaises(RuntimeError):
                 accept(root, "0.10.104", sha, "123", identity)
+
+
+@unittest.skipUnless(os.name == 'nt', 'Requires real Windows cmd.exe')
+class WindowsCommandContract(unittest.TestCase):
+    def test_spaced_wrapper_path_stdout_and_nonzero_exit(self):
+        with tempfile.TemporaryDirectory(prefix='nmem CLI path ') as directory:
+            wrapper = Path(directory) / 'nmem.cmd'
+            wrapper.write_text('@echo off\necho nmem 0.10.104\nexit /b 0\n')
+            self.assertEqual(command(cli_command(wrapper)), 'nmem 0.10.104')
+            wrapper.write_text('@echo off\nexit /b 17\n')
+            with self.assertRaises(subprocess.CalledProcessError):
+                command(cli_command(wrapper))
 
 
 class ProducerFailureContract(unittest.TestCase):

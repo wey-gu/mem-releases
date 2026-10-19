@@ -36,6 +36,17 @@ jobs:
           python-version: '3.14'
       - run: python -m unittest discover -s scripts -p test_verify_packaged_desktop.py -v
 
+  windows-command-contract:
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - working-directory: scripts
+        run: python -m unittest test_verify_packaged_desktop.WindowsCommandContract -v
+
   identity:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
@@ -90,7 +101,7 @@ jobs:
           PY
 
   native:
-    needs: [contract, identity]
+    needs: [contract, windows-command-contract, identity]
     strategy:
       fail-fast: false
       matrix:
