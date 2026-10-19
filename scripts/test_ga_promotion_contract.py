@@ -126,7 +126,12 @@ class GAPromotionContractTest(unittest.TestCase):
             for args in bash_calls:
                 with self.subTest(workflow=name, args=args):
                     self.assertNotIn("--bazel-hawdb-server", args, "Production cannot build the Nightly server")
-                    self.assertIn("--bazel-public-binaries", args)
+                    # The macOS x86_64 leg drops the Bazel public binaries only
+                    # when cross-compiled on Apple Silicon (the script refuses
+                    # them for a non-native target); see the x86_64 test below.
+                    self.assertTrue("--bazel-public-binaries" in args
+                                    or (args[-1] == '${bazel_flag:+$bazel_flag}'
+                                        and "x86_64-apple-darwin" in args), args)
                     self.assertIn("--channel", args)
                     self.assertEqual(sum(arg == "--channel" or arg.startswith("--channel=")
                                          for arg in args), 1, "Production channel must be unique")
@@ -496,16 +501,57 @@ class GAPromotionContractTest(unittest.TestCase):
         self.assertIn("uses: actions/checkout@v4", publish)
 
     def test_macos_arm64_builds_the_clis_serially(self):
-        # The 7 GB arm64 runner stalled for 246 minutes with the CLI lane
-        # overlapped (run 38582266817); the 14 GB x86_64 runner overlaps fine.
+        # The 7 GB hosted arm64 runner stalled for 246 minutes with the CLI
+        # lane overlapped (run 38582266817); the 14 GB x86_64 runner and the
+        # 16 GB self-hosted Mac mini overlap fine.
         workflow = (
             ROOT / ".github" / "workflows" / "release-desktop.yml"
         ).read_text()
         arm = workflow.split("\n  build-macos-arm64:\n", 1)[1].split("\n  build-macos-x86_64:\n", 1)[0]
         x86 = workflow.split("\n  build-macos-x86_64:\n", 1)[1].split("\n  build-windows:\n", 1)[0]
         job_env = arm.split("\n    env:\n", 1)[1].split("\n    steps:\n", 1)[0]
-        self.assertIn('      NMEM_DESKTOP_PARALLEL_CLI: "0"\n', job_env + "\n")
+        line = next(l for l in job_env.splitlines() if l.strip().startswith("NMEM_DESKTOP_PARALLEL_CLI:"))
+        expr = line.split(":", 1)[1].strip()
+        for self_hosted, expected in (("true", "auto"), ("false", "0"), ("", "0")):
+            self.assertEqual(github_expr(expr, {"needs.select-macos-runner.outputs.self_hosted": self_hosted}),
+                             expected, self_hosted)
         self.assertNotIn("NMEM_DESKTOP_PARALLEL_CLI", x86)
+
+    def test_macos_legs_follow_the_runner_selection(self):
+        jobs = load_release_desktop()["jobs"]
+        select = jobs["select-macos-runner"]
+        self.assertEqual(select["runs-on"], "ubuntu-latest")
+        self.assertEqual(set(select["outputs"]), {"arm64", "x86_64", "self_hosted"})
+        run = next(s for s in select["steps"] if s.get("id") == "select")["run"]
+        self.assertEqual(run.strip(), "node scripts/select-macos-runner.mjs")
+        for job, output in (("build-macos-arm64", "arm64"), ("build-macos-x86_64", "x86_64")):
+            with self.subTest(job=job):
+                self.assertEqual(jobs[job]["needs"], ["meta", "select-macos-runner"])
+                self.assertEqual(jobs[job]["runs-on"],
+                                 f"${{{{ fromJSON(needs.select-macos-runner.outputs.{output}) }}}}")
+                steps = jobs[job]["steps"]
+                names = [s.get("name") for s in steps]
+                # The signing keychain is removed last, whatever happened.
+                self.assertEqual(names[-1], "Remove the signing keychain")
+                self.assertEqual(steps[-1]["if"], "always()")
+                self.assertIn('security delete-keychain "$KEYCHAIN"', steps[-1]["run"])
+                imp = next(s for s in steps if s.get("name") == "Import code-signing certificate")
+                self.assertLess(imp["run"].index('security delete-keychain "$KEYCHAIN"'),
+                                imp["run"].index("security create-keychain"))
+                self.assertNotIn("mapfile -t", imp["run"] + steps[-1]["run"], "/bin/bash 3.2 on a self-hosted Mac")
+                init = next(s for s in steps if str(s.get("name", "")).startswith("Initialize Rust path dependencies"))
+                self.assertIn("rm -rf upstream_forks/ladybug/extension/*/build", init["run"])
+                bazel = next(s for s in steps if s.get("name") == "Set up Bazel")
+                self.assertEqual(bazel["if"], "runner.environment != 'self-hosted'")
+        sccache = next(s for s in jobs["build-macos-arm64"]["steps"] if s.get("id") == "setup_sccache")
+        for env, os_name, expected in (("github-hosted", "macOS", True), ("self-hosted", "macOS", True),
+                                       ("self-hosted", "Windows", False), ("github-hosted", "Windows", True)):
+            self.assertEqual(github_expr(sccache["if"], {"runner.environment": env, "runner.os": os_name}),
+                             expected, (env, os_name))
+        x86_build = next(s for s in jobs["build-macos-x86_64"]["steps"]
+                         if str(s.get("name", "")).startswith("Build (x86_64"))["run"]
+        self.assertIn('if [[ "$(uname -m)" == arm64 ]]; then bazel_flag=; fi', x86_build)
+        self.assertIn("bazel_flag=--bazel-public-binaries\n", x86_build)
 
     def test_rpm_is_bundled_from_the_deb_appimage_build(self):
         workflow = (
@@ -1205,7 +1251,9 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
                 with self.subTest(is_nightly=is_nightly, job=job):
                     self.assertTrue(github_expr(self.jobs[job].get("if", "true"), context),
                                     "Default platform builds run without windows_only")
-                    expected_needs = ["meta", "select-windows-runner"] if job == "build-windows" else "meta"
+                    expected_needs = {"build-windows": ["meta", "select-windows-runner"],
+                                      "build-macos-arm64": ["meta", "select-macos-runner"],
+                                      "build-macos-x86_64": ["meta", "select-macos-runner"]}.get(job, "meta")
                     self.assertEqual(self.jobs[job]["needs"], expected_needs)
                     uploads = [s for s in self.jobs[job]["steps"]
                                if str(s.get("uses", "")).startswith("actions/upload-artifact")

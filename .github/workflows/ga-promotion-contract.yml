@@ -23,6 +23,8 @@ on:
       - scripts/test_date_ga_changelog.mjs
       - scripts/select-windows-runner.mjs
       - scripts/test_select_windows_runner.mjs
+      - scripts/select-macos-runner.mjs
+      - scripts/test_select_macos_runner.mjs
       - scripts/test_ga_promotion_contract.py
       - scripts/verify-ga-delivery.mjs
       - scripts/test_verify_ga_delivery.mjs
@@ -83,6 +85,8 @@ on:
       - scripts/test_date_ga_changelog.mjs
       - scripts/select-windows-runner.mjs
       - scripts/test_select_windows_runner.mjs
+      - scripts/select-macos-runner.mjs
+      - scripts/test_select_macos_runner.mjs
       - scripts/test_ga_promotion_contract.py
       - scripts/verify-ga-delivery.mjs
       - scripts/test_verify_ga_delivery.mjs
@@ -147,3 +151,5 @@ jobs:
         run: node --test scripts/test_rpm_ga_policy.mjs scripts/test_reconcile_rpm_release_asset.mjs scripts/test_reconcile_rpm_r2.mjs
       - name: Check Windows runner selection and fallback
         run: node --test scripts/test_select_windows_runner.mjs
+      - name: Check macOS runner selection and fallback
+        run: node --test scripts/test_select_macos_runner.mjs
