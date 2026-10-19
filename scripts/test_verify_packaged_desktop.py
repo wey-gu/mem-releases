@@ -116,6 +116,13 @@ class PackagedVersionContract(unittest.TestCase):
                 originals[path] = receipt
                 path.write_text(json.dumps(receipt))
             self.assertEqual(accept(root, "0.10.104", sha, "123", identity), set(PLATFORMS))
+            windows = root / 'win.json'
+            mutant = copy.deepcopy(originals[windows])
+            mutant['windows_package_registration']['DisplayVersion'] = '0.10.103'
+            windows.write_text(json.dumps(mutant))
+            with self.assertRaisesRegex(RuntimeError, 'version'):
+                accept(root, "0.10.104", sha, "123", identity)
+            windows.write_text(json.dumps(originals[windows]))
             first = next(iter(originals))
             for field, bad in (("passed", False), ("version", "0.0.0"), ("source_sha", "c" * 40),
                                ("build_run_id", "122"), ("package_sha256", ""),
@@ -217,6 +224,24 @@ class ProducerFailureContract(unittest.TestCase):
         receipt = json.loads(self.args.receipt.read_text())
         self.assertTrue(receipt['passed'])
         self.assertEqual(receipt['source_sha'], self.sha)
+
+    def test_windows_registration_mismatch_never_writes_success(self):
+        self.args.platform = 'win'
+        app = r'C:\fixture\Nowledge Mem\nowledge-mem.exe'
+        self.mocks['installed_app'].return_value = ([app], self.args.package.parent, {})
+        self.mocks['command'].side_effect = ['Nowledge Mem 0.10.104 (win)', *self.outputs[1:]]
+        record = {'DisplayName':'Nowledge Mem', 'DisplayVersion':'0.10.103',
+                  'InstallLocation':r'"C:\fixture\Nowledge Mem"', 'MainBinaryName':'nowledge-mem.exe'}
+
+        def read_registration(executable, version):
+            validate_windows_package_record(record, executable, version)
+            return record
+
+        with patch('verify_packaged_desktop.windows_package_registration', side_effect=read_registration) as read:
+            with self.assertRaisesRegex(RuntimeError, 'version'):
+                verify(self.args)
+            read.assert_called_once_with(app, '0.10.104')
+        self.assertFalse(self.args.receipt.exists())
 
     def test_not_ready_same_version_and_sha_never_writes_success(self):
         self.details.update(status='error', database_connected=False, services_ready=False)
