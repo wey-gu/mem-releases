@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import subprocess
 import uuid
 
 from verify_packaged_desktop import command, exact_version, require, validate_server_output
@@ -179,7 +180,14 @@ def probe(identity, arch):
         try:
             command(["docker", "create", "--name", name, "--network", "none", "--entrypoint", "/bin/sh",
                      child, "-ec", "exec " + shell])
-            output = command(["docker", "start", "--attach", name], timeout=90)
+            try:
+                output = command(["docker", "start", "--attach", name], timeout=90)
+            except subprocess.CalledProcessError as error:
+                raise RuntimeError(
+                    f"Packaged command {shell!r} exited {error.returncode}; "
+                    f"stdout={str(error.stdout or '').strip()[:4096]!r}; "
+                    f"stderr={str(error.stderr or '').strip()[:4096]!r}"
+                ) from error
             state = json.loads(command(["docker", "inspect", "--format", "{{json .State}}", name]))
             require(state["Status"] == "exited" and state["ExitCode"] == 0 and not state["OOMKilled"],
                     "Packaged command did not exit successfully")

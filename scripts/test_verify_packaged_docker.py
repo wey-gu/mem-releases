@@ -85,7 +85,9 @@ elif args[0] == 'start':
                'nmem-legacy-graph-reader --version': json.dumps({
                    'engine': 'kuzu-0.11.0', 'protocol': 1, 'mem_commit': 'a' * 40})}
     if shell == 'nmem --version' and os.environ.get('FIXTURE_LAUNCH_FAIL'):
-        sys.exit(17)
+        print('fixture startup output')
+        print('fixture runtime dependency missing', file=sys.stderr)
+        sys.exit(int(os.environ.get('FIXTURE_LAUNCH_EXIT_CODE', '17')))
     print(outputs[shell])
 elif args[0] == 'rm':
     assert '--force' in args and '--volumes' in args
@@ -155,6 +157,39 @@ class NativeBoundary(unittest.TestCase):
 
     def test_previous_cli_rejected(self):
         self.assert_cli_mismatch_rejected()
+
+    def assert_launch_diagnostics(self, script=None):
+        result = self.run_probe(script=script, FIXTURE_LAUNCH_FAIL="1", FIXTURE_LAUNCH_EXIT_CODE="127")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.receipt.exists())
+        self.assertEqual(list(self.root.glob("nmem-version-*")), [])
+        self.assertIn("Packaged command 'nmem --version' exited 127", result.stderr,
+                      "Missing packaged command identity and exit code")
+        self.assertIn("fixture startup output", result.stderr)
+        self.assertIn("fixture runtime dependency missing", result.stderr)
+
+    def test_failed_launch_reports_captured_output(self):
+        self.assert_launch_diagnostics()
+
+    def test_diagnostic_removal_is_caught_by_unchanged_assertion(self):
+        source = Path(verify.__file__).read_text()
+        target = '''f"Packaged command {shell!r} exited {error.returncode}; "
+                    f"stdout={str(error.stdout or '').strip()[:4096]!r}; "
+                    f"stderr={str(error.stderr or '').strip()[:4096]!r}"'''
+        self.assertEqual(source.count(target), 1)
+        mutant = self.root / "mutant-diagnostics.py"
+        mutant.write_text(source.replace(target, '"Packaged command failed"'))
+        old = os.environ.get("PYTHONPATH")
+        os.environ["PYTHONPATH"] = str(Path(verify.__file__).parent)
+        try:
+            with self.assertRaisesRegex(AssertionError, "Missing packaged command identity and exit code"):
+                self.assert_launch_diagnostics(mutant)
+        finally:
+            if old is None:
+                os.environ.pop("PYTHONPATH", None)
+            else:
+                os.environ["PYTHONPATH"] = old
+        print("Mutation RED: unchanged launch assertion caught removed command diagnostics")
 
     def test_uncertain_create_failure_still_removes_container_and_volumes(self):
         result = self.run_probe(FIXTURE_CREATE_FAIL="1")

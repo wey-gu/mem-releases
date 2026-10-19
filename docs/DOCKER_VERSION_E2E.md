@@ -24,6 +24,8 @@ against the exact tag-push workflow identity. Runtime checks preserve the
 image's default user, PATH, dependencies and filesystem. No replacement binary,
 host bind mount, user override or injected dependency is used. Every created
 container is removed even when execution fails; cleanup failure is fatal.
+Failed version commands retain their exact invocation, exit code and bounded
+captured stdout/stderr through cleanup, so a runtime loader failure is actionable.
 
 The actual installed server, CLI, both TUI invocation paths and legacy reader
 execute in the final image. Server, CLI and TUI report the numeric App version;
@@ -50,6 +52,11 @@ evidence alongside these additive version receipts.
   rejects the identical fixture. CI owns execution and the observed result.
 - Unique coverage: final runtime CLI and TUI execution was absent from the
   builder-only version commands and post-publication HTTP server smoke.
+- Failure diagnostics: a real verifier subprocess receives exit 127 with both
+  output streams from the command-boundary fixture. It must retain the command,
+  exit and output, remove its container, and withhold a receipt. Removing only
+  the production diagnostic message makes the unchanged assertion RED; the
+  restored helper must pass. This does not qualify the failed runtime image.
 - CI budget: PR contract job, five-minute ceiling, no shared mutable service,
   no retries. Native jobs are explicit release acceptance only, twenty-minute
   ceiling per architecture, owned by the release operator. Fixtures prove the
