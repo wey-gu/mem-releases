@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import sys
 
-from verify_packaged_desktop import PLATFORM_ARTIFACTS, PLATFORMS, exact_version, require, runtime_is_ready
+from verify_packaged_desktop import PLATFORM_ARTIFACTS, PLATFORMS, require, runtime_is_ready, validate_server_output
 
 
 def validate_build_identity(run, release_tag):
@@ -37,9 +37,7 @@ def accept(root, version, source_sha, build_run_id, identity):
                 f"Missing package digest: {path}")
         require(receipt.get("app_output") == f"Nowledge Mem {version} ({platform})", f"App mismatch: {path}")
         server_output = receipt.get("server_output", "")
-        exact_version(server_output, "nmem-server", version)
-        require(server_output.splitlines().count(f"nmem-build-sha:{source_sha}") == 1,
-                f"Server build marker mismatch: {path}")
+        validate_server_output(server_output, version, source_sha)
         require(receipt.get("health_details", {}).get("version") == version, f"Runtime mismatch: {path}")
         require(receipt.get("health_details", {}).get("build_sha") == source_sha, f"Runtime SHA mismatch: {path}")
         require(runtime_is_ready(receipt.get("health_details", {})), f"Backend is not ready: {path}")

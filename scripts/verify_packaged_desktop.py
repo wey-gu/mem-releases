@@ -178,6 +178,12 @@ def runtime_is_ready(details):
             and details.get("services_ready") is True)
 
 
+def validate_server_output(output, version, source_sha):
+    exact_version(output, "nmem-server", version)
+    markers = [line for line in output.splitlines() if line.startswith("nmem-build-sha:")]
+    require(markers == [f"nmem-build-sha:{source_sha}"], "Packaged server build SHA mismatch")
+
+
 def verify(args):
     require(VERSION.fullmatch(args.version) is not None, "Expected a concrete nonzero version")
     require(re.fullmatch(r"[0-9a-f]{40}", args.source_sha) is not None, "Expected a full source SHA")
@@ -209,8 +215,7 @@ def verify(args):
     require(app_output == f"Nowledge Mem {args.version} ({args.platform})", f"App identity mismatch: {app_output!r}")
     server = bundled_server(resources, args.platform)
     server_output = command([server, "--version"], env=env, timeout=20)
-    exact_version(server_output, "nmem-server", args.version)
-    require(f"nmem-build-sha:{args.source_sha}" in server_output.splitlines(), "Packaged server build SHA mismatch")
+    validate_server_output(server_output, args.version, args.source_sha)
     log_path = work / "app.log"
     with log_path.open("wb") as log:
         proc = subprocess.Popen([str(item) for item in app], env=env, stdout=log, stderr=subprocess.STDOUT,

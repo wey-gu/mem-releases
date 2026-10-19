@@ -2,18 +2,30 @@
 
 import copy
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 from unittest.mock import patch
 import unittest
+from types import SimpleNamespace
 
 from desktop_version_receipts import accept, validate_build_identity
 from verify_packaged_desktop import PLATFORM_ARTIFACTS, PLATFORMS, command, exact_version, installed_cli, runtime_is_ready, unique
+from verify_packaged_desktop import validate_server_output, verify
 
 
 class PackagedVersionContract(unittest.TestCase):
+    def test_server_marker_must_be_unique_and_correct(self):
+        sha = 'a' * 40
+        good = f'nmem-server 0.10.104 (aaaaaaaaaaaa, built 1)\nnmem-build-sha:{sha}'
+        validate_server_output(good, '0.10.104', sha)
+        for bad in ('', 'nmem-server 0.10.103', good + '\nnmem-build-sha:' + 'b' * 40,
+                    good + f'\nnmem-build-sha:{sha}'):
+            with self.subTest(output=bad), self.assertRaises(RuntimeError):
+                validate_server_output(bad, '0.10.104', sha)
+
     def test_public_liveness_does_not_replace_detailed_readiness(self):
         healthy = {"status": "ok", "database_connected": True, "services_ready": True}
         self.assertTrue(runtime_is_ready(healthy))
@@ -109,6 +121,78 @@ class PackagedVersionContract(unittest.TestCase):
             first.unlink()
             with self.assertRaises(RuntimeError):
                 accept(root, "0.10.104", sha, "123", identity)
+
+
+class ProducerFailureContract(unittest.TestCase):
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self.scratch.cleanup)
+        root = Path(self.scratch.name)
+        package = root / 'candidate.dmg'
+        package.write_bytes(b'package identity fixture')
+        self.sha = 'a' * 40
+        self.args = SimpleNamespace(
+            package=package, app=None, platform='mac', version='0.10.104', source_sha=self.sha,
+            release_tag='v0.10.104-rc2', build_run_id='123', build_workflow_sha='c' * 40,
+            build_attempt='1', artifact_id='1', work=root/'work', receipt=root/'receipt.json',
+        )
+        self.details = {'status': 'ok', 'database_connected': True, 'services_ready': True,
+                        'version': '0.10.104', 'build_sha': self.sha}
+        self.outputs = ['Nowledge Mem 0.10.104 (mac)',
+                        f'nmem-server 0.10.104 (aaaaaaaaaaaa, built 1)\nnmem-build-sha:{self.sha}',
+                        'nmem 0.10.104']
+        patches = {
+            'installed_app': {'return_value': ([root/'App'], root, {})},
+            'bundled_server': {'return_value': root/'server'},
+            'installed_cli': {'return_value': root/'nmem'},
+            'command': {'side_effect': self.outputs},
+            'get_json': {'side_effect': lambda port, route: {'status':'ok'} if route == '/health' else self.details},
+            'time.monotonic': {'side_effect': [0, 0, 181]},
+            'time.sleep': {}, 'os.killpg': {}, 'subprocess.Popen': {}, 'socket.socket': {},
+        }
+        self.mocks = {}
+        for name, options in patches.items():
+            patcher = patch('verify_packaged_desktop.' + name, **options)
+            self.mocks[name] = patcher.start()
+            self.addCleanup(patcher.stop)
+        self.mocks['socket.socket'].return_value.__enter__.return_value.connect_ex.return_value = 1
+        proc = self.mocks['subprocess.Popen'].return_value
+        proc.poll.return_value = None
+        proc.wait.return_value = 0
+        patcher = patch.dict(os.environ, {'GITHUB_ACTIONS':'true'})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_healthy_control_writes_candidate_bound_receipt(self):
+        verify(self.args)
+        receipt = json.loads(self.args.receipt.read_text())
+        self.assertTrue(receipt['passed'])
+        self.assertEqual(receipt['source_sha'], self.sha)
+
+    def test_not_ready_same_version_and_sha_never_writes_success(self):
+        self.details.update(status='error', database_connected=False, services_ready=False)
+        with self.assertRaisesRegex(RuntimeError, 'Readiness timeout'):
+            verify(self.args)
+        self.assertFalse(self.args.receipt.exists())
+        self.mocks['installed_cli'].assert_not_called()
+
+    def test_app_exit_never_writes_success(self):
+        self.mocks['subprocess.Popen'].return_value.poll.return_value = 17
+        with self.assertRaisesRegex(RuntimeError, 'App exited'):
+            verify(self.args)
+        self.assertFalse(self.args.receipt.exists())
+
+    def test_probe_timeout_never_writes_success(self):
+        self.mocks['command'].side_effect = subprocess.TimeoutExpired('App --version', 20)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            verify(self.args)
+        self.assertFalse(self.args.receipt.exists())
+
+    def test_wrong_installed_cli_version_never_writes_success(self):
+        self.mocks['command'].side_effect = self.outputs[:2] + ['nmem 0.10.103']
+        with self.assertRaisesRegex(RuntimeError, 'version'):
+            verify(self.args)
+        self.assertFalse(self.args.receipt.exists())
 
 
 if __name__ == "__main__":
