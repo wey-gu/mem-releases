@@ -1,0 +1,133 @@
+name: docker-version-e2e
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Original tag-push release-docker run
+        required: true
+        type: string
+      release_tag:
+        description: Exact RC tag including v
+        required: true
+        type: string
+      source_sha:
+        description: Full Mem source commit
+        required: true
+        type: string
+      variant:
+        description: Independently accepted image variant
+        required: true
+        type: choice
+        options: [cpu, cuda, vulkan]
+      digest:
+        description: Original published image index digest including sha256
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - .github/workflows/docker-version-e2e.yml
+      - scripts/verify_packaged_docker.py
+      - scripts/test_verify_packaged_docker.py
+      - scripts/verify_packaged_desktop.py
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m unittest discover -s scripts -p test_verify_packaged_docker.py -v
+
+  identity:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bind the original producer and publication digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM_READ_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          VARIANT: ${{ inputs.variant }}
+          DIGEST: ${{ inputs.digest }}
+        run: |
+          python scripts/verify_packaged_docker.py identity --build-run-id "$BUILD_RUN_ID" \
+            --release-tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA" --variant "$VARIANT" \
+            --digest "$DIGEST" --output identity.json
+      - id: matrix
+        env:
+          VARIANT: ${{ inputs.variant }}
+        run: |
+          python - <<'PY'
+          import json, os
+          rows = [{'arch': 'amd64', 'runner': 'ubuntu-22.04'}]
+          if os.environ['VARIANT'] == 'cpu':
+              rows.append({'arch': 'arm64', 'runner': 'ubuntu-24.04-arm'})
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('matrix=' + json.dumps({'include': rows}) + '\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-version-identity
+          path: identity.json
+          if-no-files-found: error
+
+  native:
+    needs: [contract, identity]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.identity.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: sigstore/cosign-installer@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-version-identity
+      - name: Execute every installed version surface in the final image
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          python scripts/verify_packaged_docker.py probe --identity identity.json --arch "$ARCH" \
+            --output "receipts/$ARCH.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-version-${{ matrix.arch }}
+          path: receipts/*.json
+          if-no-files-found: error
+
+  accepted:
+    needs: [identity, native]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: docker-version-*
+          merge-multiple: true
+          path: downloaded
+      - name: Require every native receipt for the exact variant
+        run: |
+          mkdir receipts
+          find downloaded -name 'amd64.json' -o -name 'arm64.json' | while read -r file; do cp "$file" receipts/; done
+          python scripts/verify_packaged_docker.py aggregate --receipts receipts --identity downloaded/identity.json --output accepted.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-version-accepted
+          path: accepted.json
+          if-no-files-found: error
