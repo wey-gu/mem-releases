@@ -28,6 +28,8 @@ Rust runtime version. `browse-now` retains its independent component version.
 Detailed backend status, database connection and services must all be ready.
 CLI discovery observes a fresh login/Windows registry PATH; the verifier never
 adds a missing wrapper directory to make installation appear successful.
+Windows also reads the NSIS uninstall registration for that exact App path and
+requires its DisplayVersion, product name and executable identity to agree.
 
 Any install, launch, timeout, nonzero exit, malformed response, wrong identity,
 or absent CLI fails acceptance. Successful receipts include package SHA-256,

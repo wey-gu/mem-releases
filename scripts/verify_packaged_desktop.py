@@ -9,6 +9,7 @@ No source build, replacement binary, or injected backend is accepted.
 import argparse
 import hashlib
 import json
+import ntpath
 import os
 from pathlib import Path
 import plistlib
@@ -29,6 +30,7 @@ PLATFORM_ARTIFACTS = {
     "linux-deb": "linux-deb-appimage", "linux-appimage": "linux-deb-appimage", "linux-rpm": "linux-rpm",
 }
 VERSION = re.compile(r"[1-9][0-9]*\.[0-9]+\.[0-9]+|0\.[1-9][0-9]*\.[0-9]+|0\.0\.[1-9][0-9]*")
+WINDOWS_UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Nowledge Mem"
 
 
 def require(condition, message):
@@ -61,6 +63,44 @@ def unique(paths, description):
     paths = list(paths)
     require(len(paths) == 1, f"Expected one {description}; found {paths}")
     return paths[0]
+
+
+def windows_install_location(record):
+    return ntpath.normcase(ntpath.normpath(record.get("InstallLocation", "").strip('"')))
+
+
+def validate_windows_package_record(record, app, version):
+    require(record.get("DisplayName") == "Nowledge Mem", "Wrong installed Windows product")
+    require(record.get("DisplayVersion") == version and VERSION.fullmatch(version) is not None,
+            f"Installed Windows version mismatch: {record.get('DisplayVersion')!r}")
+    require(bool(record.get("InstallLocation"))
+            and windows_install_location(record) == ntpath.normcase(ntpath.dirname(str(app))),
+            "Windows package registration belongs to another install location")
+    require(record.get("MainBinaryName", "").casefold() == ntpath.basename(str(app)).casefold(),
+            "Windows package registration names another executable")
+
+
+def windows_package_registration(app, version, key=WINDOWS_UNINSTALL_KEY):
+    import winreg
+
+    records = []
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            handle = winreg.OpenKey(hive, key, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
+        except FileNotFoundError:
+            continue
+        with handle:
+            record = {}
+            for name in ("DisplayName", "DisplayVersion", "InstallLocation", "MainBinaryName"):
+                try:
+                    record[name] = winreg.QueryValueEx(handle, name)[0]
+                except FileNotFoundError:
+                    pass
+        if windows_install_location(record) == ntpath.normcase(ntpath.dirname(str(app))):
+            records.append(record)
+    record = unique(records, "Windows registration for the executing App")
+    validate_windows_package_record(record, app, version)
+    return record
 
 
 def installed_app(args, work):
@@ -210,6 +250,7 @@ def verify(args):
     with socket.socket() as probe:
         require(probe.connect_ex(("127.0.0.1", 14249)) != 0, "Backend port is already in use")
     app, resources, package_env = installed_app(args, work)
+    windows_registration = windows_package_registration(app[0], args.version) if args.platform == "win" else None
     env.update(package_env)
     app_output = command([*app, "--version"], env=env, timeout=20)
     require(app_output == f"Nowledge Mem {args.version} ({args.platform})", f"App identity mismatch: {app_output!r}")
@@ -257,6 +298,7 @@ def verify(args):
                 "app_command": [str(item) for item in app], "app_output": app_output,
                 "server": str(server), "server_output": server_output, "health_details": details,
                 "installed_cli": str(cli), "cli_output": cli_output,
+                "windows_package_registration": windows_registration,
             }
             args.receipt.parent.mkdir(parents=True, exist_ok=True)
             args.receipt.write_text(json.dumps(receipt, indent=2) + "\n")
