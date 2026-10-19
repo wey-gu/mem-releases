@@ -19,6 +19,7 @@ DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 SHA = re.compile(r"[0-9a-f]{40}")
 TAG = re.compile(r"v([0-9]+\.[0-9]+\.[0-9]+)-rc[1-9][0-9]*")
 ARCHES = {"cpu": {"amd64", "arm64"}, "cuda": {"amd64"}, "vulkan": {"amd64"}}
+GPU_QUERY = ["nvidia-smi", "--query-gpu=uuid,driver_version", "--format=csv,noheader,nounits"]
 SURFACES = {
     "server": ("nmem-server --version", "nmem-server"),
     "cli": ("nmem --version", "nmem"),
@@ -126,6 +127,47 @@ def validate_index(index, arch):
     return children[0]["digest"]
 
 
+def runner_matrix(variant, cuda_runner):
+    require(variant in ARCHES, "Invalid variant")
+    if variant == "cuda":
+        require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", cuda_runner) is not None,
+                "CUDA requires an approved existing NVIDIA runner label")
+        return {"include": [{"arch": "amd64", "runner": cuda_runner}]}
+    require(not cuda_runner, "CUDA runner is not applicable to this variant")
+    rows = [{"arch": "amd64", "runner": "ubuntu-22.04"}]
+    if variant == "cpu":
+        rows.append({"arch": "arm64", "runner": "ubuntu-24.04-arm"})
+    return {"include": rows}
+
+
+def validate_gpu_devices(devices):
+    require(isinstance(devices, dict) and bool(devices), "No NVIDIA GPU observed")
+    for device, driver in devices.items():
+        require(isinstance(device, str) and re.fullmatch(
+            r"GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", device) is not None,
+            "Invalid NVIDIA GPU identity")
+        require(isinstance(driver, str) and re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", driver) is not None,
+                "Invalid NVIDIA driver version")
+
+
+def parse_gpu_devices(output):
+    devices = {}
+    for line in output.splitlines():
+        fields = [field.strip() for field in line.split(",")]
+        require(len(fields) == 2 and fields[0] not in devices, "Invalid or duplicate NVIDIA GPU row")
+        devices[fields[0]] = fields[1]
+    validate_gpu_devices(devices)
+    return devices
+
+
+def validate_cuda_runtime(runtime):
+    require(isinstance(runtime, dict) and runtime.get("device_request") == "all",
+            "CUDA NVIDIA device request is missing")
+    validate_gpu_devices(runtime.get("host_gpus"))
+    validate_gpu_devices(runtime.get("container_gpus"))
+    require(runtime["host_gpus"] == runtime["container_gpus"], "Container NVIDIA driver/GPU differs from host")
+
+
 def validate_receipt(receipt):
     validate_identity(receipt["identity"])
     require(receipt["arch"] in ARCHES[receipt["identity"]["variant"]], "Wrong native architecture")
@@ -135,6 +177,8 @@ def validate_receipt(receipt):
     require(SHA.fullmatch(receipt["acceptance_workflow_sha"]) is not None, "Invalid acceptance workflow SHA")
     match = TAG.fullmatch(receipt["identity"]["release_tag"])
     validate_outputs(receipt["outputs"], match.group(1), receipt["identity"]["source_sha"])
+    if receipt["identity"]["variant"] == "cuda":
+        validate_cuda_runtime(receipt.get("cuda_runtime"))
 
 
 def probe(identity, arch):
@@ -146,6 +190,12 @@ def probe(identity, arch):
     engine = command(["docker", "info", "--format", "{{.Architecture}}"])
     require(engine in ({"x86_64", "amd64"} if arch == "amd64" else {"aarch64", "arm64"}),
             "Docker engine is not native")
+    host_gpus = None
+    if identity["variant"] == "cuda":
+        host_gpus = parse_gpu_devices(command(GPU_QUERY, timeout=30))
+        runtimes = json.loads(command(["docker", "info", "--format", "{{json .Runtimes}}"]))
+        require(isinstance(runtimes, dict) and "nvidia" in runtimes,
+                "NVIDIA Container Toolkit Docker runtime is missing")
     suffix = "" if identity["variant"] == "cpu" else "-" + identity["variant"]
     tag = IMAGE + ":" + identity["release_tag"][1:] + suffix
     manifest = json.loads(command(["docker", "buildx", "imagetools", "inspect", tag,
@@ -175,10 +225,11 @@ def probe(identity, arch):
             "Signature covers another digest")
 
     def execute(shell):
-        # Keep the image's default user, PATH, filesystem and dependencies.
+        # CUDA uses its documented NVIDIA host runtime, without replacing image files.
         name = "nmem-version-" + uuid.uuid4().hex
         try:
-            command(["docker", "create", "--name", name, "--network", "none", "--entrypoint", "/bin/sh",
+            device_options = ["--gpus", "all"] if identity["variant"] == "cuda" else []
+            command(["docker", "create", *device_options, "--name", name, "--network", "none", "--entrypoint", "/bin/sh",
                      child, "-ec", "exec " + shell])
             try:
                 output = command(["docker", "start", "--attach", name], timeout=90)
@@ -197,12 +248,19 @@ def probe(identity, arch):
 
     uid, gid = execute("id -u"), execute("id -g")
     require(uid == "10001" and gid == "10001", "Runtime is not the default unprivileged user")
+    cuda_runtime = None
+    if host_gpus is not None:
+        cuda_runtime = {"device_request": "all", "host_gpus": host_gpus,
+                        "container_gpus": parse_gpu_devices(execute(" ".join(GPU_QUERY)))}
+        validate_cuda_runtime(cuda_runtime)
     outputs = {name: execute(shell) for name, (shell, _) in SURFACES.items()}
     version = TAG.fullmatch(identity["release_tag"]).group(1)
     validate_outputs(outputs, version, identity["source_sha"])
     receipt = {"identity": identity, "arch": arch, "child_digest": child_digest, "config_id": config["Id"],
                "uid": uid, "gid": gid, "outputs": outputs, "commands": {key: value[0] for key, value in SURFACES.items()},
                "acceptance_workflow_sha": os.environ["GITHUB_SHA"], "acceptance_run_id": os.environ["GITHUB_RUN_ID"]}
+    if cuda_runtime is not None:
+        receipt["cuda_runtime"] = cuda_runtime
     validate_receipt(receipt)
     return receipt
 
@@ -227,6 +285,9 @@ def aggregate(directory, expected):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
+    matrix = sub.add_parser("matrix")
+    matrix.add_argument("--variant", required=True, choices=ARCHES)
+    matrix.add_argument("--cuda-runner", default="")
     producer = sub.add_parser("identity")
     producer.add_argument("--build-run-id", required=True, type=int)
     producer.add_argument("--release-tag", required=True)
@@ -239,11 +300,13 @@ def main():
     combined = sub.add_parser("aggregate")
     combined.add_argument("--receipts", type=Path, required=True)
     combined.add_argument("--identity", type=Path, required=True)
-    for item in (producer, native, combined):
+    for item in (matrix, producer, native, combined):
         item.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     require(not args.output.exists(), "Output already exists")
-    if args.mode == "identity":
+    if args.mode == "matrix":
+        result = runner_matrix(args.variant, args.cuda_runner)
+    elif args.mode == "identity":
         result = identity(args)
     elif args.mode == "probe":
         result = probe(json.loads(args.identity.read_text()), args.arch)
