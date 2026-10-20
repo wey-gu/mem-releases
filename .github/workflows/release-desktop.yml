@@ -95,6 +95,12 @@ on:
         required: false
         type: boolean
         default: false
+      macos_runner:
+        description: "macOS runners: auto uses the self-hosted Mac mini (both legs) when it is online, otherwise GitHub; hosted/self-hosted force a choice."
+        required: false
+        type: choice
+        options: [auto, hosted, self-hosted]
+        default: auto
   push:
     # Auto-fire on RC-style tags ONLY (anything with a `-` suffix:
     # `-rcN`, `-betaN`, `-ciN`). Clean-semver GA tags like `v0.8.4`
@@ -180,6 +186,51 @@ jobs:
           WINDOWS_RUNNER_RELEASE: ${{ steps.mode.outputs.release }}
           RUNNER_INVENTORY_TOKEN: ${{ steps.inventory-token.outputs.token }}
         run: node scripts/select-windows-runner.mjs
+
+  # nowledge-co/mem#7108 P5: the self-hosted Mac mini (M4) builds both macOS
+  # legs, arm64 natively and x86_64 cross-compiled from Apple Silicon; it was
+  # about three times faster than macos-15 / macos-15-intel. Unlike Windows,
+  # releases use it too. An offline mini, a missing inventory credential, or
+  # an API error falls back to GitHub-hosted, so it can never strand a release.
+  select-macos-runner:
+    if: ${{ inputs.windows_only != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    outputs:
+      arm64: ${{ steps.select.outputs.arm64 }}
+      x86_64: ${{ steps.select.outputs.x86_64 }}
+      self_hosted: ${{ steps.select.outputs.self_hosted }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: mode
+        env:
+          MODE: ${{ inputs.macos_runner || 'auto' }}
+          APP_CONFIGURED: ${{ secrets.RELEASE_APP_ID != '' && secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+        run: |
+          {
+            echo "mode=$MODE"
+            echo "app_configured=$APP_CONFIGURED"
+          } >> "$GITHUB_OUTPUT"
+      - id: inventory-token
+        if: ${{ steps.mode.outputs.mode == 'auto' && steps.mode.outputs.app_configured == 'true' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: mem-releases
+          permission-administration: read
+      - id: select
+        name: Prefer the online Mac mini; otherwise GitHub-hosted macOS
+        env:
+          MACOS_RUNNER_MODE: ${{ steps.mode.outputs.mode }}
+          RUNNER_INVENTORY_TOKEN: ${{ steps.inventory-token.outputs.token }}
+        run: node scripts/select-macos-runner.mjs
 
   windows-runner-probe:
     needs: select-windows-runner
@@ -432,8 +483,8 @@ jobs:
 
   build-macos-arm64:
     if: ${{ inputs.windows_only != true }}
-    needs: meta
-    runs-on: macos-15
+    needs: [meta, select-macos-runner]
+    runs-on: ${{ fromJSON(needs.select-macos-runner.outputs.arm64) }}
     # 300, not 180: a cold-cache build (any version bump) runs close to three
     # hours. On 0.10.101-rc1 (run 38250505560) build-macos-x86_64 finished its
     # build and uploaded the DMG at minute 175, then the 180-minute limit
@@ -459,8 +510,9 @@ jobs:
       # 246 minutes until cancelled (run 38582266817), while the serial
       # server compile takes 20-30 minutes (38550080175, 38582183103). The
       # 14 GB x86_64 runner overlaps fine (server crate in 35 min). Serial
-      # costs about 6 minutes here; arm64 is not the long pole.
-      NMEM_DESKTOP_PARALLEL_CLI: "0"
+      # costs about 6 minutes here; arm64 is not the long pole. The 16 GB
+      # self-hosted Mac mini keeps the script default (overlapped).
+      NMEM_DESKTOP_PARALLEL_CLI: ${{ needs.select-macos-runner.outputs.self_hosted == 'true' && 'auto' || '0' }}
     steps:
       - name: Checkout private source (nowledge-co/mem)
         uses: actions/checkout@v4
@@ -598,6 +650,10 @@ jobs:
           git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git \
               -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
               submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
+          # lbug writes its extension archives into the submodule source tree,
+          # which the checkout does not clean on a self-hosted Mac: archives
+          # from the other architecture's job would break this link.
+          rm -rf upstream_forks/ladybug/extension/*/build
 
       # No Swatinem/rust-cache and no setup-node `cache: pnpm` on the macOS and
       # Linux release jobs (nowledge-co/mem#7108; the Windows job dropped them
@@ -638,7 +694,9 @@ jobs:
       - &setup_sccache
         name: Setup sccache
         id: setup_sccache
-        if: runner.environment != 'self-hosted'
+        # windows-book brings its own sccache; the self-hosted Mac mini uses
+        # the same R2 cache as the hosted jobs.
+        if: runner.environment != 'self-hosted' || runner.os == 'macOS'
         continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.9
       - &wait_before_sccache_retry
@@ -702,13 +760,63 @@ jobs:
           CERT_P12="$RUNNER_TEMP/apple_cert.p12"
           echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_P12"
           KEYCHAIN="$RUNNER_TEMP/build.keychain"
+          security delete-keychain "$KEYCHAIN" 2>/dev/null || true
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security import "$CERT_P12" -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" \
             -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
-          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          # The Developer ID G2 intermediate that issued our signing
+          # certificate (public; issued by Apple Root CA). GitHub's macOS
+          # images ship it; the self-hosted Mac mini did not, and codesign
+          # failed with "unable to build chain to self-signed root" /
+          # errSecInternalComponent (run 39343118594). Pinned by SHA-256: the
+          # same certificate Apple publishes and our shipped apps embed.
+          G2="$RUNNER_TEMP/DeveloperIDG2CA.pem"
+          cat > "$G2" <<'PEM'
+          -----BEGIN CERTIFICATE-----
+          MIIEPjCCAyagAwIBAgIUf7QAP82XSXrLg02SpIp4c8KEXUMwDQYJKoZIhvcNAQEL
+          BQAwYjELMAkGA1UEBhMCVVMxEzARBgNVBAoTCkFwcGxlIEluYy4xJjAkBgNVBAsT
+          HUFwcGxlIENlcnRpZmljYXRpb24gQXV0aG9yaXR5MRYwFAYDVQQDEw1BcHBsZSBS
+          b290IENBMB4XDTIxMDkyMjE4NTUxMFoXDTMxMDkxNzAwMDAwMFowXjEtMCsGA1UE
+          AwwkRGV2ZWxvcGVyIElEIENlcnRpZmljYXRpb24gQXV0aG9yaXR5MQswCQYDVQQL
+          DAJHMjETMBEGA1UECgwKQXBwbGUgSW5jLjELMAkGA1UEBhMCVVMwggEiMA0GCSqG
+          SIb3DQEBAQUAA4IBDwAwggEKAoIBAQDTLJVoIVSRir9lccIYTvbNDeGRKHXXA7qV
+          H9MSmVJE3oBGZ/wpiwCFiIowh01Mbkq0x+UC49djTKrM6uzbQi+RfSXpX6RLKlRv
+          F6wwnykoNKR/j+V4410jKiFG0InDX/hql51xGxiosgzJAwo1sgKnLfWz3BuDxSch
+          QHKm5zd2Mee7Br90svZwrEysLc3JXkWLz/sI5mLVQJW1N1zMGw7h79yl5Y3JULdA
+          nwojJUVAj5Rne+CU6jnTeKU00cLL4DN/LrYsw+Um1SXOqo0qd/yeFJaX4PVfLvLo
+          p3GnO6OZTHoio03vcBHV1oaBgvFnM5MzWkCxksSqc5YdxFz/4es3AgMBAAGjge8w
+          gewwEgYDVR0TAQH/BAgwBgEB/wIBADAfBgNVHSMEGDAWgBQr0GlHlHYJ/vRrjS5A
+          pvdHTX8IXjBEBggrBgEFBQcBAQQ4MDYwNAYIKwYBBQUHMAGGKGh0dHA6Ly9vY3Nw
+          LmFwcGxlLmNvbS9vY3NwMDMtYXBwbGVyb290Y2EwLgYDVR0fBCcwJTAjoCGgH4Yd
+          aHR0cDovL2NybC5hcHBsZS5jb20vcm9vdC5jcmwwHQYDVR0OBBYEFPg6DGkRduDt
+          rNHrpln6N9XEVbAeMA4GA1UdDwEB/wQEAwIBBjAQBgoqhkiG92NkBgIGBAIFADAN
+          BgkqhkiG9w0BAQsFAAOCAQEAwf1DClm/8bG3QxBa1hgyMBRWJuERSGMraXKXSB+O
+          W8peJhX7dCOAM1QzGaEihlrYuEtpqqfOlpbCCsc1atBvzoppg2JtSjn1/oNN16LU
+          iB/tiMAP+PkzHrQQt8JcETdENwSwpESdjGgNe30dfsy1k/DWbz0VeoCldNPhj33S
+          iOgxp5jFH9/iglmugIFgRhbsnrmKQKobKuFhhgqMcA/ZSizsTKIFEdZ5jKVjJSEj
+          Am+TW1pXoddFbd/M93+fX9vH7WSnb0Qvb009eHgKVrQ71zrIK2Wik+rbWOqO1LnE
+          wDD8MhpNupIMJDmYgjqgmd7n5OS8DryFr1qrXND828wQww==
+          -----END CERTIFICATE-----
+          PEM
+          G2_SHA256="$(openssl x509 -in "$G2" -noout -fingerprint -sha256 | cut -d= -f2)"
+          if [[ "$G2_SHA256" != "F1:6C:D3:C5:4C:7F:83:CE:A4:BF:1A:3E:6A:08:19:C8:AA:A8:E4:A1:52:8F:D1:44:71:5F:35:06:43:D2:DF:3A" ]]; then
+            echo "::error::Developer ID G2 intermediate fingerprint mismatch: $G2_SHA256"
+            exit 1
+          fi
+          security add-certificates -k "$KEYCHAIN" "$G2"
+          # Drop a temporary keychain an interrupted earlier run left on a
+          # self-hosted Mac, then put this one first in the search list.
+          # Bash 3.2 (/bin/bash on a self-hosted Mac): no mapfile, and an empty
+          # array needs the ${a[@]+...} form under `set -u`.
+          others=()
+          while IFS= read -r k; do
+            k="${k#"${k%%[![:space:]]*}"}"; k="${k#\"}"; k="${k%\"}"
+            if [[ -n "$k" && "$k" != "$KEYCHAIN" ]]; then others+=("$k"); fi
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$KEYCHAIN" ${others[@]+"${others[@]}"}
           rm -f "$CERT_P12"
 
       - name: Install pnpm deps
@@ -734,9 +842,13 @@ jobs:
           if [ -n "$newest" ]; then sudo xcode-select -s "$newest"; fi
           echo "DEVELOPER_DIR=$(xcode-select -p)"; cc --version
       - name: Install Rust backend build toolchain (macOS)
+        # The self-hosted Mac mini has cmake, ninja, protoc, and bazel on the
+        # runner PATH (~/actions-runner/.path) and no Homebrew.
+        if: runner.environment != 'self-hosted'
         run: brew install cmake ninja protobuf
 
       - name: Set up Bazel
+        if: runner.environment != 'self-hosted'
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
@@ -805,10 +917,28 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # A self-hosted Mac keeps its user keychain search list and RUNNER_TEMP
+      # between jobs: remove the signing keychain whatever happened above.
+      - name: Remove the signing keychain
+        if: always()
+        shell: bash
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain"
+          # Bash 3.2 (/bin/bash on a self-hosted Mac): no mapfile, and an empty
+          # array needs the ${a[@]+...} form under `set -u`.
+          others=()
+          while IFS= read -r k; do
+            k="${k#"${k%%[![:space:]]*}"}"; k="${k#\"}"; k="${k%\"}"
+            if [[ -n "$k" && "$k" != "$KEYCHAIN" ]]; then others+=("$k"); fi
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s ${others[@]+"${others[@]}"}
+          security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/apple_cert.p12"
+
   build-macos-x86_64:
     if: ${{ inputs.windows_only != true }}
-    needs: meta
-    runs-on: macos-15-intel
+    needs: [meta, select-macos-runner]
+    runs-on: ${{ fromJSON(needs.select-macos-runner.outputs.x86_64) }}
     # 300, not 180: see build-macos-arm64 (0.10.101-rc1 evidence).
     timeout-minutes: 300
     env:
@@ -859,6 +989,10 @@ jobs:
           git -c submodule.upstream_forks/ladybug.url=https://github.com/wey-gu/ladybug.git \
               -c submodule.upstream_forks/rig.url=https://github.com/wey-gu/rig.git \
               submodule update --init --depth 1 upstream_forks/ladybug upstream_forks/rig
+          # lbug writes its extension archives into the submodule source tree,
+          # which the checkout does not clean on a self-hosted Mac: archives
+          # from the other architecture's job would break this link.
+          rm -rf upstream_forks/ladybug/extension/*/build
 
       # No target cache: see build-macos-arm64 (it never restores on tag runs).
 
@@ -900,13 +1034,63 @@ jobs:
           CERT_P12="$RUNNER_TEMP/apple_cert.p12"
           echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_P12"
           KEYCHAIN="$RUNNER_TEMP/build.keychain"
+          security delete-keychain "$KEYCHAIN" 2>/dev/null || true
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security import "$CERT_P12" -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" \
             -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
-          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          # The Developer ID G2 intermediate that issued our signing
+          # certificate (public; issued by Apple Root CA). GitHub's macOS
+          # images ship it; the self-hosted Mac mini did not, and codesign
+          # failed with "unable to build chain to self-signed root" /
+          # errSecInternalComponent (run 39343118594). Pinned by SHA-256: the
+          # same certificate Apple publishes and our shipped apps embed.
+          G2="$RUNNER_TEMP/DeveloperIDG2CA.pem"
+          cat > "$G2" <<'PEM'
+          -----BEGIN CERTIFICATE-----
+          MIIEPjCCAyagAwIBAgIUf7QAP82XSXrLg02SpIp4c8KEXUMwDQYJKoZIhvcNAQEL
+          BQAwYjELMAkGA1UEBhMCVVMxEzARBgNVBAoTCkFwcGxlIEluYy4xJjAkBgNVBAsT
+          HUFwcGxlIENlcnRpZmljYXRpb24gQXV0aG9yaXR5MRYwFAYDVQQDEw1BcHBsZSBS
+          b290IENBMB4XDTIxMDkyMjE4NTUxMFoXDTMxMDkxNzAwMDAwMFowXjEtMCsGA1UE
+          AwwkRGV2ZWxvcGVyIElEIENlcnRpZmljYXRpb24gQXV0aG9yaXR5MQswCQYDVQQL
+          DAJHMjETMBEGA1UECgwKQXBwbGUgSW5jLjELMAkGA1UEBhMCVVMwggEiMA0GCSqG
+          SIb3DQEBAQUAA4IBDwAwggEKAoIBAQDTLJVoIVSRir9lccIYTvbNDeGRKHXXA7qV
+          H9MSmVJE3oBGZ/wpiwCFiIowh01Mbkq0x+UC49djTKrM6uzbQi+RfSXpX6RLKlRv
+          F6wwnykoNKR/j+V4410jKiFG0InDX/hql51xGxiosgzJAwo1sgKnLfWz3BuDxSch
+          QHKm5zd2Mee7Br90svZwrEysLc3JXkWLz/sI5mLVQJW1N1zMGw7h79yl5Y3JULdA
+          nwojJUVAj5Rne+CU6jnTeKU00cLL4DN/LrYsw+Um1SXOqo0qd/yeFJaX4PVfLvLo
+          p3GnO6OZTHoio03vcBHV1oaBgvFnM5MzWkCxksSqc5YdxFz/4es3AgMBAAGjge8w
+          gewwEgYDVR0TAQH/BAgwBgEB/wIBADAfBgNVHSMEGDAWgBQr0GlHlHYJ/vRrjS5A
+          pvdHTX8IXjBEBggrBgEFBQcBAQQ4MDYwNAYIKwYBBQUHMAGGKGh0dHA6Ly9vY3Nw
+          LmFwcGxlLmNvbS9vY3NwMDMtYXBwbGVyb290Y2EwLgYDVR0fBCcwJTAjoCGgH4Yd
+          aHR0cDovL2NybC5hcHBsZS5jb20vcm9vdC5jcmwwHQYDVR0OBBYEFPg6DGkRduDt
+          rNHrpln6N9XEVbAeMA4GA1UdDwEB/wQEAwIBBjAQBgoqhkiG92NkBgIGBAIFADAN
+          BgkqhkiG9w0BAQsFAAOCAQEAwf1DClm/8bG3QxBa1hgyMBRWJuERSGMraXKXSB+O
+          W8peJhX7dCOAM1QzGaEihlrYuEtpqqfOlpbCCsc1atBvzoppg2JtSjn1/oNN16LU
+          iB/tiMAP+PkzHrQQt8JcETdENwSwpESdjGgNe30dfsy1k/DWbz0VeoCldNPhj33S
+          iOgxp5jFH9/iglmugIFgRhbsnrmKQKobKuFhhgqMcA/ZSizsTKIFEdZ5jKVjJSEj
+          Am+TW1pXoddFbd/M93+fX9vH7WSnb0Qvb009eHgKVrQ71zrIK2Wik+rbWOqO1LnE
+          wDD8MhpNupIMJDmYgjqgmd7n5OS8DryFr1qrXND828wQww==
+          -----END CERTIFICATE-----
+          PEM
+          G2_SHA256="$(openssl x509 -in "$G2" -noout -fingerprint -sha256 | cut -d= -f2)"
+          if [[ "$G2_SHA256" != "F1:6C:D3:C5:4C:7F:83:CE:A4:BF:1A:3E:6A:08:19:C8:AA:A8:E4:A1:52:8F:D1:44:71:5F:35:06:43:D2:DF:3A" ]]; then
+            echo "::error::Developer ID G2 intermediate fingerprint mismatch: $G2_SHA256"
+            exit 1
+          fi
+          security add-certificates -k "$KEYCHAIN" "$G2"
+          # Drop a temporary keychain an interrupted earlier run left on a
+          # self-hosted Mac, then put this one first in the search list.
+          # Bash 3.2 (/bin/bash on a self-hosted Mac): no mapfile, and an empty
+          # array needs the ${a[@]+...} form under `set -u`.
+          others=()
+          while IFS= read -r k; do
+            k="${k#"${k%%[![:space:]]*}"}"; k="${k#\"}"; k="${k%\"}"
+            if [[ -n "$k" && "$k" != "$KEYCHAIN" ]]; then others+=("$k"); fi
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$KEYCHAIN" ${others[@]+"${others[@]}"}
           rm -f "$CERT_P12"
 
       - name: Install pnpm deps
@@ -930,10 +1114,13 @@ jobs:
           echo "DEVELOPER_DIR=$(xcode-select -p)"; cc --version
       - name: Install Rust backend build toolchain (macOS)
         run: |
-          brew install cmake ninja protobuf
+          # The self-hosted Mac mini has cmake, ninja, protoc, and bazel on the
+          # runner PATH (~/actions-runner/.path) and no Homebrew.
+          if [[ "$RUNNER_ENVIRONMENT" != self-hosted ]]; then brew install cmake ninja protobuf; fi
           rustup target add x86_64-apple-darwin
 
       - name: Set up Bazel
+        if: runner.environment != 'self-hosted'
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
@@ -954,7 +1141,12 @@ jobs:
           unset APPLE_CERTIFICATE
           unset APPLE_CERTIFICATE_PASSWORD
           rm -rf python-standalone rust-backend
-          ./scripts/build-rust-bundle.sh --channel production --target x86_64-apple-darwin --bazel-public-binaries
+          # build-rust-bundle.sh builds the Bazel public binaries only for the
+          # host target; cross-compiled from Apple Silicon (the self-hosted
+          # Mac mini), every binary comes from Cargo.
+          bazel_flag=--bazel-public-binaries
+          if [[ "$(uname -m)" == arm64 ]]; then bazel_flag=; fi
+          ./scripts/build-rust-bundle.sh --channel production --target x86_64-apple-darwin ${bazel_flag:+"$bazel_flag"}
           ./scripts/build-macos.sh --arch x86_64 --skip-python
 
       - name: Locate + rename DMG
@@ -978,6 +1170,24 @@ jobs:
           path: ${{ steps.locate.outputs.dmg }}
           if-no-files-found: error
           retention-days: 7
+
+      # A self-hosted Mac keeps its user keychain search list and RUNNER_TEMP
+      # between jobs: remove the signing keychain whatever happened above.
+      - name: Remove the signing keychain
+        if: always()
+        shell: bash
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain"
+          # Bash 3.2 (/bin/bash on a self-hosted Mac): no mapfile, and an empty
+          # array needs the ${a[@]+...} form under `set -u`.
+          others=()
+          while IFS= read -r k; do
+            k="${k#"${k%%[![:space:]]*}"}"; k="${k#\"}"; k="${k%\"}"
+            if [[ -n "$k" && "$k" != "$KEYCHAIN" ]]; then others+=("$k"); fi
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s ${others[@]+"${others[@]}"}
+          security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/apple_cert.p12"
 
   build-windows:
     needs: [meta, select-windows-runner]
