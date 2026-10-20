@@ -538,6 +538,10 @@ class GAPromotionContractTest(unittest.TestCase):
                 imp = next(s for s in steps if s.get("name") == "Import code-signing certificate")
                 self.assertLess(imp["run"].index('security delete-keychain "$KEYCHAIN"'),
                                 imp["run"].index("security create-keychain"))
+                # Developer ID G2 intermediate, pinned (run 39343118594).
+                self.assertIn("F1:6C:D3:C5:4C:7F:83:CE:A4:BF:1A:3E:6A:08:19:C8:AA:A8:E4:A1:52:8F:D1:44:71:5F:35:06:43:D2:DF:3A",
+                              imp["run"])
+                self.assertLess(imp["run"].index("G2_SHA256="), imp["run"].index('security add-certificates -k "$KEYCHAIN" "$G2"'))
                 self.assertNotIn("mapfile -t", imp["run"] + steps[-1]["run"], "/bin/bash 3.2 on a self-hosted Mac")
                 init = next(s for s in steps if str(s.get("name", "")).startswith("Initialize Rust path dependencies"))
                 self.assertIn("rm -rf upstream_forks/ladybug/extension/*/build", init["run"])
