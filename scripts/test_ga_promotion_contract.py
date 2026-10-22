@@ -1566,3 +1566,14 @@ class ReleaseShapeTriggerContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NightlyWindowsRunnerDefaultTest(unittest.TestCase):
+    def test_nightly_windows_defaults_to_github_hosted(self):
+        # windows-book ran out of disk and turned nightlies red for reasons
+        # unrelated to the source; the self-hosted box is opt-in only.
+        workflow = load_release_desktop()
+        dispatch = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]["windows_runner"]
+        self.assertEqual(dispatch["default"], "hosted")
+        mode = next(s for s in workflow["jobs"]["select-windows-runner"]["steps"] if s.get("id") == "mode")
+        self.assertEqual(mode["env"]["MODE"], "${{ inputs.windows_runner || 'hosted' }}")

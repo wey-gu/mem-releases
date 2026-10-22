@@ -80,11 +80,11 @@ on:
         type: boolean
         default: false
       windows_runner:
-        description: "Standard Windows runner: auto prefers available windows-book, otherwise GitHub; hosted/self-hosted force a choice."
+        description: "Standard Windows runner (nightly only; releases always use GitHub): hosted (default), auto prefers an available windows-book, self-hosted forces it."
         required: false
         type: choice
-        options: [auto, hosted, self-hosted]
-        default: auto
+        options: [hosted, auto, self-hosted]
+        default: hosted
       windows_self_hosted:
         description: "Deprecated: force windows-book; prefer windows_runner selection."
         required: false
@@ -156,14 +156,17 @@ jobs:
       # Releases (tag push, repository_dispatch, any dispatch tag other than
       # `nightly`) always build Windows on GitHub-hosted runners; windows-book
       # is for qualification and nightly runs only (nowledge-co/mem#7108).
+      # Nightlies default to GitHub-hosted too: windows-book ran out of disk
+      # and turned nightlies red for reasons unrelated to the source. Pick
+      # auto/self-hosted explicitly to use it.
       - id: mode
         env:
-          MODE: ${{ inputs.windows_runner || 'auto' }}
+          MODE: ${{ inputs.windows_runner || 'hosted' }}
           LEGACY_SELF_HOSTED: ${{ inputs.windows_self_hosted }}
           IS_RELEASE: ${{ !(github.event_name == 'workflow_dispatch' && inputs.tag == 'nightly') }}
           APP_CONFIGURED: ${{ secrets.RELEASE_APP_ID != '' && secrets.RELEASE_APP_PRIVATE_KEY != '' }}
         run: |
-          if [[ "$LEGACY_SELF_HOSTED" == "true" && "$MODE" == "auto" ]]; then MODE=self-hosted; fi
+          if [[ "$LEGACY_SELF_HOSTED" == "true" ]]; then MODE=self-hosted; fi
           {
             echo "mode=$MODE"
             echo "release=$IS_RELEASE"
