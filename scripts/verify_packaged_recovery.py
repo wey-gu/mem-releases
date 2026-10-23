@@ -8,6 +8,7 @@ not a simulation of arbitrary corruption or physical power loss.
 
 import argparse
 import base64
+import ctypes
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -17,6 +18,8 @@ import platform
 import re
 import shutil
 import signal
+import socket
+import struct
 import subprocess
 import time
 import urllib.error
@@ -160,18 +163,48 @@ def environment(directory):
     return env, current, historical
 
 
+def _windows_listener_ports(table, pid):
+    require(type(pid) is int and pid > 0, "Invalid owned process identity")
+    require(len(table) >= 4, "Truncated Windows listener table header")
+    count = struct.unpack_from("<I", table)[0]
+    row = struct.Struct("<6I")
+    require(count <= (len(table) - 4) // row.size, "Truncated Windows listener table rows")
+    ports = set()
+    for index in range(count):
+        state, address, port, _, _, owner = row.unpack_from(table, 4 + index * row.size)
+        if state == 2 and owner == pid and struct.pack("<I", address) == socket.inet_aton("127.0.0.1"):
+            value = socket.ntohs(port & 0xFFFF)
+            require(0 < value < 65536, "Invalid Windows owned listener port")
+            ports.add(value)
+    return sorted(ports)
+
+
+def _windows_tcp_table(query):
+    # DWORDs stay 32-bit on Windows x64. Retry only table growth, not OS errors.
+    size = ctypes.c_uint32()
+    status = query(None, ctypes.byref(size), 0, socket.AF_INET, 3, 0)
+    require(status == 122 and size.value >= 4, f"Windows listener size query failed: {status}")
+    for _ in range(3):
+        capacity = size.value
+        buffer = ctypes.create_string_buffer(capacity)
+        status = query(buffer, ctypes.byref(size), 0, socket.AF_INET, 3, 0)
+        if status == 122:
+            require(size.value > capacity, "Windows listener buffer did not grow")
+            continue
+        require(status == 0, f"Windows listener query failed: {status}")
+        require(4 <= size.value <= capacity, "Invalid Windows listener table size")
+        return buffer.raw[:size.value]
+    raise RuntimeError("Windows listener table kept growing during inspection")
+
+
 def owned_ports(pid):
     if os.name == "nt":
-        script = ("$ErrorActionPreference = 'Stop'; "
-                  "$connections = @(Get-NetTCPConnection -State Listen -ErrorAction Stop); "
-                  f"$ports = @($connections | Where-Object {{ $_.OwningProcess -eq {pid} -and $_.LocalAddress -eq '127.0.0.1' }} | "
-                  "Select-Object -ExpandProperty LocalPort | Sort-Object -Unique); "
-                  "ConvertTo-Json -InputObject $ports -Compress")
-        output = command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], timeout=10)
-        value = json.loads(output) if output else []
-        values = value if isinstance(value, list) else [value]
-        require(all(type(x) is int and 0 < x < 65536 for x in values), "Malformed owned listener result")
-        return sorted(set(values))
+        library = ctypes.WinDLL("iphlpapi.dll", winmode=0x800)
+        query = library.GetExtendedTcpTable
+        query.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.c_int,
+                          ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        query.restype = ctypes.c_uint32
+        return _windows_listener_ports(_windows_tcp_table(query), pid)
     result = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", "-sTCP:LISTEN", "-Fn"],
                             capture_output=True, text=True, timeout=5)
     require(result.returncode in (0, 1), "Owned listener inspection failed")
