@@ -1,0 +1,176 @@
+name: packaged-recovery-e2e
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful original tag-push release-desktop run
+        required: true
+        type: string
+      release_tag:
+        description: Immutable RC source tag including v
+        required: true
+        type: string
+      source_sha:
+        description: Exact final Mem RELEASE_SHA
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - .github/workflows/packaged-recovery-e2e.yml
+      - scripts/verify_packaged_recovery.py
+      - scripts/test_verify_packaged_recovery.py
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  contract:
+    strategy:
+      matrix:
+        runner: [ubuntu-22.04, windows-2022, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m unittest discover -s scripts -p test_verify_packaged_recovery.py -v
+
+  identity:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      producer_sha: ${{ steps.identity.outputs.producer_sha }}
+      attempt: ${{ steps.identity.outputs.attempt }}
+      artifacts: ${{ steps.identity.outputs.artifacts }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM_READ_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, sys
+          sys.path.insert(0, 'scripts')
+          from desktop_version_receipts import validate_build_identity
+          env = os.environ
+          assert re.fullmatch(r'[1-9][0-9]*', env['BUILD_RUN_ID'])
+          match = re.fullmatch(r'v([0-9]+\.[0-9]+\.[0-9]+)-rc[1-9][0-9]*', env['RELEASE_TAG'])
+          assert match and re.fullmatch(r'[0-9a-f]{40}', env['SOURCE_SHA'])
+          def api(path, token=None):
+              child = dict(env)
+              if token is not None:
+                  child['GH_TOKEN'] = token
+              return json.loads(subprocess.check_output(['gh', 'api', path], env=child, text=True, timeout=30))
+          repo = env['GITHUB_REPOSITORY']
+          run = api(f'repos/{repo}/actions/runs/{env["BUILD_RUN_ID"]}')
+          assert run['repository']['full_name'] == repo
+          validate_build_identity(run, env['RELEASE_TAG'])
+          source = api(f'repos/nowledge-co/mem/commits/{env["RELEASE_TAG"]}', env['MEM_READ_TOKEN'])
+          assert source['sha'] == env['SOURCE_SHA']
+          pin = api(f'repos/nowledge-co/mem/contents/mem-releases?ref={env["SOURCE_SHA"]}', env['MEM_READ_TOKEN'])
+          assert pin['sha'] == run['head_sha']
+          result = api(f'repos/{repo}/actions/runs/{env["BUILD_RUN_ID"]}/artifacts?per_page=100')
+          assert result['total_count'] <= 100
+          selected = {}
+          for name in ('macos-arm64', 'windows-x86_64'):
+              found = [a for a in result['artifacts'] if a['name'] == name and not a['expired']]
+              assert len(found) == 1, name
+              selected[name] = str(found[0]['id'])
+          identity = {'source_sha': env['SOURCE_SHA'], 'release_tag': env['RELEASE_TAG'],
+                      'build_run_id': env['BUILD_RUN_ID'], 'producer_sha': run['head_sha'],
+                      'attempt': str(run['run_attempt']), 'artifacts': selected, 'artifact_metadata': result,
+                      'verifier_sha': env['GITHUB_SHA']}
+          open('recovery-build-identity.json', 'w').write(json.dumps(identity, indent=2) + '\n')
+          with open(env['GITHUB_OUTPUT'], 'a') as out:
+              for key, value in {'version': match.group(1), 'producer_sha': run['head_sha'],
+                                 'attempt': str(run['run_attempt']), 'artifacts': json.dumps(selected)}.items():
+                  out.write(f'{key}={value}\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recovery-build-identity
+          path: recovery-build-identity.json
+          if-no-files-found: error
+
+  native:
+    needs: [contract, identity]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: mac
+            runner: macos-15
+            artifact: macos-arm64
+            extension: dmg
+          - platform: win
+            runner: windows-2022
+            artifact: windows-x86_64
+            extension: exe
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ fromJSON(needs.identity.outputs.artifacts)[matrix.artifact] }}
+          path: packages
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - name: Execute original packaged recovery and custody scenarios
+        shell: bash
+        env:
+          VERIFY_PLATFORM: ${{ matrix.platform }}
+          VERIFY_VERSION: ${{ needs.identity.outputs.version }}
+          PACKAGE_EXTENSION: ${{ matrix.extension }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          PRODUCER_SHA: ${{ needs.identity.outputs.producer_sha }}
+          BUILD_ATTEMPT: ${{ needs.identity.outputs.attempt }}
+          ARTIFACT_ID: ${{ fromJSON(needs.identity.outputs.artifacts)[matrix.artifact] }}
+        run: |
+          python - <<'PY'
+          import os, subprocess, sys
+          from pathlib import Path
+          env = os.environ
+          packages = list(Path('packages').rglob('*.' + env['PACKAGE_EXTENSION']))
+          assert len(packages) == 1 and env['VERIFY_VERSION'] in packages[0].name
+          package = packages[0].resolve()
+          args = [sys.executable, 'scripts/verify_packaged_recovery.py', '--package', str(package),
+                  '--platform', env['VERIFY_PLATFORM'], '--version', env['VERIFY_VERSION'],
+                  '--source-sha', env['SOURCE_SHA'], '--release-tag', env['RELEASE_TAG'],
+                  '--build-run-id', env['BUILD_RUN_ID'], '--build-workflow-sha', env['PRODUCER_SHA'],
+                  '--build-attempt', env['BUILD_ATTEMPT'], '--artifact-id', env['ARTIFACT_ID'],
+                  '--work', str(Path(env['RUNNER_TEMP']) / 'packaged-recovery'),
+                  '--receipt', 'recovery-receipt.json']
+          if env['VERIFY_PLATFORM'] == 'win':
+              install = Path(env['RUNNER_TEMP']) / 'packaged-recovery-install'
+              assert not install.exists()
+              subprocess.run([str(package), '/S', '/D=' + str(install)], check=True, timeout=480)
+              app = install / 'nowledge-mem.exe'
+              assert app.is_file()
+              args += ['--app', str(app)]
+          subprocess.run(args, check=True)
+          PY
+      - name: Retain native receipts and diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaged-recovery-${{ matrix.platform }}
+          path: |
+            recovery-receipt.json
+            ${{ runner.temp }}/packaged-recovery/**/*.log
+          if-no-files-found: error
