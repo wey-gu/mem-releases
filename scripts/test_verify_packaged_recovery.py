@@ -1,7 +1,10 @@
 """Reject receipts that could disguise missing Graph records or mutated history."""
 
 import copy
+import ctypes
 import os
+import socket
+import struct
 from pathlib import Path
 import subprocess
 import sys
@@ -10,6 +13,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from verify_packaged_recovery import _windows_listener_ports, _windows_tcp_table
 from verify_packaged_recovery import collect_records, owned_ports, recovery_notice, retained_records, tree
 
 
@@ -88,9 +92,70 @@ class RecoveryEvidenceContract(unittest.TestCase):
                 tree(root)
 
 
+class WindowsListenerTableContract(unittest.TestCase):
+    @staticmethod
+    def row(pid, address="127.0.0.1", port=4321, state=2):
+        ip = struct.unpack("<I", socket.inet_aton(address))[0]
+        return struct.pack("<6I", state, ip, socket.htons(port), 0, 0, pid)
+
+    def test_only_owned_loopback_listeners_are_returned_in_network_port_order(self):
+        rows = [self.row(123, port=54321), self.row(124), self.row(123, address="0.0.0.0"),
+                self.row(123, state=5), self.row(123, port=443), self.row(123, port=443)]
+        self.assertEqual(_windows_listener_ports(struct.pack("<I", len(rows)) + b"".join(rows), 123), [443, 54321])
+        self.assertEqual(_windows_listener_ports(struct.pack("<I", 0), 123), [])
+
+    def test_truncated_tables_and_zero_owned_ports_fail_closed(self):
+        for table in [b"", struct.pack("<I", 1), struct.pack("<I", 2) + self.row(123),
+                      struct.pack("<I", 1) + self.row(123, port=0)]:
+            with self.subTest(table=table), self.assertRaises(RuntimeError):
+                _windows_listener_ports(table, 123)
+
+    def test_buffer_growth_is_requeried_without_a_cim_process(self):
+        table = struct.pack("<I", 1) + self.row(123)
+        calls = []
+
+        def query(buffer, size, order, family, table_class, reserved):
+            calls.append((order, family, table_class, reserved))
+            length = ctypes.cast(size, ctypes.POINTER(ctypes.c_uint32)).contents
+            if buffer is None:
+                length.value = 4
+                return 122
+            if len(buffer) < len(table):
+                length.value = len(table)
+                return 122
+            ctypes.memmove(buffer, table, len(table))
+            length.value = len(table)
+            return 0
+
+        self.assertEqual(_windows_listener_ports(_windows_tcp_table(query), 123), [4321])
+        self.assertEqual(calls, [(0, socket.AF_INET, 3, 0)] * 3)
+
+    def test_os_errors_and_non_growing_buffers_are_not_empty_success(self):
+        def query(buffer, size, *args):
+            ctypes.cast(size, ctypes.POINTER(ctypes.c_uint32)).contents.value = 4
+            return 122
+
+        for failed in [lambda *args: 5, query]:
+            with self.subTest(query=failed), self.assertRaises(RuntimeError):
+                _windows_tcp_table(failed)
+
+    def test_continuous_table_growth_is_bounded(self):
+        calls = []
+
+        def query(buffer, size, *args):
+            calls.append(buffer)
+            ctypes.cast(size, ctypes.POINTER(ctypes.c_uint32)).contents.value = 4 + len(calls) * 24
+            return 122
+
+        with self.assertRaises(RuntimeError):
+            _windows_tcp_table(query)
+        self.assertEqual(len(calls), 4)
+
+
 class WindowsOwnedListenerContract(unittest.TestCase):
-    @unittest.skipUnless(os.name == "nt", "Windows CIM process/listener contract")
-    def test_owned_process_without_listener_can_later_become_ready(self):
+    @unittest.skipUnless(os.name == "nt", "Windows native process/listener contract")
+    @patch("verify_packaged_recovery.command", side_effect=subprocess.TimeoutExpired(["powershell.exe"], 10))
+    def test_owned_process_without_listener_can_later_become_ready(self, unavailable_cim):
         script = ("import socket,sys\nprint('ready',flush=True)\n"
                   "assert sys.stdin.readline().strip() == 'listen'\n"
                   "s=socket.socket();s.bind(('127.0.0.1',0));s.listen()\n"
@@ -113,6 +178,7 @@ class WindowsOwnedListenerContract(unittest.TestCase):
             self.assertEqual(observed, [port])
             child.stdin.close()
             self.assertEqual(child.wait(timeout=10), 0)
+            unavailable_cim.assert_not_called()
         finally:
             if child.poll() is None:
                 child.kill()
