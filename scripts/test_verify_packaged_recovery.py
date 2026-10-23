@@ -89,8 +89,9 @@ class RecoveryEvidenceContract(unittest.TestCase):
 
 
 class WindowsOwnedListenerContract(unittest.TestCase):
-    @unittest.skipUnless(os.name == "nt", "Windows CIM process/listener contract")
-    def test_owned_process_without_listener_can_later_become_ready(self):
+    @unittest.skipUnless(os.name == "nt", "Windows native process/listener contract")
+    @patch("verify_packaged_recovery.command", side_effect=subprocess.TimeoutExpired(["powershell.exe"], 10))
+    def test_owned_process_without_listener_can_later_become_ready(self, unavailable_cim):
         script = ("import socket,sys\nprint('ready',flush=True)\n"
                   "assert sys.stdin.readline().strip() == 'listen'\n"
                   "s=socket.socket();s.bind(('127.0.0.1',0));s.listen()\n"
@@ -113,6 +114,7 @@ class WindowsOwnedListenerContract(unittest.TestCase):
             self.assertEqual(observed, [port])
             child.stdin.close()
             self.assertEqual(child.wait(timeout=10), 0)
+            unavailable_cim.assert_not_called()
         finally:
             if child.poll() is None:
                 child.kill()
