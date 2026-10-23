@@ -7,6 +7,7 @@ not a simulation of arbitrary corruption or physical power loss.
 """
 
 import argparse
+import base64
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -27,6 +28,7 @@ from verify_packaged_desktop import runtime_is_ready, validate_server_output
 
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 LEASE = ".nmem-app-data-lifecycle-v1.lock"
+HTTP_EVENTS = []
 
 
 def digest(path):
@@ -51,15 +53,29 @@ def tree(root, graph_only=False):
     return result
 
 
-def request(origin, method, route, body=None):
+def request(origin, method, route, body=None, missing_ok=False):
     data = None if body is None else json.dumps(body).encode()
     headers = {"Accept": "application/json"}
     if data is not None:
         headers["Content-Type"] = "application/json"
     query = urllib.request.Request(origin + route, data=data, headers=headers, method=method)
-    with OPENER.open(query, timeout=10) as response:
+    try:
+        response = OPENER.open(query, timeout=10)
+    except urllib.error.HTTPError as error:
+        raw = error.read()
+        HTTP_EVENTS.append({"origin": origin, "method": method, "route": route, "status": error.code,
+                            "body_base64": base64.b64encode(raw).decode()})
+        if missing_ok and method == "GET" and route.startswith("/memories/") and error.code == 404:
+            payload = json.loads(raw)
+            require(isinstance(payload, dict) and payload.get("detail"), "Malformed missing-Memory response")
+            return None
+        raise
+    with response:
+        raw = response.read()
+        HTTP_EVENTS.append({"origin": origin, "method": method, "route": route, "status": response.status,
+                            "body_base64": base64.b64encode(raw).decode()})
         require(response.status in (200, 201), f"Unexpected HTTP status for {route}")
-        payload = json.load(response)
+        payload = json.loads(raw)
     require(isinstance(payload, dict), f"Non-object JSON for {route}")
     return payload
 
@@ -75,6 +91,34 @@ def retained_records(expected, observed):
         if actual is not None:
             require(actual == item, f"Graph Memory changed: {item['id']}")
     return sorted(observed)
+
+
+def collect_records(origin):
+    """Enumerate the Graph-backed all-state/all-Space list, never expected IDs."""
+    observed = {}
+    offset, total = 0, None
+    while True:
+        page = request(origin, "GET", f"/memories?state=all&space_id=all&limit=100&offset={offset}")
+        pagination, items = page.get("pagination"), page.get("memories")
+        require(isinstance(pagination, dict) and isinstance(items, list), "Malformed Graph list")
+        count = pagination.get("total")
+        require(type(count) is int and 0 <= count <= 1000, "Unbounded or invalid synthetic Graph count")
+        require(total is None or total == count, "Graph changed during enumeration")
+        total = count
+        require(pagination.get("offset") == offset and pagination.get("limit") == 100, "Wrong Graph page")
+        require(len(items) == min(100, total - offset), "Incomplete Graph page")
+        require(type(pagination.get("has_more")) is bool and pagination["has_more"] == (offset + len(items) < total),
+                "Inconsistent Graph pagination")
+        for value in items:
+            require(isinstance(value, dict), "Malformed Graph Memory")
+            item = {key: value.get(key) for key in ("id", "title", "content")}
+            require(all(isinstance(x, str) and x for x in item.values()), "Incomplete Graph identity/content")
+            require(item["id"] not in observed, "Duplicate Graph identity across pages")
+            observed[item["id"]] = item
+        offset += len(items)
+        if not pagination["has_more"]:
+            require(len(observed) == total, "Incomplete Graph enumeration")
+            return observed
 
 
 def path_identity(value):
@@ -118,9 +162,11 @@ def environment(directory):
 
 def owned_ports(pid):
     if os.name == "nt":
-        script = (f"Get-NetTCPConnection -State Listen -OwningProcess {pid} -ErrorAction SilentlyContinue | "
-                  "Where-Object { $_.LocalAddress -eq '127.0.0.1' } | "
-                  "Select-Object -ExpandProperty LocalPort | ConvertTo-Json -Compress")
+        script = ("$ErrorActionPreference = 'Stop'; "
+                  "$connections = @(Get-NetTCPConnection -State Listen -ErrorAction Stop); "
+                  f"$ports = @($connections | Where-Object {{ $_.OwningProcess -eq {pid} -and $_.LocalAddress -eq '127.0.0.1' }} | "
+                  "Select-Object -ExpandProperty LocalPort | Sort-Object -Unique); "
+                  "ConvertTo-Json -InputObject $ports -Compress")
         output = command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], timeout=10)
         value = json.loads(output) if output else []
         values = value if isinstance(value, list) else [value]
@@ -178,13 +224,8 @@ class Server:
         raise RuntimeError(f"Readiness deadline: {state}, {last}")
 
     def read(self, item):
-        try:
-            value = request(self.origin, "GET", "/memories/" + item["id"])
-        except urllib.error.HTTPError as error:
-            if error.code != 404:
-                raise
-            payload = json.load(error)
-            require(isinstance(payload, dict) and payload.get("detail"), "Malformed missing-Memory response")
+        value = request(self.origin, "GET", "/memories/" + item["id"], missing_ok=True)
+        if value is None:
             return None
         node = value.get("memory", value)
         actual = {key: node.get(key) for key in ("id", "title", "content")}
@@ -198,6 +239,12 @@ class Server:
         item = {"id": identifier, "title": title, "content": content}
         require(self.read(item) == item, "Committed seed Memory unavailable")
         return item
+
+    def records(self):
+        observed = collect_records(self.origin)
+        for item in observed.values():
+            require(self.read(item) == item, "Graph list/by-ID disagreement")
+        return observed
 
     def checkpoint(self):
         response = request(self.origin, "POST", "/health/checkpoint", {})
@@ -243,6 +290,7 @@ def run(args):
             "Concrete producer run, attempt and artifact IDs required")
     require(not args.receipt.exists(), "Preserve the prior receipt")
     args.work.mkdir(parents=True, exist_ok=False)
+    HTTP_EVENTS.clear()
     record = {"schema": 1, "passed": False, "platform": args.platform, "version": args.version,
               "source_sha": args.source_sha, "package_sha256": digest(args.package),
               "package": str(args.package), "verifier_source_sha": command(["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parent.parent),
@@ -250,7 +298,8 @@ def run(args):
               "release_tag": args.release_tag, "build_run_id": args.build_run_id,
               "build_workflow_sha": args.build_workflow_sha, "build_attempt": args.build_attempt,
               "artifact_id": args.artifact_id,
-              "processes": [], "cases": [], "coverage": "Packaged headless Graph recovery, historical preservation and current-source refusal; not Desktop UI or physical power loss"}
+              "processes": [], "cases": [], "http_events": HTTP_EVENTS,
+              "coverage": "Packaged headless Graph recovery, historical preservation and current-source refusal; not Desktop UI or physical power loss"}
     active = None
 
     def save():
@@ -282,15 +331,40 @@ def run(args):
         active = None
         wal = current_seed / "nowledge_graph_v2.db.wal"
         require(wal.is_file() and wal.stat().st_size > 5, "No WAL to truncate")
+        intact = args.work / "frozen-intact"
+        shutil.copytree(current_seed, intact)
         frozen = args.work / "frozen-current"
-        shutil.copytree(current_seed, frozen)
+        shutil.copytree(intact, frozen)
         torn = frozen / wal.name
         raw_wal = {"size": torn.stat().st_size, "sha256": digest(torn)}
         with torn.open("r+b") as stream:
             stream.truncate(raw_wal["size"] - 5)
             stream.flush()
             os.fsync(stream.fileno())
-        record.update(expected_records=expected, wal_before=raw_wal, frozen_current=tree(frozen))
+        record.update(expected_records=expected, wal_before=raw_wal, frozen_current=tree(frozen),
+                      frozen_intact=tree(intact), input_controls=[])
+        for kind, expected_items in (("main_only", expected[:6]), ("intact_wal", expected)):
+            directory = args.work / kind
+            _, current, _ = environment(directory)
+            if kind == "main_only":
+                shutil.copyfile(intact / "nowledge_graph_v2.db", current / "nowledge_graph_v2.db")
+                version = intact / "db_version.json"
+                if version.is_file():
+                    shutil.copyfile(version, current / version.name)
+            else:
+                shutil.copytree(intact, current, dirs_exist_ok=True)
+            control = {"kind": kind, "passed": False}
+            record["input_controls"].append(control)
+            active = Server(binary, directory, args, record)
+            details = active.wait("ok")
+            require(not details.get("db_recovery_notice"), "Unmodified input already required recovery")
+            observed = active.records()
+            require(observed == {x["id"]: x for x in expected_items}, "Invalid WAL-only fixture: main must contain6, intact WAL10")
+            active.finish()
+            active = None
+            control.update(passed=True, graph_records=observed)
+            save()
+        require(tree(intact) == record["frozen_intact"], "Frozen intact input changed")
 
         legacy_seed = args.work / "historical-seed"
         legacy_seed.mkdir()
@@ -330,7 +404,7 @@ def run(args):
             else:
                 details = active.wait("ok")
                 case["notice"] = recovery_notice(details, current, [] if kind == "single" else [historical])
-                observed = {item["id"]: value for item in expected if (value := active.read(item)) is not None}
+                observed = active.records()
                 case["retained_ids"] = retained_records(expected, observed)
                 require(active.read(historical_item) is None, "Historical Memory selected or merged")
                 if kind == "single":
@@ -342,7 +416,7 @@ def run(args):
                 active = Server(binary, directory, args, record)
                 restarted = active.wait("ok")
                 recovery_notice(restarted, current, [] if kind == "single" else [historical])
-                again = {item["id"]: value for item in expected if (value := active.read(item)) is not None}
+                again = active.records()
                 require(again == observed, "Recovered Graph changed after restart")
                 require(active.read(historical_item) is None, "Historical Memory appeared after restart")
                 active.finish()
@@ -351,6 +425,7 @@ def run(args):
             case.update(passed=True, historical_after=tree(historical) if historical.exists() else {})
             save()
         require(len(record["cases"]) == 3 and all(x["passed"] for x in record["cases"]), "Incomplete recovery coverage")
+        require(len(record["input_controls"]) == 2 and all(x["passed"] for x in record["input_controls"]), "WAL-only input not established")
         require(all(x["reaped"] and not x.get("failure_cleanup_forced") for x in record["processes"]), "Incomplete native teardown")
         record["passed"] = True
     except BaseException as error:

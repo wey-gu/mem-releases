@@ -173,4 +173,6 @@ jobs:
           path: |
             recovery-receipt.json
             ${{ runner.temp }}/packaged-recovery/**/*.log
+            ${{ runner.temp }}/packaged-recovery/frozen-*/**
+          include-hidden-files: true
           if-no-files-found: error
