@@ -1619,6 +1619,34 @@ jobs:
 
       - *setup_desktop_python
 
+      # Keep the optimized compiler profile and admit the same bounded hosted
+      # resources as Docker. Retain admission before compilation so a lost
+      # runner does not erase all resource evidence.
+      - &checkout_linux_builder_tools
+        name: Checkout public Linux builder tooling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: release-tools
+          sparse-checkout: scripts/prepare_docker_builder.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - &prepare_linux_builder
+        name: Admit hosted Linux builder resources
+        id: builder_resources
+        run: python3 release-tools/scripts/prepare_docker_builder.py --receipt "$RUNNER_TEMP/linux-builder-prepared.json"
+
+      - &retain_linux_builder_admission
+        name: Retain Linux builder admission before compilation
+        if: always() && steps.builder_resources.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-builder-admission-${{ github.job }}
+          path: ${{ runner.temp }}/linux-builder-prepared.json
+          if-no-files-found: error
+
       - *restore_desktop_release_lock
 
       - name: Install system deps
@@ -2114,6 +2142,10 @@ jobs:
       - *checkout_hawdb_dependency
 
       - *setup_desktop_python
+
+      - *checkout_linux_builder_tools
+      - *prepare_linux_builder
+      - *retain_linux_builder_admission
 
       - *restore_desktop_release_lock
 
