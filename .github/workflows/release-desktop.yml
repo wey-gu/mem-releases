@@ -1643,7 +1643,7 @@ jobs:
         if: always() && steps.builder_resources.outcome != 'skipped'
         uses: actions/upload-artifact@v4
         with:
-          name: linux-builder-admission-${{ github.job }}
+          name: linux-builder-admission-${{ github.job }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/linux-builder-prepared.json
           if-no-files-found: error
 

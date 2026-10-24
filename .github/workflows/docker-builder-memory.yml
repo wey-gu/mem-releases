@@ -44,7 +44,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: docker-builder-${{ matrix.runner }}
+          name: docker-builder-${{ matrix.runner }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/docker-builder-prepared.json
           if-no-files-found: error
 
@@ -149,7 +149,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: docker-compile-${{ matrix.cache }}
+          name: docker-compile-${{ matrix.cache }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/docker-builder-*.json
             ${{ runner.temp }}/docker-recipe-digests.txt
