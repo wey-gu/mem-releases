@@ -10,6 +10,33 @@ from scripts import prepare_docker_builder as builder
 
 
 class DockerBuilderTest(unittest.TestCase):
+    def test_resource_receipts_keep_each_attempt_and_sibling_job_separate(self):
+        workflows = Path(__file__).resolve().parents[1] / ".github/workflows"
+        callers = {
+            "release-desktop.yml": ("linux-builder-admission",),
+            "release-docker.yml": ("docker-builder",),
+            "promote-gpu-variant.yml": ("docker-builder-gpu-fallback",),
+            "docker-builder-memory.yml": ("docker-builder", "docker-compile"),
+        }
+
+        def render(template, attempt, sibling):
+            fields = {"github.run_attempt": str(attempt),
+                      "github.job": ("build-linux-deb-appimage", "build-linux-vulkan")[sibling],
+                      "matrix.runner": ("ubuntu-22.04", "ubuntu-24.04-arm")[sibling],
+                      "matrix.cache": ("amd64", "arm64")[sibling],
+                      "inputs.variant": ("cuda", "vulkan")[sibling]}
+            return re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: fields[match[1]], template)
+
+        for filename, prefixes in callers.items():
+            text = (workflows / filename).read_text()
+            for prefix in prefixes:
+                with self.subTest(workflow=filename, artifact=prefix):
+                    names = re.findall(r"(?m)^ +name: (" + re.escape(prefix) + r"-[^\n]+)$", text)
+                    self.assertEqual(len(names), 1)
+                    first, retry = render(names[0], 1, 0), render(names[0], 2, 0)
+                    self.assertNotEqual(first, retry, "Retry would collide with retained prior-attempt evidence")
+                    self.assertNotEqual(first, render(names[0], 1, 1), "Sibling jobs would collide")
+
     def test_linux_desktop_admits_and_retains_resources_before_compilation(self):
         workflow = Path(__file__).resolve().parents[1] / ".github/workflows/release-desktop.yml"
         text = workflow.read_text()
