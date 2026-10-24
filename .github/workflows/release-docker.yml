@@ -130,6 +130,10 @@ jobs:
         with:
           path: release-tools
 
+      - &prepare_docker_builder
+        name: Prepare hosted Docker builder resources
+        run: python3 release-tools/scripts/prepare_docker_builder.py --receipt "$RUNNER_TEMP/docker-builder-prepared.json"
+
       # Prefer the source-owned release contract. The fallback keeps historical
       # source tags, which predate the helper, reproducibly buildable.
       - name: Init Rust fork submodules (https)
@@ -195,6 +199,27 @@ jobs:
           cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:amd64
           cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:amd64,mode=max
 
+      - &record_docker_resources
+        name: Record final Docker builder resources
+        if: always()
+        run: |
+          python3 - <<'PYEND'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'release-tools/scripts')
+          from prepare_docker_builder import snapshot
+          root = Path(os.environ['RUNNER_TEMP'])
+          (root / 'docker-builder-final.json').write_text(json.dumps(snapshot(root), indent=2) + '\n')
+          PYEND
+      - &upload_docker_resources
+        name: Upload Docker builder resource receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-builder-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/docker-builder-*.json
+          if-no-files-found: error
+
   build-arm64:
     needs: meta
     runs-on: ubuntu-24.04-arm
@@ -210,6 +235,7 @@ jobs:
           submodules: false
 
       - *checkout_release_tooling
+      - *prepare_docker_builder
 
       # Prefer the source-owned release contract. The fallback keeps historical
       # source tags, which predate the helper, reproducibly buildable.
@@ -255,6 +281,9 @@ jobs:
           cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:arm64
           cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:arm64,mode=max
 
+      - *record_docker_resources
+      - *upload_docker_resources
+
   # Opt-in GPU image, published as a STANDALONE single-arch tag `:<ver>-cuda`
   # (amd64 only — CUDA is x86). Independent of the multi-arch default image and
   # its `publish` manifest job, so it never blocks or alters the CPU release. The
@@ -266,6 +295,7 @@ jobs:
   # A pre-release pushes ONLY the exact rc-scoped tag `:<rc>-cuda`; the
   # floating `:<X.Y>-cuda` tag moves only for a clean GA version. GPU images
   # are never `:latest`.
+
   build-cuda:
     needs: meta
     runs-on: ubuntu-latest
@@ -281,6 +311,7 @@ jobs:
           submodules: false
 
       - *checkout_release_tooling
+      - *prepare_docker_builder
       - name: Init Rust fork submodules (https)
         run: |
           git config --global --add safe.directory '*' || true
@@ -349,6 +380,9 @@ jobs:
           # re-tags this same digest and verifies this signature first.
           cosign sign --yes "${IMAGE}@${DIGEST}"
 
+      - *record_docker_resources
+      - *upload_docker_resources
+
   build-vulkan:
     needs: meta
     # Vulkan GPU image (AMD/Intel via Mesa, NVIDIA via the Vulkan ICD). Same
@@ -368,6 +402,7 @@ jobs:
           submodules: false
 
       - *checkout_release_tooling
+      - *prepare_docker_builder
       - name: Init Rust fork submodules (https)
         run: |
           git config --global --add safe.directory '*' || true
@@ -418,6 +453,9 @@ jobs:
           # Sign the digest at build time, like the CPU manifest. GA promotion
           # re-tags this same digest and verifies this signature first.
           cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - *record_docker_resources
+      - *upload_docker_resources
 
   publish:
     needs: [meta, build-amd64, build-arm64]
