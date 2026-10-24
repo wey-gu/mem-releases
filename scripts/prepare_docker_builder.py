@@ -15,16 +15,6 @@ import tempfile
 GIB = 1024 ** 3
 TARGET_BYTES = 32 * GIB
 DISK_RESERVE_BYTES = 20 * GIB
-# These preinstalled SDKs are unused by the Docker recipes. Never prune the
-# workspace, Docker cache, Rust toolchain or arbitrary caller-supplied paths.
-UNUSED_SDKS = (
-    Path("/usr/local/lib/android"),
-    Path("/usr/share/dotnet"),
-    Path("/usr/share/swift"),
-    Path("/opt/ghc"),
-    Path("/usr/local/.ghcup"),
-    Path("/opt/hostedtoolcache/CodeQL"),
-)
 
 
 def require(condition, message):
@@ -81,7 +71,7 @@ def verify(before, after, allocated):
 
 def prepare(env, receipt, observe=snapshot, command=subprocess.run):
     record = {"schema": 1, "passed": False, "target_bytes": TARGET_BYTES,
-              "disk_reserve_bytes": DISK_RESERVE_BYTES, "commands": [], "removed_unused_sdks": []}
+              "disk_reserve_bytes": DISK_RESERVE_BYTES, "commands": []}
 
     def run(args):
         record["commands"].append([str(arg) for arg in args])
@@ -96,13 +86,6 @@ def prepare(env, receipt, observe=snapshot, command=subprocess.run):
         allocated = allocation_bytes(before)
         record["allocated_bytes"] = allocated
         required_disk = allocated + DISK_RESERVE_BYTES
-        for sdk in UNUSED_SDKS:
-            if observe(root)["disk_free_bytes"] >= required_disk:
-                break
-            if sdk.exists():
-                require(not sdk.is_symlink(), "Refusing to reclaim a symlinked SDK")
-                run(["sudo", "rm", "-rf", "--", str(sdk)])
-                record["removed_unused_sdks"].append(str(sdk))
         require(observe(root)["disk_free_bytes"] >= required_disk,
                 "Insufficient disk for bounded swap and Docker reserve")
         if allocated:

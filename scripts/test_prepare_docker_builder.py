@@ -42,7 +42,7 @@ class DockerBuilderTest(unittest.TestCase):
         env = dict(GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", RUNNER_OS="Linux",
                    RUNNER_TEMP=directory)
         receipt = Path(directory) / "receipt.json"
-        with patch.object(builder.platform, "system", return_value="Linux"), patch.object(builder, "UNUSED_SDKS", ()):
+        with patch.object(builder.platform, "system", return_value="Linux"):
             return builder.prepare(env, receipt, observe=lambda root: next(observations),
                                    command=command or (lambda *a, **kw: None))
 
@@ -85,37 +85,6 @@ class DockerBuilderTest(unittest.TestCase):
                         self.run_prepare(directory, values)
                 self.assertEqual(json.loads((Path(directory) / "receipt.json").read_text())["passed"], passed)
 
-    def test_reclaims_only_the_fixed_unused_sdk_when_space_is_needed(self):
-        with tempfile.TemporaryDirectory() as directory:
-            sdk = Path(directory) / "unused-sdk"
-            sdk.mkdir()
-            env = dict(GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", RUNNER_OS="Linux",
-                       RUNNER_TEMP=directory)
-            values = iter([self.resources(disk=25)] * 2
-                          + [self.resources(disk=60), self.resources(swap=16, disk=44)])
-            calls = []
-            with patch.object(builder.platform, "system", return_value="Linux"), patch.object(builder, "UNUSED_SDKS", (sdk,)):
-                record = builder.prepare(env, Path(directory) / "receipt.json", observe=lambda root: next(values),
-                                         command=lambda args, **kw: calls.append(args))
-            self.assertTrue(record["passed"])
-            self.assertEqual(record["removed_unused_sdks"], [str(sdk)])
-            self.assertEqual(calls[0], ["sudo", "rm", "-rf", "--", str(sdk)])
-
-    def test_refuses_sdk_symlink_without_mutating_its_target(self):
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "preserved"
-            target.mkdir()
-            sdk = Path(directory) / "unused-sdk"
-            sdk.symlink_to(target, target_is_directory=True)
-            env = dict(GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", RUNNER_OS="Linux",
-                       RUNNER_TEMP=directory)
-            calls = []
-            with patch.object(builder.platform, "system", return_value="Linux"), patch.object(builder, "UNUSED_SDKS", (sdk,)):
-                with self.assertRaisesRegex(RuntimeError, "symlinked SDK"):
-                    builder.prepare(env, Path(directory) / "receipt.json", observe=lambda root: self.resources(disk=25),
-                                    command=lambda args, **kw: calls.append(args))
-            self.assertFalse(calls)
-            self.assertTrue(target.is_dir())
 
 
 if __name__ == "__main__":
