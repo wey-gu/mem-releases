@@ -152,10 +152,10 @@ pending, cancelled, skipped, superseded and different-SHA results block tags.
 A main postsubmit is reusable only because the candidate retains that exact
 merged SHA. Arrange controlled exact-SHA CI if normal CI did not test it.
 
-Observe the normal merge-triggered `ci/mem-native-link-arm64` result and stop
-on failure; never manually dispatch it for release. Keep native artifact smoke
-and packaged runtime-version evidence separate. A repair changes RELEASE_SHA
-and requires all affected qualification again. No previous release's pass,
+`ci/mem-native-link-arm64` is independent post-merge CI. Release work does not
+query or inspect its status/logs, wait for it, trigger it, or gate on its outcome.
+Keep native artifact smoke and packaged runtime-version evidence. A repair
+changes RELEASE_SHA and requires all affected qualification again. No previous release's pass,
 source manifest check or manual inspection substitutes for a required gate.
 
 ## 5. Cut and smoke the RC
@@ -167,8 +167,8 @@ candidate build.
 
 The RC must prove the actual published artifacts: install the desktop package,
 verify the embedded native binary and updater path, run the required
-native-link/artifact smoke, and verify Docker and CLI artifacts where they are
-in scope. RC publication must not move `latest` or the GA updater feed.
+packaged native artifact smoke, and verify Docker and CLI artifacts where
+they are in scope. RC publication must not move `latest` or the GA updater feed.
 
 The desktop RC uploads its platform artifacts independently. The RPM is
 bundled in the Linux DEB/AppImage job from the same backend and shell binaries,
