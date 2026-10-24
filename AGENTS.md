@@ -38,9 +38,12 @@ is required before preparing the next Desktop release.
 
 # Release candidate integrity
 
-For every Nowledge Mem App release, cut a release branch before release
-metadata work begins. Keep the version change and parent release metadata as
-separate, ordered commits in one release-scoped PR to `nowledge-co/mem`.
+For a new Nowledge Mem App release, select an exact already-merged `main`
+commit with the intended version, then create `release/<version>` at that SHA.
+If a version bump is needed, merge one version-only PR first, independently of
+website notes. The selected commit is both `RELEASE_BASE_SHA` and `RELEASE_SHA`;
+never merge moving main into the fixed branch. No website gitlink, engineering
+release prose or GA date commit is required in Mem.
 
 During an active release, label that PR and any necessary reviewed release
 repair PR opened in `nowledge-co/mem` with `severity/critical` to raise merge
@@ -82,30 +85,30 @@ or manual inspection is not a substitute. If the normal postsubmit path cannot
 test `RELEASE_SHA`, stop before tags and arrange controlled exact-SHA CI; never
 waive this gate.
 
-1. Fetch `origin/main`, record `RELEASE_BASE_SHA`, and create
-   `release/<version>` from that exact commit. The branch is the fixed product
-   boundary; never merge moving `main` into it.
-2. Open one release-scoped PR in `nowledge-co/mem` **to `main`**. Its first
-   commit contains version fields and their generated manifests or lockfiles
-   only; it must not include user-facing changelog prose or a
-   `nowledge-labs-website` gitlink update. Keep the PR open for the parent
-   metadata commit.
-3. Draft and review the Changelog in `nowledge-co/nowledge-labs-website`, then
-   merge the child PR. Add a second commit to the same Mem PR that advances the
-   website gitlink and engineering history. Ordinary product PRs may continue
-   to merge while the notes are prepared. Merge the final combined PR through
-   the normal bot path, then deploy and read back the public Changelog before
-   package distribution.
-4. Record the combined PR's exact merged `main` commit. Cherry-pick only that
-   commit onto `release/<version>` with `git cherry-pick -x`. Never merge
-   `main` into the release branch or pick unrelated product commits.
-5. Record the resulting release-branch head as `RELEASE_SHA`. Run every source
-   preflight and both mandatory E2E gates against `RELEASE_SHA`. Observe the
-   merge-triggered `ci/mem-native-link-arm64` result and stop only if it has
-   failed; do not manually trigger it for a release. Create RC and GA tags only
-   from the resulting commit. A tag does not need to be a Git ancestor of
-   `main`; it must have auditable `-x` provenance to the reviewed `main`
-   metadata.
-6. After GA, date the Changelog entry and merge its website and parent gitlink
-   updates to `main`. Run the release-history check for patch-equivalence and
-   `-x` provenance, rather than an ancestor-only check.
+1. Merge the required version-only PR through normal review, CI and bot gates.
+   Skip it when the intended version is already present in the selected source.
+2. Select an exact main-reachable commit with that version. Record it as both
+   `RELEASE_BASE_SHA` and `RELEASE_SHA`, then create `release/<version>` there.
+   Audit the full previous-published-GA..RELEASE_SHA range. Later main changes
+   belong to a later release; do not replay metadata to create a new SHA.
+3. Mem owns `nmem-rs/crates/nmem-server/src/assets/openapi.json` and its typed
+   generation. Product API changes update it in their own Mem PR. The canonical
+   website synchronizes from a fixed merged Mem SHA, records its digest and
+   generates pages; it never writes product code. Website CI owns copy/page
+   and localization checks. A website checkout is not a Mem release prerequisite.
+4. Review notes in the canonical website, deploy through its owner, and read
+   back the public Changelog before package distribution. Record source SHA,
+   website SHA and API digest in mem-releases. An unchanged API may retain an
+   older website source receipt only after proving its bytes match RELEASE_SHA.
+5. Qualify RELEASE_SHA with all source and mandatory E2E gates. Observe only
+   the merge-triggered native-link result; a failure blocks release. Build RCs,
+   execute packaged version E2E and promote accepted artifacts without rebuilding.
+6. After GA, date only the canonical website entry with the actual GA UTC day.
+   Keep engineering worksheets and delivery evidence in mem-releases. Do not
+   merge the release branch back or submit release-only parent metadata to Mem.
+
+Existing candidates retain their original frozen base and reviewed `-x`
+provenance. Exceptional release repairs first land through normal review on
+main, are replayed with `git cherry-pick -x`, and require a new RC plus fresh
+exact-SHA qualification. The new main-reachable path does not rewrite old tags
+or admit unrelated product work into an existing candidate.
