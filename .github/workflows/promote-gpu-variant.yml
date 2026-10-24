@@ -177,6 +177,9 @@ jobs:
         with:
           path: release-tools
 
+      - name: Prepare hosted Docker builder resources
+        run: python3 release-tools/scripts/prepare_docker_builder.py --receipt "$RUNNER_TEMP/docker-builder-prepared.json"
+
       - name: Resolve source commit
         id: sha
         run: echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -269,3 +272,22 @@ jobs:
             echo "- image: ${IMAGE}:${GA}-${VARIANT} (amd64-only)"
             echo "- signing: cosign keyless (this rebuild)"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record final Docker builder resources
+        if: always()
+        run: |
+          python3 - <<'PYEND'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'release-tools/scripts')
+          from prepare_docker_builder import snapshot
+          root = Path(os.environ['RUNNER_TEMP'])
+          (root / 'docker-builder-final.json').write_text(json.dumps(snapshot(root), indent=2) + '\n')
+          PYEND
+      - name: Upload Docker builder resource receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-builder-gpu-fallback-${{ inputs.variant }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/docker-builder-*.json
+          if-no-files-found: error

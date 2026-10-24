@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -9,6 +10,28 @@ from scripts import prepare_docker_builder as builder
 
 
 class DockerBuilderTest(unittest.TestCase):
+    def test_all_optimized_image_entry_points_prepare_resources_before_buildx(self):
+        workflows = Path(__file__).resolve().parents[1] / ".github/workflows"
+        callers = {
+            "release-docker.yml": ("build-amd64", "build-arm64", "build-cuda", "build-vulkan"),
+            "promote-gpu-variant.yml": ("build",),
+        }
+        helper = "release-tools/scripts/prepare_docker_builder.py"
+        for filename, jobs in callers.items():
+            text = (workflows / filename).read_text()
+            for job in jobs:
+                with self.subTest(workflow=filename, job=job):
+                    body = text.split(f"\n  {job}:\n", 1)[1]
+                    body = re.split(r"\n  [A-Za-z0-9_-]+:\n", body, 1)[0]
+                    if "- *prepare_docker_builder" in body:
+                        binding = text.split("- &prepare_docker_builder\n", 1)[1].split("\n\n", 1)[0]
+                        self.assertIn(helper, binding)
+                        position = body.index("- *prepare_docker_builder")
+                    else:
+                        self.assertIn(helper, body, "Optimized compiler entry point bypasses resource preparation")
+                        position = body.index(helper)
+                    self.assertLess(position, body.index("docker/setup-buildx-action@"))
+
     def resources(self, ram=16, swap=0, disk=60):
         return dict(ram_bytes=ram * builder.GIB, swap_bytes=swap * builder.GIB,
                     disk_free_bytes=disk * builder.GIB)
