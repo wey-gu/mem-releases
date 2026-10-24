@@ -5,6 +5,7 @@ on:
     paths:
       - .github/workflows/docker-builder-memory.yml
       - .github/workflows/release-docker.yml
+      - .github/workflows/release-desktop.yml
       - .github/workflows/promote-gpu-variant.yml
       - scripts/prepare_docker_builder.py
       - scripts/test_prepare_docker_builder.py
@@ -13,6 +14,7 @@ on:
     paths:
       - .github/workflows/docker-builder-memory.yml
       - .github/workflows/release-docker.yml
+      - .github/workflows/release-desktop.yml
       - .github/workflows/promote-gpu-variant.yml
       - scripts/prepare_docker_builder.py
       - scripts/test_prepare_docker_builder.py
@@ -31,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        runner: [ubuntu-22.04, ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:

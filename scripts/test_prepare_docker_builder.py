@@ -10,6 +10,30 @@ from scripts import prepare_docker_builder as builder
 
 
 class DockerBuilderTest(unittest.TestCase):
+    def test_linux_desktop_admits_and_retains_resources_before_compilation(self):
+        workflow = Path(__file__).resolve().parents[1] / ".github/workflows/release-desktop.yml"
+        text = workflow.read_text()
+        for job in ("build-linux-deb-appimage", "build-linux-vulkan"):
+            with self.subTest(job=job):
+                body = text.split(f"\n  {job}:\n", 1)[1]
+                body = re.split(r"\n  [A-Za-z0-9_-]+:\n", body, 1)[0]
+                self.assertIn("prepare_linux_builder", body,
+                              "Hosted Linux compiler bypasses resource admission")
+                prepare = text.split("- &prepare_linux_builder\n", 1)[1].split("\n\n", 1)[0]
+                checkout = text.split("- &checkout_linux_builder_tools\n", 1)[1].split("\n\n", 1)[0]
+                retain = text.split("- &retain_linux_builder_admission\n", 1)[1].split("\n\n", 1)[0]
+                self.assertIn("release-tools/scripts/prepare_docker_builder.py", prepare)
+                self.assertIn('--receipt "$RUNNER_TEMP/linux-builder-prepared.json"', prepare)
+                self.assertIn("repository: ${{ github.repository }}", checkout)
+                self.assertIn("ref: ${{ github.sha }}", checkout)
+                self.assertIn("path: release-tools", checkout)
+                self.assertIn("always()", retain)
+                self.assertIn("linux-builder-prepared.json", retain)
+                self.assertIn("actions/upload-artifact@", retain)
+                self.assertLess(body.index("checkout_linux_builder_tools"), body.index("prepare_linux_builder"))
+                self.assertLess(body.index("prepare_linux_builder"), body.index("retain_linux_builder_admission"))
+                self.assertLess(body.index("retain_linux_builder_admission"), body.index("Build Rust backend bundle (Linux"))
+
     def test_all_optimized_image_entry_points_prepare_resources_before_buildx(self):
         workflows = Path(__file__).resolve().parents[1] / ".github/workflows"
         callers = {
