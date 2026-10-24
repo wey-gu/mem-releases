@@ -281,6 +281,9 @@ jobs:
           cache-from: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:arm64
           cache-to: type=registry,ref=${{ env.REGISTRY_CACHE_REPO }}:arm64,mode=max
 
+      - *record_docker_resources
+      - *upload_docker_resources
+
   # Opt-in GPU image, published as a STANDALONE single-arch tag `:<ver>-cuda`
   # (amd64 only — CUDA is x86). Independent of the multi-arch default image and
   # its `publish` manifest job, so it never blocks or alters the CPU release. The
@@ -292,8 +295,6 @@ jobs:
   # A pre-release pushes ONLY the exact rc-scoped tag `:<rc>-cuda`; the
   # floating `:<X.Y>-cuda` tag moves only for a clean GA version. GPU images
   # are never `:latest`.
-      - *record_docker_resources
-      - *upload_docker_resources
 
   build-cuda:
     needs: meta
