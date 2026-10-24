@@ -100,9 +100,10 @@ waive this gate.
    back the public Changelog before package distribution. Record source SHA,
    website SHA and API digest in mem-releases. An unchanged API may retain an
    older website source receipt only after proving its bytes match RELEASE_SHA.
-5. Qualify RELEASE_SHA with all source and mandatory E2E gates. Observe only
-   the merge-triggered native-link result; a failure blocks release. Build RCs,
-   execute packaged version E2E and promote accepted artifacts without rebuilding.
+5. Qualify RELEASE_SHA with all source and mandatory E2E gates. ARM64
+   native-link is independent post-merge CI: do not inspect, wait for, trigger
+   or gate release on its result. Build RCs, execute packaged version E2E and
+   promote accepted artifacts without rebuilding.
 6. After GA, date only the canonical website entry with the actual GA UTC day.
    Keep engineering worksheets and delivery evidence in mem-releases. Do not
    merge the release branch back or submit release-only parent metadata to Mem.
