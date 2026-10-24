@@ -44,8 +44,8 @@ test('historical bracketed Unreleased headers are supported', () => {
 function localFixture(t) {
   const temp = mkdtempSync(join(tmpdir(), 'ga-date-local-'));
   t.after(() => rmSync(temp, { recursive: true, force: true }));
-  const root = join(temp, 'Mem checkout');
-  const paths = [join(root, 'nowledge-labs-website/nowledge-mem/data/changelog.ts'), join(root, 'nowledge-graph/CHANGELOG.md')];
+  const root = join(temp, 'Website checkout');
+  const paths = [join(root, 'nowledge-mem/data/changelog.ts'), join(root, 'nowledge-graph/CHANGELOG.md')];
   paths.forEach(path => mkdirSync(dirname(path), { recursive: true }));
   writeFileSync(paths[0], website);
   writeFileSync(paths[1], engineering);
@@ -62,26 +62,32 @@ process.stdout.write(require('node:fs').readFileSync(process.env.GA_TEST_RELEASE
   return { paths, run, releaseFile };
 }
 
-test('one local command dates both files and can be repeated', t => {
+test('one local command dates only the website and can be repeated', t => {
   const f = localFixture(t);
   const first = f.run();
   assert.equal(first.status, 0, first.stderr);
   const dated = f.paths.map(path => readFileSync(path, 'utf8'));
   assert.deepEqual(dated, [
     website.replace('version: "0.10.96", date: "unreleased"', 'version: "0.10.96", date: "2026-10-06"'),
-    engineering.replace('## [0.10.96] - unreleased', '## [0.10.96] - 2026-10-06'),
+    engineering,
   ]);
   assert.equal(f.run().status, 0);
   assert.deepEqual(f.paths.map(path => readFileSync(path, 'utf8')), dated);
 });
 
-test('local command validates both files and GA before writing either', t => {
+test('a standalone website checkout needs no engineering entry', t => {
   const f = localFixture(t);
-  writeFileSync(f.paths[1], engineering.replace('## [0.10.96] - unreleased', '## [0.10.96] - 2026-10-05'));
-  const before = f.paths.map(path => readFileSync(path, 'utf8'));
+  rmSync(f.paths[1]);
+  assert.equal(f.run().status, 0);
+});
+
+test('local command validates the website and GA before writing', t => {
+  const f = localFixture(t);
+  const conflicting = website.replace('version: "0.10.96", date: "unreleased"', 'version: "0.10.96", date: "2026-10-05"');
+  writeFileSync(f.paths[0], conflicting);
   assert.notEqual(f.run().status, 0);
-  assert.deepEqual(f.paths.map(path => readFileSync(path, 'utf8')), before);
-  writeFileSync(f.paths[1], engineering);
+  assert.equal(readFileSync(f.paths[0], 'utf8'), conflicting);
+  writeFileSync(f.paths[0], website);
   writeFileSync(f.releaseFile, JSON.stringify({ ...release, draft: true }));
   assert.notEqual(f.run().status, 0);
   assert.deepEqual(f.paths.map(path => readFileSync(path, 'utf8')), [website, engineering]);

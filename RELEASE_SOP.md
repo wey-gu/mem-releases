@@ -6,20 +6,21 @@ instead of a moving view of `main`.
 
 ## Invariants
 
-- A release has one immutable source boundary: `RELEASE_BASE_SHA`.
-- `main` may continue to accept ordinary work after the boundary is cut.
-- Version fields and parent release metadata are reviewed together in one
-  release-scoped PR to `main`, then copied to the release branch with one
-  `git cherry-pick -x`.
-- No ordinary product change is cherry-picked into the release branch.
-- Every release note, binary, tag, and smoke result names the same release
-  branch commit.
-- Both canonical E2E gates have terminal success against `RELEASE_SHA` before
-  any RC or GA tag is created or package distribution begins.
-- The public Changelog is deployed and read back before package distribution.
-- Core RC artifacts are promoted to GA without rebuilding. A delayed RPM is
-  promoted separately from its validated RC asset and never changes the APT
-  repository or auto-updater feed.
+- Select one already-merged main commit as `RELEASE_BASE_SHA = RELEASE_SHA`.
+- Freeze that SHA on a release branch; later main merges are excluded.
+- A required version-only PR merges independently of website notes. If its
+  version is already present, no release-only Mem PR is needed.
+- OpenAPI is authored/generated in Mem and consumed by the canonical website
+  at a fixed SHA. Product CI and builds need no website checkout or writeback.
+- Notes, translations and publication dates belong to the website. Engineering
+  worksheets and source/CI/website/artifact receipts belong to mem-releases.
+- Both canonical E2E gates must pass for RELEASE_SHA before any RC/GA tag.
+- Public Changelog deployment/readback precedes package distribution.
+- Promote accepted RC artifact bytes without rebuilding; preserve all Desktop
+  authority, recovery and delivery-readback gates.
+
+Existing active candidates keep their original fixed base and reviewed `-x`
+provenance. This procedure changes new cuts only; never rewrite historic tags.
 
 ## 0. Verify the release capability before the cut
 
@@ -59,36 +60,14 @@ source SHA, and retains the installer as the `windows-bazel-x86_64` Actions
 artifact. It runs only on manual dispatch and has no release or distribution
 job. Its result is tracked separately from the core Cargo release.
 
-## 1. Cut the release branch first
+## 1. Merge the required version change
 
-Choose the last intended product commit on `main`, fetch it, and record it:
-
-```bash
-git fetch origin main
-export RELEASE_BASE_SHA="$(git rev-parse origin/main)"
-git switch -c "release/<version>" "$RELEASE_BASE_SHA"
-git push -u origin "release/<version>"
-```
-
-The branch is the candidate's product boundary. Do not retarget it to a newer
-`main`, merge ordinary PRs into it, or append later fixes because they happen
-to merge while release work is in progress. Release metadata is the one
-exception: it is reviewed on `main` first, then copied with
-`git cherry-pick -x` as described below. A necessary release-only repair is
-allowed, but it must first be reviewed on `main`, copied with `-x`, and result
-in a new RC number.
-
-## 2. Start one release metadata PR with a version-only commit
-
-Create one release-scoped PR with base `main`. Its first commit contains only
-version fields and generated manifests or lockfiles required by the version
-change. It must not contain user-facing prose or a website gitlink update.
-Keep the PR open until the website child change is reviewed and merged, then
-complete the same PR as described below.
-
-Label the PR `severity/critical` while the release is active so Tide gives the
-fixed release path higher merge priority. The label does not relax review, CI,
-or bot-only merge gates, and it must not be used for unrelated product work.
+If necessary, open one version-only PR to `nowledge-co/mem:main`, containing
+all required version fields and generated manifests/locks. Label it
+`severity/critical` for release priority and merge through normal bot gates.
+It does not wait for website notes and contains no website gitlink or
+release-only engineering prose. Skip this PR if the intended version is
+already present in the selected merged source.
 
 ### Version ownership and cache boundary
 
@@ -113,114 +92,71 @@ evidence must show both that internal-only package versions remain stable
 across an App release and that every shipped runtime surface reports the new
 App version.
 
-## 3. Write, merge, deploy, and verify release notes on `main`
+## 2. Select and freeze the merged source
 
-Build the changelog worksheet from the exact range:
-
-```text
-v<previous-version>..RELEASE_BASE_SHA
-```
-
-Classify only changes in that range. A merged PR outside the range belongs to
-the next release, even if it has a lower PR number or is user-visible.
-
-Prepare two ordered changes:
-
-1. a child PR in `nowledge-labs-website` with the `date: "unreleased"` entry;
-2. after the child PR merges, a second commit in the existing
-   `nowledge-co/mem` release PR that advances the website gitlink and adds
-   matching engineering history in `nowledge-graph/CHANGELOG.md`.
-
-Keep the two commits separate while the PR is under review so version-only and
-parent-metadata scope remain easy to audit. The final PR head must contain no
-ordinary product code. Tide may squash the PR; the resulting single merged
-`main` commit is the reviewed release-metadata provenance copied to the fixed
-release branch.
-
-### Website ownership and Vercel deployment
-
-`nowledge-co/nowledge-labs-website` is the canonical review repository. Every
-Changelog change must be submitted as a PR there and merged there first. Do
-not use a PR against `wey-gu/nowledge-labs-website` as a substitute for that
-review or merge.
-
-`wey-gu/nowledge-labs-website` is the Vercel deployment carrier. After the
-canonical merge, synchronize its `main` branch from the current deployment
-head by merging canonical `main`, then push that merge to `wey-gu/main` to
-start the manual deployment. Record both SHAs:
-
-```text
-CANONICAL_WEBSITE_SHA=<nowledge-co/main>
-DEPLOY_WEBSITE_SHA=<wey-gu/main after the sync merge>
-```
-
-Never force-push the deployment branch. If the two histories have diverged,
-the synchronization commit must retain the current `wey-gu/main` as one parent
-and canonical `main` as the other; its tree should match the canonical source
-unless the deployment repository has an explicitly reviewed deployment-only
-change. Verify the Vercel deployment and cache-bust the API readback. Confirm
-the entry version, `unreleased` state, item count, and representative text
-before creating any package tag. Once the combined Mem PR merges, record its
-exact merge commit as `RELEASE_MAIN_METADATA_SHA`.
-
-## 4. Copy the reviewed release metadata to the release branch
-
-Cherry-pick the combined reviewed `main` commit onto the branch. Always use
-`-x`; the appended source-commit trailer is release provenance and must not be
-removed.
+Select the exact intended main commit after the version is available. Record
+it as both RELEASE_BASE_SHA and RELEASE_SHA; a release branch only names it.
 
 ```bash
-git fetch origin main "release/<version>"
-git switch "release/<version>"
-git cherry-pick -x "$RELEASE_MAIN_METADATA_SHA"
-git push origin "release/<version>"
-export RELEASE_SHA="$(git rev-parse HEAD)"
+git fetch origin main
+export RELEASE_SHA=<full-selected-main-sha>
+git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+export RELEASE_BASE_SHA="$RELEASE_SHA"
+git switch -c "release/<version>" "$RELEASE_SHA"
+git push -u origin "release/<version>"
 ```
 
-Before compiling, verify that the copied commit contains only the intended
-version and release metadata, and that its `-x` source SHA is reachable from
-`origin/main`. Do not merge `main` into the branch to resolve a conflict. If
-the cherry-pick conflicts, resolve only the release metadata conflict, preserve
-the `-x` trailer, and record the resolution in the release record.
+Audit the complete `v<previous-published-version>..RELEASE_SHA` product range.
+Later main changes are excluded. Do not cherry-pick release metadata to create
+a second source identity, merge moving main, or merge the release branch back.
+A necessary repair first passes normal main review, is replayed with `-x`,
+receives a new RC and is requalified against its new exact SHA. Legacy replay
+candidates keep their original source and patch-equivalence proof.
 
-Run source preflights and build the native bundles from exactly `RELEASE_SHA`.
-`ci/mem-native-link-arm64` is started by the normal merge path; release work
-must only observe that merge-triggered job and must never dispatch or retry it
-solely for a release. A completed failure blocks the release. A successful or
-still-running job does not require a separate release-triggered run. The
-native-link gate belongs in the pre-release artifact smoke if it requires a
-built bundle.
+## 3. Prepare website notes independently
 
-### Mandatory exact-SHA E2E gate
+Write and review notes in `nowledge-co/nowledge-labs-website` from the frozen
+range and product fragments. Store the engineering worksheet in
+`release-records/<version>/`; do not compact CHANGELOG.md or advance the Mem
+website gitlink as release bookkeeping.
 
-Before creating any RC or GA tag or starting package distribution, require
-terminal success for both canonical E2E contexts against the exact
-`RELEASE_SHA`:
+Mem's canonical OpenAPI is
+`nmem-rs/crates/nmem-server/src/assets/openapi.json`. API changes update it in
+the product PR. In a canonical website checkout, consume the selected commit:
 
-- `ci/mem-frontend-e2e`, covering `//nowledge-graph:frontend_web_e2e_test` and
-  `//nowledge-graph:web_contract_tests`;
-- `ci/mem-shell-e2e`, covering `//nowledge-graph:frontend_shell_e2e_test`.
+```bash
+node scripts/sync-mem-openapi.mjs --repo /path/to/mem --ref <full-release-sha>
+pnpm --dir nowledge-mem run generate:docs
+node scripts/sync-mem-openapi.mjs --check
+```
 
-Record the tested commit and the run or context URL for both gates in the
-release record. Only terminal success counts. A failed, missing, pending,
-cancelled, skipped, or superseded run blocks the release, as does a successful
-run for any other commit.
+The sync command reads the exact merged Git blob, ignores working-tree edits,
+records its SHA and SHA-256, and writes only website files. The website never
+compiles Rust or modifies Mem. Run website localization and build CI. An
+unchanged API may keep an older source receipt after comparing its digest to
+the selected release asset; record that comparison with the release evidence.
 
-The standard Prow jobs may run as postsubmits of a `main` merge. Such a run is
-not evidence for the cherry-picked release-branch commit unless the job itself
-reports `RELEASE_SHA` as the tested source. If the current CI path cannot test
-the exact release commit, stop before tags and arrange controlled exact-SHA CI.
-Do not replace this gate with a previous release's pass, an unchanged-frontend
-claim, source preflight, artifact smoke, or manual inspection.
+Merge website notes in the canonical repository. Ask the website maintainer
+to synchronize the deployment mirror through its supported deploy path. Wait
+for successful deployment, then publicly read back the release entry, version,
+unreleased state and representative notes before package distribution. Record
+canonical/deployment SHAs and the OpenAPI digest in mem-releases. Source
+qualification and candidate builds can proceed while website work is pending.
 
-If a check fails:
+## 4. Qualify the exact selected source
 
-- fix only release infrastructure or a confirmed release blocker through a
-  reviewed `main` commit, then cherry-pick it with `-x` onto the release
-  branch;
-- re-run the affected checks against the new release-branch head;
-- do not import unrelated `main` changes;
-- use `rc2`, `rc3`, and so on after any already-published RC tag.
+Run source preflight against RELEASE_SHA. Require terminal success for both
+`ci/mem-frontend-e2e` and `ci/mem-shell-e2e` on that SHA before any RC/GA tag or
+package distribution. Record source SHA and context/run URLs. Failed, missing,
+pending, cancelled, skipped, superseded and different-SHA results block tags.
+A main postsubmit is reusable only because the candidate retains that exact
+merged SHA. Arrange controlled exact-SHA CI if normal CI did not test it.
+
+Observe the normal merge-triggered `ci/mem-native-link-arm64` result and stop
+on failure; never manually dispatch it for release. Keep native artifact smoke
+and packaged runtime-version evidence separate. A repair changes RELEASE_SHA
+and requires all affected qualification again. No previous release's pass,
+source manifest check or manual inspection substitutes for a required gate.
 
 ## 5. Cut and smoke the RC
 
@@ -526,34 +462,30 @@ Publish the GitHub Release only after the intended asset set is present. If the
 core release is announced while RPM remains pending, state that RPM availability
 is pending and send a completion update after its promotion verifies.
 
-## 7. Close the history loop
+## 7. Finalize only the website publication date
 
-The version and unreleased-note metadata are already merged on `main`; do not
-merge the release branch back. After publishing the stable GitHub Release, run
-this command from the `mem-releases` checkout (Node and an authenticated `gh`
-are required):
+After publishing the stable GitHub Release, run this from mem-releases using
+the standalone canonical website checkout:
 
 ```bash
-node scripts/date-ga-changelog.mjs <x.y.z> /path/to/mem
+node scripts/date-ga-changelog.mjs <x.y.z> /path/to/website
 ```
 
-It fills the current website and engineering entries using the actual
-`published_at` UTC day. It checks both before writing; RC/Draft, missing entries
-and conflicting dates fail. Repeating it leaves correct dates unchanged.
-Review and submit the local date changes, deploy the website through its owner,
-and merge the parent gitlink through the existing bot/review process. Then read
-both public endpoints and confirm the GA version and date:
+The command dates only `nowledge-mem/data/changelog.ts` using actual
+`published_at` in UTC. Draft/RC, missing or conflicting entries fail before
+writing; repeat runs leave the correct date unchanged. It does not read or
+write Mem's engineering CHANGELOG. Review/merge the website-only change,
+request mirror synchronization, verify deployment and read back both endpoints:
 
 ```bash
 curl -fsS https://mem.nowledge.co/api/changelog/release-notes | jq '{version,date}'
 curl -fsS 'https://mem.nowledge.co/api/changelog/release-notes?version=<x.y.z>' | jq '{version,date}'
 ```
 
-The command does not commit, open PRs or deploy. Run the release-history check
-to prove the tagged release branch is patch-equivalent to its recorded `main`
-source commits and that every copied commit has a valid `-x` provenance trailer.
-An ancestor-only check is invalid for this workflow because cherry-pick creates
-new commit IDs by design.
+Keep engineering notes, source/CI/website/artifact receipts and final acceptance
+in mem-releases. No post-GA Mem commit, website gitlink advance or branch-back
+merge is required. For a new cut, the tag is the selected main commit; legacy
+and repair replays retain the release-history patch-equivalence and `-x` proof.
 
 ## Fast-path rule
 
