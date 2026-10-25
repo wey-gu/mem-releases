@@ -229,7 +229,7 @@ def validate_server_output(output, version, source_sha):
 def verify(args):
     require(VERSION.fullmatch(args.version) is not None, "Expected a concrete nonzero version")
     require(re.fullmatch(r"[0-9a-f]{40}", args.source_sha) is not None, "Expected a full source SHA")
-    require(re.fullmatch(rf"v{re.escape(args.version)}-rc[1-9][0-9]*", args.release_tag) is not None, "RC identity mismatch")
+    require(re.fullmatch(rf"v{re.escape(args.version)}(?:-rc[1-9][0-9]*)?", args.release_tag) is not None, "Release identity mismatch")
     require(re.fullmatch(r"[0-9a-f]{40}", args.build_workflow_sha) is not None, "Expected build workflow SHA")
     require(args.build_attempt.isdigit() and int(args.build_attempt) > 0, "Invalid build attempt")
     require(args.artifact_id.isdigit() and int(args.artifact_id) > 0, "Invalid artifact ID")

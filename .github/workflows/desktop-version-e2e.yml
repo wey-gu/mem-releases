@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       build_run_id:
-        description: Completed release-desktop run containing the exact RC packages
+        description: Completed release-desktop run containing the exact RC or GA packages
         required: true
         type: string
       release_tag:
-        description: Source RC tag, including v (for example v0.10.104-rc1)
+        description: Source release tag, including v (for example v0.10.108 or v0.10.104-rc1)
         required: true
         type: string
       source_sha:
@@ -72,7 +72,7 @@ jobs:
           from desktop_version_receipts import validate_build_identity
           env = os.environ
           assert re.fullmatch(r'[1-9][0-9]*', env['BUILD_RUN_ID'])
-          match = re.fullmatch(r'v([0-9]+\.[0-9]+\.[0-9]+)-rc[1-9][0-9]*', env['RELEASE_TAG'])
+          match = re.fullmatch(r'v([0-9]+\.[0-9]+\.[0-9]+)(?:-rc[1-9][0-9]*)?', env['RELEASE_TAG'])
           assert match and re.fullmatch(r'[0-9a-f]{40}', env['SOURCE_SHA'])
           def api(path, token=None):
               child = dict(env)
@@ -82,9 +82,10 @@ jobs:
           repo = env['GITHUB_REPOSITORY']
           run = api(f'repos/{repo}/actions/runs/{env["BUILD_RUN_ID"]}')
           assert run['repository']['full_name'] == repo
-          # Only the tag-push RC path carries a verifiable tag identity in the
-          # run metadata. Manual/repository dispatch needs a build attestation.
-          validate_build_identity(run, env['RELEASE_TAG'])
+          # RCs use tag pushes. Direct GA dispatch must run at the immutable
+          # release tag, never moving main, and match its peeled tools commit.
+          tools = api(f'repos/{repo}/commits/{env["RELEASE_TAG"]}')
+          validate_build_identity(run, env['RELEASE_TAG'], tools['sha'])
           source = api(f'repos/nowledge-co/mem/commits/{env["RELEASE_TAG"]}', env['MEM_READ_TOKEN'])
           assert source['sha'] == env['SOURCE_SHA']
           artifacts = api(f'repos/{repo}/actions/runs/{env["BUILD_RUN_ID"]}/artifacts?per_page=100')['artifacts']
