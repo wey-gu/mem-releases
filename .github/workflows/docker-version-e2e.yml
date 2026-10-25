@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       build_run_id:
-        description: Original tag-push release-docker run
+        description: Original tag-push RC or immutable-tag direct GA release-docker run
         required: true
         type: string
       release_tag:
-        description: Exact RC tag including v
+        description: Exact RC or GA tag including v
         required: true
         type: string
       source_sha:

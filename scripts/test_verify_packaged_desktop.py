@@ -113,6 +113,20 @@ class PackagedVersionContract(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             validate_build_identity(dict(run, event="workflow_dispatch"), "v0.10.104-rc2")
 
+    def test_direct_ga_dispatch_requires_exact_immutable_tools_tag(self):
+        run = {"path": ".github/workflows/release-desktop.yml", "status": "completed", "conclusion": "success",
+               "event": "workflow_dispatch", "head_branch": "v0.10.108", "head_sha": "c" * 40, "run_attempt": 1}
+        validate_build_identity(run, "v0.10.108", "c" * 40)
+        with self.assertRaises(RuntimeError):
+            validate_build_identity(run, "v0.10.108")
+        with self.assertRaises(RuntimeError):
+            validate_build_identity(run, "v0.10.108", "d" * 40)
+        for key, value in (("head_branch", "main"), ("head_branch", "v0.10.107"),
+                           ("event", "repository_dispatch"), ("conclusion", "failure"),
+                           ("path", "other.yml")):
+            with self.subTest(key=key, value=value), self.assertRaises(RuntimeError):
+                validate_build_identity(dict(run, **{key: value}), "v0.10.108", "c" * 40)
+
     def test_existing_wrapper_without_terminal_path_registration_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             wrapper = Path(directory) / ".local/bin/nmem"

@@ -17,7 +17,7 @@ REPOSITORY = "wey-gu/mem-releases"
 IMAGE = "docker.io/nowledgelabs/mem"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 SHA = re.compile(r"[0-9a-f]{40}")
-TAG = re.compile(r"v([0-9]+\.[0-9]+\.[0-9]+)-rc[1-9][0-9]*")
+TAG = re.compile(r"v([0-9]+\.[0-9]+\.[0-9]+)(?:-rc[1-9][0-9]*)?")
 ARCHES = {"cpu": {"amd64", "arm64"}, "cuda": {"amd64"}, "vulkan": {"amd64"}}
 GPU_QUERY = ["nvidia-smi", "--query-gpu=uuid,driver_version", "--format=csv,noheader,nounits"]
 SURFACES = {
@@ -48,7 +48,7 @@ def validate_identity(identity):
     require(type(identity["build_attempt"]) is int and identity["build_attempt"] > 0, "Invalid attempt")
     require(SHA.fullmatch(identity["build_workflow_sha"]) is not None, "Invalid workflow SHA")
     require(SHA.fullmatch(identity["source_sha"]) is not None, "Invalid source SHA")
-    require(TAG.fullmatch(identity["release_tag"]) is not None, "Invalid RC tag")
+    require(TAG.fullmatch(identity["release_tag"]) is not None, "Invalid release tag")
     require(identity["variant"] in ARCHES, "Invalid variant")
     require(DIGEST.fullmatch(identity["digest"]) is not None, "Invalid image digest")
 
@@ -56,7 +56,10 @@ def validate_identity(identity):
 def validate_producer(run, tag, tools_sha):
     require(run["repository"]["full_name"] == REPOSITORY, "Wrong producer repository")
     require(run["path"] == ".github/workflows/release-docker.yml", "Wrong producer workflow")
-    require(run["event"] == "push" and run["head_branch"] == tag, "Wrong producer tag event")
+    tagged_ga_dispatch = (run["event"] == "workflow_dispatch"
+                          and re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag) is not None)
+    require((run["event"] == "push" or tagged_ga_dispatch)
+            and run["head_branch"] == tag, "Wrong producer tag event")
     require(run["head_sha"] == tools_sha and SHA.fullmatch(tools_sha) is not None,
             "Producer is not the peeled tools tag commit")
     require(run["status"] in ("in_progress", "completed"), "Producer has not started")

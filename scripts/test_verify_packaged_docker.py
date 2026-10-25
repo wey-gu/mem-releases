@@ -333,6 +333,20 @@ class IdentityAndAggregation(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(RuntimeError):
                 verify.validate_producer(dict(run, **{key: value}), IDENTITY["release_tag"], TOOLS)
 
+    def test_direct_ga_dispatch_keeps_exact_tag_and_tools_commit_binding(self):
+        run = {"repository": {"full_name": verify.REPOSITORY}, "path": ".github/workflows/release-docker.yml",
+               "event": "workflow_dispatch", "head_branch": "v0.10.108", "head_sha": TOOLS, "status": "in_progress"}
+        verify.validate_producer(run, "v0.10.108", TOOLS)
+        verify.validate_identity(dict(IDENTITY, release_tag="v0.10.108"))
+        for key, value in (("head_branch", "main"), ("head_branch", "v0.10.107"),
+                           ("head_sha", "0" * 40), ("path", "other.yml"),
+                           ("event", "repository_dispatch")):
+            with self.subTest(key=key, value=value), self.assertRaises(RuntimeError):
+                verify.validate_producer(dict(run, **{key: value}), "v0.10.108", TOOLS)
+        for tag in ("v0.10.108-ci1", "v0.10.108-nightly", "v0.10.108-rc0", "main"):
+            with self.subTest(tag=tag), self.assertRaises(RuntimeError):
+                verify.validate_identity(dict(IDENTITY, release_tag=tag))
+
     def test_aggregate_rejects_missing_duplicate_and_foreign_receipts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
