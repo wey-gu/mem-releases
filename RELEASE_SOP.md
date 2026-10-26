@@ -203,6 +203,17 @@ operator cannot execute a platform locally, obtain the same evidence from a
 native release runner before promotion. Record the artifact hash, platform,
 commands, observed versions, and terminal result in the release record.
 
+For an immutable direct-GA build whose only failed job is `publish`, the
+version E2E can still qualify its original artifacts when the sole failed
+publisher step is draft GitHub asset attachment. It requires a complete
+same-run, same-attempt job inventory: every required build must have succeeded,
+as must R2 upload, APT publication and exact delivery verification. The identity
+artifact retains that evidence. This permits testing and reconciling already
+built bytes; it does not mark the failed publisher successful, admit a failed
+build, waive native runtime tests, or permit a rebuild under an existing tag.
+Reconcile all six draft assets by SHA-256 and finish delivery independently
+before publishing the GitHub GA.
+
 This gate prevents the failure seen in Desktop 0.10.94
 (`nowledge-co/mem#5897`): a Bazel target omitted the Cargo package version, the
 bundled server reported `0.0.0`, and Desktop correctly refused to start it.

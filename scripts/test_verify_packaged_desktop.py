@@ -127,6 +127,64 @@ class PackagedVersionContract(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(RuntimeError):
                 validate_build_identity(dict(run, **{key: value}), "v0.10.108", "c" * 40)
 
+    def published_build(self):
+        run = {"id": 123, "path": ".github/workflows/release-desktop.yml", "status": "completed",
+               "conclusion": "failure", "event": "workflow_dispatch", "head_branch": "v0.10.108",
+               "head_sha": "c" * 40, "run_attempt": 2}
+        names = ("meta", "select-macos-runner", "select-windows-runner", "build-macos-arm64",
+                 "build-macos-x86_64", "build-windows", "build-linux-deb-appimage", "publish")
+        jobs = [{"name": name, "run_id": 123, "run_attempt": 2, "status": "completed",
+                 "conclusion": "success"} for name in names]
+        jobs[-1]["conclusion"] = "failure"
+        jobs[-1]["steps"] = [
+            {"name": name, "conclusion": "success"} for name in (
+                "Upload to Cloudflare R2", "Update APT repo", "Publish APT landing",
+                "Verify download delivery (R2 + optional APT + Worker)")]
+        jobs[-1]["steps"].append({"name": "Create GitHub release (draft, on this public repo)",
+                                 "conclusion": "failure"})
+        return run, jobs
+
+    def test_executed_builds_can_be_qualified_after_only_draft_upload_failed(self):
+        run, jobs = self.published_build()
+        validate_build_identity(run, "v0.10.108", "c" * 40, jobs=jobs)
+
+    def test_draft_upload_failure_does_not_admit_unproven_builds(self):
+        run, jobs = self.published_build()
+        cases = []
+        for index in range(len(jobs) - 1):
+            for conclusion in ("failure", "skipped", "cancelled", None):
+                changed = copy.deepcopy(jobs)
+                changed[index]["conclusion"] = conclusion
+                cases.append((f"{changed[index]['name']}:{conclusion}", run, changed))
+        for field, value in (("run_id", 456), ("run_attempt", 1), ("status", "in_progress")):
+            changed = copy.deepcopy(jobs)
+            changed[0][field] = value
+            cases.append((field, run, changed))
+        cases.extend((
+            ("missing build", run, jobs[1:]),
+            ("duplicate build", run, jobs + jobs[:1]),
+            ("missing jobs", run, None),
+            ("cancelled producer", dict(run, conclusion="cancelled"), jobs),
+            ("incomplete producer", dict(run, status="in_progress"), jobs),
+            ("wrong tools", dict(run, head_sha="d" * 40), jobs),
+            ("moving main", dict(run, head_branch="main"), jobs),
+            ("another event", dict(run, event="push"), jobs),
+        ))
+        for index in range(len(jobs[-1]["steps"])):
+            changed = copy.deepcopy(jobs)
+            changed[-1]["steps"].pop(index)
+            cases.append((f"missing publisher step {index}", run, changed))
+        for name in ("signing failed", "Upload to Cloudflare R2"):
+            changed = copy.deepcopy(jobs)
+            changed[-1]["steps"].append({"name": name, "conclusion": "failure"})
+            cases.append((name, run, changed))
+        for name, candidate, inventory in cases:
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                validate_build_identity(candidate, "v0.10.108", "c" * 40, jobs=inventory)
+        with self.assertRaises(RuntimeError):
+            validate_build_identity(dict(run, event="push", head_branch="v0.10.108-rc1"),
+                                    "v0.10.108-rc1", "c" * 40, jobs=jobs)
+
     def test_existing_wrapper_without_terminal_path_registration_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             wrapper = Path(directory) / ".local/bin/nmem"

@@ -11,9 +11,40 @@ from verify_packaged_desktop import PLATFORM_ARTIFACTS, PLATFORMS, require, runt
 from verify_packaged_desktop import validate_windows_package_record
 
 
-def validate_build_identity(run, release_tag, tools_sha=None):
+def validate_draft_upload_failure(run, jobs):
+    """Qualify built bytes separately from a later GitHub draft upload failure."""
+    require(type(run.get("id")) is int and run["id"] > 0, "Missing producer run ID")
+    require(run.get("conclusion") == "failure" and isinstance(jobs, list) and jobs,
+            "Build did not succeed and has no complete publish-only failure evidence")
+    names = [job.get("name") for job in jobs]
+    require(len(names) == len(set(names)), "Duplicate producer job")
+    required = {"meta", "select-macos-runner", "select-windows-runner", "build-macos-arm64",
+                "build-macos-x86_64", "build-windows", "build-linux-deb-appimage", "publish"}
+    require(required <= set(names), "Missing required producer job")
+    for job in jobs:
+        require(job.get("run_id") == run.get("id") and job.get("run_attempt") == run["run_attempt"],
+                "Producer job belongs to another run or attempt")
+        require(job.get("status") == "completed", "Producer job is not complete")
+        expected = {"failure"} if job["name"] == "publish" else (
+            {"success"} if job["name"] in required else {"success", "skipped"})
+        require(job.get("conclusion") in expected, f"Unsuccessful producer job: {job['name']}")
+    publisher = next(job for job in jobs if job["name"] == "publish")
+    steps = publisher.get("steps", [])
+    by_name = {step.get("name"): step for step in steps}
+    require(len(by_name) == len(steps), "Duplicate publisher step")
+    draft_step = "Create GitHub release (draft, on this public repo)"
+    failed = {step.get("name") for step in steps if step.get("conclusion") == "failure"}
+    require(failed == {draft_step}, "Publisher failed outside the draft upload step")
+    for name in ("Upload to Cloudflare R2", "Update APT repo", "Publish APT landing",
+                 "Verify download delivery (R2 + optional APT + Worker)"):
+        require(by_name.get(name, {}).get("conclusion") == "success", f"Unverified publication step: {name}")
+    require(all(step.get("conclusion") in {"success", "skipped", "failure"} for step in steps),
+            "Incomplete publisher step")
+
+
+def validate_build_identity(run, release_tag, tools_sha=None, *, jobs=None):
     require(run.get("path") == ".github/workflows/release-desktop.yml", "Wrong build workflow")
-    require(run.get("status") == "completed" and run.get("conclusion") == "success", "Build did not succeed")
+    require(run.get("status") == "completed", "Build is not complete")
     tagged_ga_dispatch = (
         run.get("event") == "workflow_dispatch"
         and re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", release_tag) is not None
@@ -25,6 +56,9 @@ def validate_build_identity(run, release_tag, tools_sha=None):
     if tools_sha is not None:
         require(run["head_sha"] == tools_sha, "Build is not the peeled tools tag commit")
     require(type(run.get("run_attempt")) is int and run["run_attempt"] > 0, "Missing build attempt")
+    if run.get("conclusion") != "success":
+        require(tagged_ga_dispatch, "Only immutable direct GA builds can have a draft upload recovery")
+        validate_draft_upload_failure(run, jobs)
 
 
 def accept(root, version, source_sha, build_run_id, identity):
