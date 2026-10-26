@@ -33,6 +33,7 @@ const digestFile = async (file) => basename(file) === 'one.dmg'
   ? 'sha256:one' : 'sha256:two';
 const options = (gh, files = ['/tmp/one.dmg', '/tmp/two.dmg']) => ({
   tag: 'v0.10.94', repo: 'wey-gu/mem-releases', files, gh, digestFile,
+  sleep: async () => {},
 });
 
 test('partial draft retry skips identical bytes and uploads only missing assets', async () => {
@@ -72,4 +73,33 @@ test('uploaded asset is read back and checked by digest', async () => {
   const { gh } = fixture({ uploadDigest: 'sha256:wrong' });
   await assert.rejects(reconcileDraftAssets(options(gh, ['/tmp/one.dmg'])),
     /uploaded asset SHA-256 does not match/);
+});
+
+test('a digest GitHub has not computed yet is awaited, not read as a mismatch', async () => {
+  // 0.10.108 (run 40249609661): the upload was intact, but the read right
+  // after it returned the asset without a digest.
+  const { state, gh } = fixture({ uploadDigest: '' });
+  let views = 0;
+  const lagging = (args) => {
+    const out = gh(args);
+    if (args[1] === 'view') {
+      views += 1;
+      // The digest appears on the third read after the upload.
+      if (views >= 4) for (const asset of state.assets) asset.digest ||= 'sha256:one';
+    }
+    return out;
+  };
+  let sleeps = 0;
+  await reconcileDraftAssets({ ...options(lagging, ['/tmp/one.dmg']), sleep: async () => { sleeps += 1; } });
+  assert.deepEqual(state.uploads, ['one.dmg']);
+  assert.ok(sleeps >= 1);
+});
+
+test('a digest that never appears still fails after the wait', async () => {
+  const { gh } = fixture({ uploadDigest: '' });
+  let sleeps = 0;
+  await assert.rejects(
+    reconcileDraftAssets({ ...options(gh, ['/tmp/one.dmg']), sleep: async () => { sleeps += 1; } }),
+    /does not match/);
+  assert.equal(sleeps, 23);
 });
