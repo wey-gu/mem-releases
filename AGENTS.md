@@ -19,9 +19,13 @@ then read back the public Changelog before distributing release packages.
 
 Before package distribution, verify named operator authentication and the
 known-good stable release in the production desktop update authority. After all
-GA artifacts are ready, prepare and publish the exact candidate using the
+core GA artifacts are ready, prepare and publish the exact candidate using the
 observed revision and a persisted operation UUID. Retain the stable recovery
 baseline until the candidate is accepted.
+
+The CUDA Docker image is not a core GA artifact. Never wait for the rc
+`build-cuda` job before promoting or publishing GA; it is promoted afterwards
+by its own `promote-gpu-variant` run (`RELEASE_SOP.md` section 6.3).
 
 Before declaring desktop delivery complete, verify
 `/latest?platform=<platform>&update_control=1&request_id=<fresh-id>` with the

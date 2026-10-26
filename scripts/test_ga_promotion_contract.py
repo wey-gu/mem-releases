@@ -63,6 +63,13 @@ assert args[:2] == ["buildx", "imagetools"], args
 if args[2] == "inspect":
     ref = args[3]
     digest = ref.split("@", 1)[1] if "@" in ref else state.get(ref)
+    # FAKE_PUSH_AFTER=N: an rc tag is absent for its first N inspections, as
+    # while the rc build is still running.
+    if "-rc" in ref and "@" not in ref and os.environ.get("FAKE_PUSH_AFTER"):
+        seen = sum(1 for line in open(os.environ["FAKE_DOCKER_LOG"])
+                   if json.loads(line)[:4] == ["buildx", "imagetools", "inspect", ref])
+        if seen <= int(os.environ["FAKE_PUSH_AFTER"]):
+            digest = None
     if digest is None or ("@" in ref and digest not in state.values()):
         sys.stderr.write(f"ERROR: {ref}: not found\n")
         sys.exit(1)
@@ -89,7 +96,36 @@ FAKE_COSIGN = r"""#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ["FAKE_DOCKER_LOG"], "a") as log:
     log.write(json.dumps(["cosign"] + sys.argv[1:]) + "\n")
+# FAKE_COSIGN_SIGNED_AFTER=N: the first N verifications fail, as between the
+# rc build's push and its signing step.
+after = os.environ.get("FAKE_COSIGN_SIGNED_AFTER")
+if after:
+    seen = sum(1 for line in open(os.environ["FAKE_DOCKER_LOG"])
+               if json.loads(line)[0] == "cosign")
+    sys.exit(1 if seen <= int(after) else 0)
 sys.exit(1 if os.environ.get("FAKE_COSIGN_FAIL") else 0)
+"""
+
+# Stand-in for the two `gh api` reads of the rc release-docker run. The jobs
+# query prints FAKE_GH_CONCLUSION once FAKE_GH_COMPLETE_AFTER reads have
+# happened (the job has completed), and nothing before that.
+FAKE_RELEASE_GH = r"""#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_DOCKER_LOG"], "a") as log:
+    log.write(json.dumps(["gh"] + args) + "\n")
+if args[0] == "workflow":
+    sys.exit(0)
+assert args[0] == "api", args
+if "/runs?" in args[1]:
+    print(os.environ.get("FAKE_GH_RUN_ID", "42"))
+elif args[1].endswith("/jobs?per_page=100"):
+    seen = sum(1 for line in open(os.environ["FAKE_DOCKER_LOG"])
+               if json.loads(line)[:1] == ["gh"] and "/jobs?" in json.loads(line)[2])
+    if seen > int(os.environ.get("FAKE_GH_COMPLETE_AFTER", "0")):
+        print(os.environ.get("FAKE_GH_CONCLUSION", ""))
+else:
+    sys.exit(2)
 """
 
 SIGNER_RE = ("^https://github\\.com/wey-gu/mem-releases/\\.github/workflows/"
@@ -99,7 +135,7 @@ SIGNER_RE = ("^https://github\\.com/wey-gu/mem-releases/\\.github/workflows/"
 def fake_tools(test, registry):
     tmp = Path(tempfile.mkdtemp())
     test.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)])
-    for name, body in (("docker", FAKE_DOCKER), ("cosign", FAKE_COSIGN)):
+    for name, body in (("docker", FAKE_DOCKER), ("cosign", FAKE_COSIGN), ("gh", FAKE_RELEASE_GH)):
         tool = tmp / name
         tool.write_text(body)
         tool.chmod(0o755)
@@ -814,19 +850,22 @@ class GAPromotionContractTest(unittest.TestCase):
                 self.assertEqual(values["push_latest"], latest)
 
     def run_gpu_retag(self, registry, retag_digest=None, variant="cuda", source="retag",
-                      move_floating="true", unsigned=False):
+                      move_floating="true", unsigned=False, rc="0.10.80-rc2", ga="0.10.80",
+                      **fake_env):
         section = job_section(workflow_text("promote-gpu-variant.yml"), "retag")
         script = step_script(section, "Re-tag rc GPU image to GA")
         _, state, log, env = fake_tools(self, registry)
-        env.update(IMAGE="docker.io/nowledgelabs/mem", RC="0.10.80-rc2", GA="0.10.80",
+        env.update(IMAGE="docker.io/nowledgelabs/mem", RC=rc, GA=ga,
                    VARIANT=variant, SOURCE=source, MOVE_FLOATING=move_floating,
-                   SIGNER=SIGNER_RE)
+                   SIGNER=SIGNER_RE, GH_REPO="wey-gu/mem-releases", POLL_SECONDS="0")
+        env.update(fake_env)
         if retag_digest:
             env["FAKE_RETAG_DIGEST"] = retag_digest
         if unsigned:
             env["FAKE_COSIGN_FAIL"] = "1"
+        # The bound turns a wait loop that never exits into a test failure.
         result = subprocess.run(["bash", "-c", script], env=env,
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, timeout=30)
         calls = [json.loads(line) for line in log.read_text().splitlines()]
         return result, json.loads(state.read_text()), calls
 
@@ -872,10 +911,11 @@ class GAPromotionContractTest(unittest.TestCase):
         promote = workflow_text("promote-rc-to-ga.yml")
         self.assertIn("      gpu_source:\n", promote)
         self.assertRegex(promote, r"gpu_source:\n(?:        .*\n)*?        default: retag\n")
-        for job in ("promote-cuda", "promote-vulkan"):
-            with self.subTest(job=job):
-                self.assertIn("      source: ${{ inputs.gpu_source }}\n",
-                              job_section(promote, job))
+        self.assertIn("      source: ${{ inputs.gpu_source }}\n",
+                      job_section(promote, "promote-vulkan"))
+        cuda = job_section(promote, "promote-cuda")
+        self.assertIn("      GPU_SOURCE: ${{ inputs.gpu_source }}\n", cuda)
+        self.assertIn('-f source="$GPU_SOURCE"', cuda)
 
     def test_gpu_promotion_verifies_signature_before_retag(self):
         rc = {"docker.io/nowledgelabs/mem:0.10.80-rc2-cuda": "sha256:rc"}
@@ -1007,8 +1047,125 @@ class GAPromotionContractTest(unittest.TestCase):
         build = job_section(workflow_text("promote-gpu-variant.yml"), "build")
         self.assertIn('cosign sign --yes "${IMAGE}@${DIGEST}"', build)
         promote = workflow_text("promote-rc-to-ga.yml")
-        for job in ("promote-cuda", "promote-vulkan"):
-            self.assertIn("      move_floating: ${{ inputs.push_latest }}\n", job_section(promote, job))
+        self.assertIn("      move_floating: ${{ inputs.push_latest }}\n",
+                      job_section(promote, "promote-vulkan"))
+        cuda = job_section(promote, "promote-cuda")
+        self.assertIn("      MOVE_FLOATING: ${{ inputs.push_latest }}\n", cuda)
+        self.assertIn('-f move_floating="$MOVE_FLOATING"', cuda)
+
+    # -- CUDA is off the GA critical path ---------------------------------
+    # 0.10.105: the GA Release was published at 10:37:03, the moment the rc
+    # build-cuda job ended, about 45 minutes after every core artifact was
+    # ready. CUDA now promotes in its own run that waits for the signed rc
+    # image, and nothing on the core path depends on it.
+
+    def run_cuda_dispatch(self, gpu_source="retag", push_latest="true"):
+        section = job_section(workflow_text("promote-rc-to-ga.yml"), "promote-cuda")
+        script = step_script(section, "Dispatch the CUDA GA promotion as an independent run")
+        _, _, log, env = fake_tools(self, {})
+        env.update(GH_REPO="wey-gu/mem-releases", WORKFLOW_REF="v0.10.80-rc2",
+                   RC="0.10.80-rc2", GA="0.10.80", GPU_SOURCE=gpu_source,
+                   MOVE_FLOATING=push_latest)
+        result = subprocess.run(["bash", "-c", script], env=env,
+                                capture_output=True, text=True, timeout=30)
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        return result, calls
+
+    def test_cuda_promotion_is_a_separate_run_the_core_path_never_waits_for(self):
+        promote = workflow_text("promote-rc-to-ga.yml")
+        cuda = job_section(promote, "promote-cuda")
+        self.assertNotIn("uses: ./.github/workflows/promote-gpu-variant.yml", cuda,
+                         "An inline CUDA call keeps the promotion run open until CUDA ends")
+        self.assertIn("    needs: validate\n", cuda)
+        self.assertIn("      actions: write", cuda)
+        for job in ("validate", "promote-docker", "promote-vulkan", "promote-desktop"):
+            with self.subTest(job=job):
+                self.assertNotRegex(job_section(promote, job), r"needs:.*promote-cuda",
+                                    f"{job} must not wait for CUDA")
+        for workflow in ("finish-ga-release.yml", "promote-rpm-to-ga.yml",
+                         "desktop-update-control.yml"):
+            with self.subTest(workflow=workflow):
+                self.assertNotIn("cuda", workflow_text(workflow).lower(),
+                                 f"{workflow} must not gate GA on CUDA")
+        result, calls = self.run_cuda_dispatch()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(calls, [["gh", "workflow", "run", "promote-gpu-variant.yml",
+                                  "--repo", "wey-gu/mem-releases", "--ref", "v0.10.80-rc2",
+                                  "-f", "rc_tag=0.10.80-rc2", "-f", "ga_tag=0.10.80",
+                                  "-f", "variant=cuda", "-f", "source=retag",
+                                  "-f", "move_floating=true", "-f", "wait_minutes=180"]])
+        result, calls = self.run_cuda_dispatch(gpu_source="build", push_latest="false")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("source=build", calls[0])
+        self.assertIn("move_floating=false", calls[0])
+
+    def test_gpu_variant_waits_only_when_asked(self):
+        variant = workflow_text("promote-gpu-variant.yml")
+        dispatch = variant.split("  workflow_dispatch:\n", 1)[1].split("  workflow_call:\n", 1)[0]
+        call = variant.split("  workflow_call:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertRegex(dispatch, r"wait_minutes:\n(?:        .*\n)*?        default: 180\n")
+        self.assertRegex(call, r"wait_minutes:\n(?:        .*\n)*?        default: 0\n")
+        self.assertIn("    timeout-minutes: 240\n", job_section(variant, "retag"))
+        vulkan = job_section(workflow_text("promote-rc-to-ga.yml"), "promote-vulkan")
+        self.assertNotIn("wait_minutes", vulkan)
+        self.assertIn("      actions: read\n", vulkan)
+
+    def test_gpu_retag_waits_for_the_signed_rc_image_then_retags_that_digest(self):
+        rc = {"docker.io/nowledgelabs/mem:0.10.80-rc2-cuda": "sha256:rc"}
+        # Absent for two polls, then pushed but unsigned for one, then signed.
+        result, registry, calls = self.run_gpu_retag(
+            rc, WAIT_MINUTES="5", FAKE_PUSH_AFTER="2", FAKE_COSIGN_SIGNED_AFTER="1")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(registry["docker.io/nowledgelabs/mem:0.10.80-cuda"], "sha256:rc")
+        self.assertEqual(registry["docker.io/nowledgelabs/mem:0.10-cuda"], "sha256:rc")
+        self.assertFalse(any("latest" in tag for tag in registry))
+        self.assertGreaterEqual(result.stdout.count("Waiting for a signed"), 3)
+        creates = [c for c in calls if c[0] == "buildx" and c[2] == "create"]
+        self.assertEqual(len(creates), 1)
+        self.assertEqual(creates[0][-1], "docker.io/nowledgelabs/mem@sha256:rc")
+        first_create = calls.index(creates[0])
+        signed = [i for i, c in enumerate(calls) if c[0] == "cosign"]
+        self.assertLess(signed[-1], first_create, "retag must follow the passing signature check")
+        reads = [c for c in calls if c[0] == "gh"]
+        self.assertIn("repos/wey-gu/mem-releases/actions/workflows/release-docker.yml/runs"
+                      "?branch=v0.10.80-rc2&per_page=1", [c[2] for c in reads])
+
+    def test_gpu_retag_wait_stops_when_the_rc_build_ended_without_a_signed_image(self):
+        rc = {"docker.io/nowledgelabs/mem:0.10.80-rc2-cuda": "sha256:rc"}
+        for conclusion, fake in (
+                # Build failed before pushing.
+                ("failure", dict(FAKE_PUSH_AFTER="1000")),
+                # Image pushed, signing never succeeded.
+                ("failure", dict(FAKE_COSIGN_FAIL="1")),
+                # A "successful" job that left no signed image is still refused.
+                ("success", dict(FAKE_COSIGN_FAIL="1"))):
+            with self.subTest(conclusion=conclusion, fake=fake):
+                result, registry, calls = self.run_gpu_retag(
+                    dict(rc), WAIT_MINUTES="5", FAKE_GH_CONCLUSION=conclusion,
+                    FAKE_GH_COMPLETE_AFTER="1", **fake)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"completed ({conclusion}) without a signed", result.stdout)
+                self.assertIn("GA is unaffected", result.stdout)
+                self.assertEqual([c for c in calls if c[0] == "buildx" and c[2] == "create"], [])
+                self.assertEqual(registry, rc)
+
+    def test_gpu_retag_validates_a_directly_dispatched_version_pair(self):
+        rc = {"docker.io/nowledgelabs/mem:0.10.80-rc2-cuda": "sha256:rc",
+              "docker.io/nowledgelabs/mem:0.10.81-rc1-cuda": "sha256:rc"}
+        for rc_tag, ga_tag, wait in (("0.10.81-rc1", "0.10.80", "0"),
+                                     ("v0.10.80-rc2", "v0.10.80", "0"),
+                                     ("0.10.80", "0.10.80", "0"),
+                                     ("0.10.80-rc2", "0.10.80-rc2", "0"),
+                                     ("0.10.80-rc2", "0.10.80", "211"),
+                                     ("0.10.80-rc2", "0.10.80", "abc")):
+            with self.subTest(rc=rc_tag, ga=ga_tag, wait=wait):
+                result, registry, calls = self.run_gpu_retag(
+                    dict(rc), rc=rc_tag, ga=ga_tag, WAIT_MINUTES=wait)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, [])
+                self.assertEqual(registry, rc)
+        build = job_section(workflow_text("promote-gpu-variant.yml"), "build")
+        self.assertIn('[[ "${RC%%-*}" != "$GA" ]]', step_script(build, "Validate variant"))
 
 
 
