@@ -85,7 +85,12 @@ jobs:
           # RCs use tag pushes. Direct GA dispatch must run at the immutable
           # release tag, never moving main, and match its peeled tools commit.
           tools = api(f'repos/{repo}/commits/{env["RELEASE_TAG"]}')
-          validate_build_identity(run, env['RELEASE_TAG'], tools['sha'])
+          jobs = None
+          if run['conclusion'] != 'success':
+              inventory = api(f'repos/{repo}/actions/runs/{run["id"]}/attempts/{run["run_attempt"]}/jobs?per_page=100')
+              assert inventory['total_count'] == len(inventory['jobs']), 'Incomplete producer job inventory'
+              jobs = inventory['jobs']
+          validate_build_identity(run, env['RELEASE_TAG'], tools['sha'], jobs=jobs)
           source = api(f'repos/nowledge-co/mem/commits/{env["RELEASE_TAG"]}', env['MEM_READ_TOKEN'])
           assert source['sha'] == env['SOURCE_SHA']
           artifacts = api(f'repos/{repo}/actions/runs/{env["BUILD_RUN_ID"]}/artifacts?per_page=100')['artifacts']
@@ -94,12 +99,20 @@ jobs:
               matches = [a for a in artifacts if a['name'] == name and not a['expired']]
               assert len(matches) == 1, name
               selected[name] = str(matches[0]['id'])
+          identity = {'run': run, 'jobs': jobs, 'artifacts': artifacts,
+                      'source_sha': env['SOURCE_SHA'], 'release_tag': env['RELEASE_TAG']}
+          open('desktop-build-identity.json', 'w').write(json.dumps(identity, indent=2) + '\n')
           with open(env['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'version={match.group(1)}\n')
               output.write(f'build_workflow_sha={run["head_sha"]}\n')
               output.write(f'build_attempt={run["run_attempt"]}\n')
               output.write(f'artifacts={json.dumps(selected)}\n')
           PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-build-identity
+          path: desktop-build-identity.json
+          if-no-files-found: error
 
   native:
     needs: [contract, windows-command-contract, identity]
