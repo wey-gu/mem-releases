@@ -25,18 +25,25 @@ function readDraft(gh, tag, repo) {
   return release;
 }
 
+// GitHub stores an uploaded file under a sanitized name: "Nowledge Mem_x.dmg"
+// becomes "Nowledge.Mem_x.dmg". Looking assets up by the local name never
+// found the uploaded copy, so 0.10.108 (run 40249609661) reported "uploaded
+// asset SHA-256 does not match" for an intact upload and every rerun then
+// collided with "asset already exists".
+export function githubAssetName(name) {
+  return name.replace(/ /g, '.');
+}
+
 function existingAsset(release, name) {
-  const matches = release.assets.filter((asset) => asset.name === name);
+  const stored = githubAssetName(name);
+  const matches = release.assets.filter((asset) => asset.name === name || asset.name === stored);
   if (matches.length > 1) throw new Error(`${name}: duplicate assets on Release`);
   return matches[0];
 }
 
-// GitHub computes an asset's digest after the upload returns, so a read right
-// after `gh release upload` can show the asset with no digest yet. 0.10.108
-// (run 40249609661) aborted publishing on exactly that: the arm64 DMG was
-// uploaded intact (its digest matched minutes later) but read back as
-// "does not match". Wait for the digest before comparing; a digest that
-// never appears still fails.
+// An asset read right after `gh release upload` may not carry its digest yet
+// (GitHub fills it in asynchronously). Wait for it before comparing; a digest
+// that never appears still fails.
 const DIGEST_ATTEMPTS = 24;
 const DIGEST_WAIT_MS = 5000;
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
