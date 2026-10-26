@@ -16,12 +16,13 @@ function fixture({ assets = [], isDraft = true, failFirstUpload = false,
         state.assets.push({ name, digest: 'sha256:one' });
         throw new Error('concurrent upload');
       }
-      if (state.assets.some((asset) => asset.name === name)) {
+      if (state.assets.some((asset) => asset.name === name.replace(/ /g, '.'))) {
         throw new Error('asset already exists');
       }
       state.uploads.push(name);
-      state.assets.push({ name, digest: uploadDigest ??
-        (name === 'one.dmg' ? 'sha256:one' : 'sha256:two') });
+      // Like GitHub: a stored asset name has its spaces replaced by dots.
+      state.assets.push({ name: name.replace(/ /g, '.'), digest: uploadDigest ??
+        (['one.dmg', 'Nowledge Mem_one.dmg'].includes(name) ? 'sha256:one' : 'sha256:two') });
       return '';
     }
     throw new Error(`unexpected gh call: ${args}`);
@@ -29,7 +30,7 @@ function fixture({ assets = [], isDraft = true, failFirstUpload = false,
   return { state, gh };
 }
 
-const digestFile = async (file) => basename(file) === 'one.dmg'
+const digestFile = async (file) => ['one.dmg', 'Nowledge Mem_one.dmg'].includes(basename(file))
   ? 'sha256:one' : 'sha256:two';
 const options = (gh, files = ['/tmp/one.dmg', '/tmp/two.dmg']) => ({
   tag: 'v0.10.94', repo: 'wey-gu/mem-releases', files, gh, digestFile,
@@ -102,4 +103,16 @@ test('a digest that never appears still fails after the wait', async () => {
     reconcileDraftAssets({ ...options(gh, ['/tmp/one.dmg']), sleep: async () => { sleeps += 1; } }),
     /does not match/);
   assert.equal(sleeps, 23);
+});
+
+test('a file name with a space matches the dotted name GitHub stores', async () => {
+  // 0.10.108 (run 40249609661): "Nowledge Mem_0.10.108_aarch64.dmg" is
+  // stored as "Nowledge.Mem_0.10.108_aarch64.dmg".
+  const { state, gh } = fixture();
+  await reconcileDraftAssets(options(gh, ['/tmp/Nowledge Mem_one.dmg']));
+  assert.deepEqual(state.uploads, ['Nowledge Mem_one.dmg']);
+  assert.equal(state.assets[0].name, 'Nowledge.Mem_one.dmg');
+  // A rerun finds the stored asset and skips it instead of uploading again.
+  await reconcileDraftAssets(options(gh, ['/tmp/Nowledge Mem_one.dmg']));
+  assert.deepEqual(state.uploads, ['Nowledge Mem_one.dmg']);
 });
