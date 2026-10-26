@@ -31,8 +31,27 @@ function existingAsset(release, name) {
   return matches[0];
 }
 
+// GitHub computes an asset's digest after the upload returns, so a read right
+// after `gh release upload` can show the asset with no digest yet. 0.10.108
+// (run 40249609661) aborted publishing on exactly that: the arm64 DMG was
+// uploaded intact (its digest matched minutes later) but read back as
+// "does not match". Wait for the digest before comparing; a digest that
+// never appears still fails.
+const DIGEST_ATTEMPTS = 24;
+const DIGEST_WAIT_MS = 5000;
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function settledAsset(gh, tag, repo, name, sleep) {
+  let asset = existingAsset(readDraft(gh, tag, repo), name);
+  for (let attempt = 1; asset && !asset.digest && attempt < DIGEST_ATTEMPTS; attempt += 1) {
+    await sleep(DIGEST_WAIT_MS);
+    asset = existingAsset(readDraft(gh, tag, repo), name);
+  }
+  return asset;
+}
+
 export async function reconcileDraftAssets({ tag, repo, files, gh = runGh,
-  digestFile = sha256File }) {
+  digestFile = sha256File, sleep = pause }) {
   if (!tag || !repo || files.length === 0) throw new Error('tag, repo and files required');
   const names = files.map((file) => basename(file));
   if (new Set(names).size !== names.length) throw new Error('duplicate local asset names');
@@ -40,7 +59,7 @@ export async function reconcileDraftAssets({ tag, repo, files, gh = runGh,
   for (const [index, file] of files.entries()) {
     const name = names[index];
     const expected = await digestFile(file);
-    const found = existingAsset(readDraft(gh, tag, repo), name);
+    const found = await settledAsset(gh, tag, repo, name, sleep);
     if (found) {
       if (found.digest !== expected) {
         throw new Error(`${name}: existing asset SHA-256 differs (${found.digest} != ${expected})`);
@@ -53,11 +72,11 @@ export async function reconcileDraftAssets({ tag, repo, files, gh = runGh,
       gh(['release', 'upload', tag, '-R', repo, file]);
     } catch (error) {
       // A competing job may have uploaded the same bytes after our read.
-      const raced = existingAsset(readDraft(gh, tag, repo), name);
+      const raced = await settledAsset(gh, tag, repo, name, sleep);
       if (raced?.digest !== expected) throw error;
       console.log(`${name}: identical concurrent upload already present`);
     }
-    const uploaded = existingAsset(readDraft(gh, tag, repo), name);
+    const uploaded = await settledAsset(gh, tag, repo, name, sleep);
     if (uploaded?.digest !== expected) {
       throw new Error(`${name}: uploaded asset SHA-256 does not match ${expected}`);
     }
