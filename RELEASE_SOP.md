@@ -232,6 +232,21 @@ gh workflow run promote-rc-to-ga.yml -R wey-gu/mem-releases \
   -f push_latest=true
 ```
 
+Do not wait for the rc CUDA image before this dispatch or before publishing
+the GA Release. The rc `release-docker` `build-cuda` job routinely ends long
+after every other artifact: on 0.10.105-rc2 it ran 08:58 to 10:37 while the
+CPU, ARM64 and Vulkan images were done by 09:39 and desktop by 09:48, and the
+GA Release was published at 10:37:03, the moment it ended. The core gate is
+the CPU Docker promotion, Vulkan, the core desktop artifacts, APT and the
+delivery readbacks. CUDA is an opt-in, amd64-only image that is never part of
+`:latest`, so it is not part of that gate.
+
+With the default `promote_gpu=true`, the run re-tags Vulkan inline and
+dispatches CUDA as a separate `promote-gpu-variant` run (section 6.3). The
+promotion run's own `promote-cuda` job only queues that follow-up, so the run
+finishes as soon as the core jobs do. Continue with the deferred RPM and the
+Desktop authority steps, then publish the GA Release without waiting for CUDA.
+
 ### Withdraw a Desktop version without blocking website downloads
 
 First withdraw the affected GitHub GA release to a draft, retain its artifacts,
@@ -460,7 +475,55 @@ does not rebuild the RPM, update APT, or change the core auto-updater feed.
 
 Publish the GitHub Release only after the intended asset set is present. If the
 core release is announced while RPM remains pending, state that RPM availability
-is pending and send a completion update after its promotion verifies.
+is pending and send a completion update after its promotion verifies. The CUDA
+Docker image is not a GitHub Release asset and is not part of this gate.
+
+### 6.3 Promote the CUDA image after GA
+
+CUDA reaches GA through its own `promote-gpu-variant` run, after the GA Release
+may already be public. `promote-rc-to-ga` dispatches it automatically whenever
+CUDA is selected (`promote_gpu=true` or `promote_cuda=true`), with the same
+`rc_tag`, `ga_tag`, `gpu_source`, and `move_floating=<push_latest>`, and
+`wait_minutes=180`. With `source=retag`, the follow-up:
+
+- waits up to `wait_minutes` (at most 210) for `:<rc>-cuda` to exist and carry
+  a valid release cosign signature;
+- stops at once, without promoting, when the rc `release-docker` `build-cuda`
+  job has completed and no signed image exists;
+- re-tags that exact signed rc digest to `:<ga>-cuda` (and `:<X.Y>-cuda` only
+  when `move_floating=true`), then checks every GA tag resolves to the rc
+  digest. It never touches `:<ga>`, `:latest`, R2, APT, or the GA Release, so a
+  CUDA failure leaves the published GA exactly as it was.
+
+Confirm the follow-up run succeeded and record it with the release evidence:
+
+```bash
+gh run list -R wey-gu/mem-releases --workflow promote-gpu-variant.yml --limit 5
+docker buildx imagetools inspect docker.io/nowledgelabs/mem:<version>-cuda
+```
+
+If the follow-up failed or timed out, or the GA was promoted with CUDA
+deselected, first make the rc `build-cuda` job succeed (re-run it if needed),
+then promote CUDA alone:
+
+```bash
+gh workflow run promote-gpu-variant.yml -R wey-gu/mem-releases \
+  --ref v<version>-rcN \
+  -f rc_tag=<version>-rcN \
+  -f ga_tag=<version> \
+  -f variant=cuda \
+  -f source=retag \
+  -f move_floating=true \
+  -f wait_minutes=180
+```
+
+Use `move_floating=false` for an older out-of-band GA, matching that GA's
+`push_latest=false`. `source=build` remains the explicit fallback for an rc
+that has no CUDA image; it rebuilds and signs from the rc source ref. When a
+release requires the CUDA version E2E (`docs/DOCKER_VERSION_E2E.md`) before
+CUDA reaches GA, dispatch the core promotion with `promote_gpu=false` and
+`promote_vulkan=true`, run that E2E against the rc CUDA image, and only then
+run the command above.
 
 ## 7. Finalize only the website publication date
 
@@ -509,6 +572,11 @@ preflight fails before public mutation if `GPG_PRIVATE_KEY` is absent.
 While RPM promotion is deferred, direct GA's all-platform older-patch preflight
 also fails closed because the live RPM latest can differ from the six core
 platforms. Use the RC promotion flow for an approved older out-of-band patch.
+In a direct GA, `release-docker` builds and signs `:<version>-cuda` itself in
+`build-cuda`, which no other job needs. Gate the GA publication on the Docker
+`publish`, `verify` and `scan` jobs and on `release-desktop`; do not wait for
+`build-cuda`. If it fails, re-run only that job; it does not affect `:latest`
+or the published GA.
 For clean GA tags, `publish=false, build_vulkan=true` is build-only: the
 Vulkan bundles remain Actions artifacts and do not create a GH Release draft.
 When `publish=true`, optional Vulkan assets attach only while the Release is

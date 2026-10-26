@@ -22,6 +22,9 @@
 #       floating :<X.Y>-<variant> when push_latest=true), after verifying the
 #       rc digest's cosign signature, and checks the GA digest equals the rc
 #       digest. Never :latest. GPU images are signed at build time, like CPU.
+#     - Vulkan is re-tagged inside this run. CUDA is NOT: this run dispatches
+#       a separate promote-gpu-variant run that waits for the signed rc CUDA
+#       image, so neither this run nor the GA publication waits for CUDA.
 #     - If the rc GPU image is missing (an rc cut before release-docker built
 #       GPU images on rc tags), the variant FAILS rather than silently
 #       rebuilding. Re-run with gpu_source=build (and only GPU selected) to
@@ -55,7 +58,8 @@
 #        rc_tag = "0.8.4-rc7"   (no leading v)
 #        ga_tag = "0.8.4"
 #        push_latest = true
-#      Both docker and desktop promotion run in parallel.
+#      Both docker and desktop promotion run in parallel. Do not wait for the
+#      rc CUDA image first; the CUDA follow-up run waits for it on its own.
 #   3. After it succeeds, the draft GH Release v<ga> holds the core desktop
 #      bundles. Once the RC RPM is available, run promote-rpm-to-ga.yml to
 #      attach it. Edit notes + publish manually after the intended assets land.
@@ -337,24 +341,60 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # release-docker builds :<rc>-cuda / :<rc>-vulkan during the rc run, so GA
-  # re-tags them (gpu_source=retag). CUDA and Vulkan are separate reusable
-  # workflow calls: neither waits for the other, and a failed variant can be
-  # retried alone. `promote_gpu` remains the switch for both variants.
+  # re-tags them (gpu_source=retag). Neither variant waits for the other, and
+  # a failed variant can be retried alone. `promote_gpu` remains the switch
+  # for both variants.
+  #
+  # CUDA is dispatched as its own promote-gpu-variant run instead of being
+  # called inline. Its rc build routinely finishes long after everything else
+  # (0.10.105-rc2: GA was published at 10:37:03, the moment build-cuda ended,
+  # about 45 minutes after the core artifacts were ready). This job returns as
+  # soon as the follow-up is queued; the follow-up waits for the signed rc
+  # image and applies the unchanged retag gates. A CUDA failure there cannot
+  # touch :<ga>, :latest, or the GA Release.
   promote-cuda:
     needs: validate
     if: ${{ inputs.promote_gpu || inputs.promote_cuda }}
-    uses: ./.github/workflows/promote-gpu-variant.yml
-    with:
-      rc_tag: ${{ needs.validate.outputs.rc_tag }}
-      ga_tag: ${{ needs.validate.outputs.ga_tag }}
-      variant: cuda
-      source: ${{ inputs.gpu_source }}
-      move_floating: ${{ inputs.push_latest }}
-    secrets: inherit
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write   # dispatch the independent CUDA follow-up run
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      WORKFLOW_REF: ${{ github.ref_name }}
+      RC: ${{ needs.validate.outputs.rc_tag }}
+      GA: ${{ needs.validate.outputs.ga_tag }}
+      GPU_SOURCE: ${{ inputs.gpu_source }}
+      MOVE_FLOATING: ${{ inputs.push_latest }}
+    steps:
+      - name: Dispatch the CUDA GA promotion as an independent run
+        run: |
+          set -euo pipefail
+          gh workflow run promote-gpu-variant.yml --repo "$GH_REPO" --ref "$WORKFLOW_REF" \
+            -f rc_tag="$RC" \
+            -f ga_tag="$GA" \
+            -f variant=cuda \
+            -f source="$GPU_SOURCE" \
+            -f move_floating="$MOVE_FLOATING" \
+            -f wait_minutes=180
+          {
+            echo "### CUDA promotion dispatched separately"
+            echo "- promote-gpu-variant (variant=cuda, source=${GPU_SOURCE}) waits up to 180 min for the signed :${RC}-cuda image."
+            echo "- GA does not wait for it. Track it with:"
+            echo '```'
+            echo "gh run list --repo ${GH_REPO} --workflow promote-gpu-variant.yml --limit 5"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   promote-vulkan:
     needs: validate
     if: ${{ inputs.promote_gpu || inputs.promote_vulkan }}
+    # promote-gpu-variant reads its rc build job while waiting.
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
     uses: ./.github/workflows/promote-gpu-variant.yml
     with:
       rc_tag: ${{ needs.validate.outputs.rc_tag }}
@@ -671,7 +711,7 @@ jobs:
             echo "| ---------------- | ---------------------------------------- |"
             echo "| validate         | ${{ needs.validate.result }}             |"
             echo "| promote-docker   | ${{ needs.promote-docker.result }}       |"
-            echo "| promote-cuda     | ${{ needs.promote-cuda.result }}         |"
+            echo "| promote-cuda     | ${{ needs.promote-cuda.result }} (dispatch only; see the promote-gpu-variant run) |"
             echo "| promote-vulkan   | ${{ needs.promote-vulkan.result }}       |"
             echo "| promote-desktop  | ${{ needs.promote-desktop.result }}      |"
           } >> "$GITHUB_STEP_SUMMARY"
