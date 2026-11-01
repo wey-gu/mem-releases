@@ -1111,6 +1111,7 @@ def meta_context(outputs, extra=None):
         "inputs.windows_cache_benchmark": False,
         "inputs.windows_only": False,
         "inputs.nightly_macos_arm64_only": False,
+        "inputs.publish": True,
     })
     context.update(extra or {})
     return context
@@ -1516,6 +1517,9 @@ else:
                     "prerelease-upload-macos-arm64", "publish"):
             self.assertFalse(self.condition(job, arm_only=True), job)
         self.assertIn("ARM-only", summary)
+        self.assertEqual(ReleaseDesktopNightlyContractTest.side_effect_reachable(
+            self, outputs, {"github.event_name": "workflow_dispatch", "inputs.tag": "nightly",
+                            "inputs.publish": False, "inputs.nightly_macos_arm64_only": True}), [])
 
     def test_invalid_mode_inputs_fail_before_source_lookup(self):
         invalid = (
@@ -1567,6 +1571,9 @@ else:
                 self.assertEqual(self.condition("nightly-report", event=event, tag=input_tag,
                                                 arm_only=False),
                                  event == "workflow_dispatch" and input_tag == "nightly")
+                if event == "workflow_dispatch" and input_tag == "nightly":
+                    self.assertEqual(ReleaseDesktopNightlyContractTest.side_effect_reachable(
+                        self, outputs, {"github.event_name": event, "inputs.tag": input_tag}), [])
 
         self.assertFalse(self.condition("select-macos-runner", arm_only=True, publish=True))
         self.assertFalse(self.condition("select-macos-runner", arm_only=True, probe=True))
