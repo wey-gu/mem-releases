@@ -1110,6 +1110,7 @@ def meta_context(outputs, extra=None):
         "inputs.windows_runner_probe": False,
         "inputs.windows_cache_benchmark": False,
         "inputs.windows_only": False,
+        "inputs.nightly_macos_arm64_only": False,
     })
     context.update(extra or {})
     return context
@@ -1250,7 +1251,8 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
     def test_nightly_uploads_no_binaries_and_builds_every_default_platform(self):
         for is_nightly, expect_upload in (("true", False), ("false", True)):
             context = meta_context({"is_nightly": is_nightly, "is_dry_run": "false",
-                                    "run_publish": "false", "run_vulkan": "false"})
+                                    "run_publish": "false", "run_vulkan": "false",
+                                    "nightly_macos_arm64_only": "false"})
             for job in CPU_BUILD_JOBS:
                 with self.subTest(is_nightly=is_nightly, job=job):
                     self.assertTrue(github_expr(self.jobs[job].get("if", "true"), context),
@@ -1370,7 +1372,9 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
         for event, tag, expected in (("workflow_dispatch", "nightly", True),
                                      ("workflow_dispatch", "0.10.102", False), ("push", None, False),
                                      ("repository_dispatch", None, False)):
-            self.assertEqual(github_expr(report_if, {"github.event_name": event, "inputs.tag": tag, "inputs.windows_only": False}),
+            self.assertEqual(github_expr(report_if, {"github.event_name": event, "inputs.tag": tag,
+                                                     "inputs.windows_only": False,
+                                                     "inputs.nightly_macos_arm64_only": False}),
                              expected, (event, tag))
         self.assertEqual(self.jobs["nightly-report"]["permissions"], {"issues": "write"})
 
@@ -1408,6 +1412,209 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
                     self.assertFalse(str(step.get("uses", "")).startswith("Swatinem/rust-cache"))
                     self.assertNotIn("cache", (step.get("with") or {}) if str(step.get("uses", "")).startswith(
                         "actions/setup-node") else {})
+
+
+class NightlyArm64OnlyContractTest(unittest.TestCase):
+    """Exercise the resolver from YAML and evaluate the real job conditions."""
+
+    def setUp(self):
+        self.workflow = load_release_desktop()
+        self.jobs = self.workflow["jobs"]
+        self.resolve_script = next(
+            step["run"] for step in self.jobs["meta"]["steps"] if step.get("id") == "resolve")
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(self.tmp)])
+        bindir = self.tmp / "bin"
+        bindir.mkdir()
+        gh = bindir / "gh"
+        gh.write_text(FAKE_GH)
+        gh.chmod(0o755)
+        jq = bindir / "jq"
+        jq.write_text("""#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+value = json.load(sys.stdin)
+if args == ["-r", ".version"]:
+    print(value["version"])
+else:
+    sys.exit("unsupported jq invocation: " + repr(args))
+""")
+        jq.chmod(0o755)
+        self.gh_log = self.tmp / "gh.log"
+
+    def resolve(self, **override):
+        output, summary = self.tmp / "output", self.tmp / "summary"
+        output.write_text("")
+        summary.write_text("")
+        env = {
+            **os.environ,
+            "PATH": str(self.tmp / "bin") + os.pathsep + os.environ["PATH"],
+            "FAKE_GH_LOG": str(self.gh_log),
+            "GITHUB_OUTPUT": str(output),
+            "GITHUB_STEP_SUMMARY": str(summary),
+            "EVENT_NAME": "workflow_dispatch",
+            "DISPATCH_TAG": "nightly",
+            "DISPATCH_PUBLISH": "false",
+            "DISPATCH_VULKAN": "false",
+            "DISPATCH_SOURCE_REF": "",
+            "WINDOWS_ONLY": "false",
+            "NIGHTLY_ARM64_ONLY": "false",
+            "WINDOWS_RUNNER_PROBE": "false",
+            "WINDOWS_CACHE_BENCHMARK": "false",
+            "MEM_REPO_TOKEN": "test-token",
+            "PAYLOAD_REF": "",
+            "PAYLOAD_VERSION": "",
+            "PUSH_REF": "main",
+            "FAKE_GH_SHA": NIGHTLY_SHA,
+            "FAKE_GH_PKG": "0.10.112",
+        }
+        env.update(override)
+        self.gh_log.write_text("")
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", self.resolve_script],
+            capture_output=True, text=True, check=False, env=env)
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines() if "=" in line)
+        calls = [json.loads(line) for line in self.gh_log.read_text().splitlines()]
+        return result, values, calls, summary.read_text()
+
+    def condition(self, name, *, event="workflow_dispatch", tag="nightly", arm_only=False,
+                  windows_only=False, probe=False, benchmark=False, publish=False, outputs=None):
+        context = {
+            "github.event_name": event,
+            "inputs.tag": tag,
+            "inputs.publish": publish,
+            "inputs.nightly_macos_arm64_only": arm_only,
+            "inputs.windows_only": windows_only,
+            "inputs.windows_runner_probe": probe,
+            "inputs.windows_cache_benchmark": benchmark,
+            "needs.meta.outputs.is_nightly": "true" if tag == "nightly" else "false",
+            "needs.meta.outputs.is_dry_run": "false",
+            "needs.meta.outputs.run_publish": "false",
+            "needs.meta.outputs.run_vulkan": "false",
+            "needs.meta.outputs.nightly_macos_arm64_only": "true" if arm_only else "false",
+        }
+        context.update({f"needs.meta.outputs.{key}": value for key, value in (outputs or {}).items()})
+        job_if = self.jobs[name].get("if")
+        return True if job_if is None else bool(github_expr(str(job_if), context))
+
+    def test_valid_mode_resolves_and_admits_only_arm64(self):
+        result, outputs, calls, summary = self.resolve(NIGHTLY_ARM64_ONLY="true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outputs.get("nightly_macos_arm64_only"), "true",
+                         "resolver must explicitly report its validated ARM-only mode")
+        self.assertEqual(outputs.get("source_ref"), NIGHTLY_SHA)
+        self.assertEqual(outputs.get("source_sha_short"), NIGHTLY_SHA[:12])
+        self.assertEqual((outputs["is_nightly"], outputs["is_dry_run"], outputs["run_publish"],
+                          outputs["run_vulkan"]), ("true", "false", "false", "false"))
+        self.assertTrue(any("/commits/main" in str(call["args"]) for call in calls), calls)
+        for job in ("select-macos-runner", "build-macos-arm64"):
+            self.assertTrue(self.condition(job, arm_only=True), job)
+        for job in ("select-windows-runner", "windows-runner-probe", "build-macos-x86_64",
+                    "build-windows", "build-linux-deb-appimage", "nightly-report"):
+            self.assertFalse(self.condition(job, arm_only=True), job)
+        for job in ("build-windows-vulkan", "build-linux-vulkan", "prerelease-prepare",
+                    "prerelease-upload-macos-arm64", "publish"):
+            self.assertFalse(self.condition(job, arm_only=True), job)
+        self.assertIn("ARM-only", summary)
+
+    def test_invalid_mode_inputs_fail_before_source_lookup(self):
+        invalid = (
+            {"DISPATCH_TAG": "0.10.112"},
+            {"DISPATCH_PUBLISH": "true"},
+            {"DISPATCH_PUBLISH": ""},
+            {"WINDOWS_ONLY": "true"},
+            {"WINDOWS_RUNNER_PROBE": "true"},
+            {"WINDOWS_CACHE_BENCHMARK": "true"},
+            {"EVENT_NAME": "push", "PUSH_REF": "v0.10.112-rc1"},
+            {"EVENT_NAME": "repository_dispatch", "PAYLOAD_REF": "v0.10.112",
+             "PAYLOAD_VERSION": "0.10.112"},
+        )
+        for inputs in invalid:
+            with self.subTest(inputs=inputs):
+                result, outputs, calls, _ = self.resolve(NIGHTLY_ARM64_ONLY="true", **inputs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(outputs, {})
+                self.assertEqual(calls, [], "invalid combinations must be rejected before API access")
+        # The meta validator must still run when probe flags would normally skip it.
+        self.assertTrue(self.condition("meta", arm_only=True, probe=True))
+        self.assertFalse(self.condition("windows-runner-probe", arm_only=True, probe=True))
+
+    def test_false_mode_preserves_existing_release_resolution(self):
+        cases = (
+            ("workflow_dispatch", {"DISPATCH_TAG": "nightly", "DISPATCH_PUBLISH": "false"},
+             ("true", "false", "false", "false", "true")),
+            ("workflow_dispatch", {"DISPATCH_TAG": "0.10.112-rc4", "DISPATCH_PUBLISH": "false"},
+             ("false", "true", "false", "false", "false")),
+            ("workflow_dispatch", {"DISPATCH_TAG": "0.10.112", "DISPATCH_PUBLISH": "true"},
+             ("false", "false", "true", "false", "false")),
+            ("push", {"PUSH_REF": "v0.10.112-rc4", "NIGHTLY_ARM64_ONLY": ""},
+             ("false", "true", "false", "false", "false")),
+            ("repository_dispatch", {"PAYLOAD_REF": "v0.10.112", "PAYLOAD_VERSION": "0.10.112"},
+             ("false", "false", "true", "false", "false")),
+        )
+        keys = ("is_nightly", "is_dry_run", "run_publish", "run_vulkan")
+        for event, env, expected in cases:
+            with self.subTest(event=event, env=env):
+                result, outputs, _, _ = self.resolve(EVENT_NAME=event, **env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(tuple(outputs.get(key) for key in keys), expected[:4])
+                self.assertEqual(outputs.get("nightly_macos_arm64_only", "false"), "false")
+                input_tag = env.get("DISPATCH_TAG") if event == "workflow_dispatch" else None
+                for job in ("select-windows-runner", "select-macos-runner", "build-macos-arm64",
+                            "build-macos-x86_64", "build-windows", "build-linux-deb-appimage"):
+                    self.assertTrue(self.condition(job, event=event, tag=input_tag,
+                                                   arm_only=False), job)
+                self.assertEqual(self.condition("nightly-report", event=event, tag=input_tag,
+                                                arm_only=False),
+                                 event == "workflow_dispatch" and input_tag == "nightly")
+
+        self.assertFalse(self.condition("select-macos-runner", arm_only=True, publish=True))
+        self.assertFalse(self.condition("select-macos-runner", arm_only=True, probe=True))
+        self.assertFalse(self.condition("select-macos-runner", arm_only=True, benchmark=True))
+
+    def test_retained_artifact_is_smoked_and_mode_specific(self):
+        arm_steps = self.jobs["build-macos-arm64"]["steps"]
+        smoke_index = next(i for i, step in enumerate(arm_steps)
+                           if step.get("name") == "Smoke the packaged backend in isolation")
+        provenance_index = next(i for i, step in enumerate(arm_steps)
+                                if step.get("name") == "Create ARM-only nightly provenance")
+        upload = next(step for step in arm_steps if step.get("name") == "Upload ARM-only nightly qualification")
+        self.assertLess(smoke_index, provenance_index)
+        self.assertLess(provenance_index, arm_steps.index(upload))
+        self.assertIn("needs.meta.outputs.nightly_macos_arm64_only == 'true'", upload["if"])
+        self.assertEqual(upload["with"]["retention-days"], 7)
+        self.assertIn("steps.locate.outputs.dmg", upload["with"]["path"])
+        smoke = arm_steps[smoke_index]
+        self.assertIn('"$ARM64_ONLY" == "true"', smoke["run"])
+        self.assertIn("exit 1", smoke["run"])
+        with tempfile.TemporaryDirectory() as cwd:
+            env = {**os.environ, "PACKAGE": "missing.dmg", "VERSION": "0.10.112-nightly.20261101"}
+            result = subprocess.run(["bash", "-e", "-c", smoke["run"]], cwd=cwd,
+                                    capture_output=True, text=True, env={**env, "ARM64_ONLY": "true"})
+            self.assertNotEqual(result.returncode, 0, "missing smoke script must withhold this artifact")
+            ordinary = subprocess.run(["bash", "-e", "-c", smoke["run"]], cwd=cwd,
+                                      capture_output=True, text=True, env={**env, "ARM64_ONLY": "false"})
+            self.assertEqual(ordinary.returncode, 0,
+                             msg="historical no-smoke-script behavior is preserved outside ARM-only mode: "
+                                 + ordinary.stderr)
+
+        ordinary_upload = next(step for step in arm_steps
+                               if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+                               and step.get("name") is None)
+        for is_nightly, arm_only, expected in (("true", "false", False), ("true", "true", False),
+                                               ("false", "false", True)):
+            context = meta_context({"is_nightly": is_nightly,
+                                    "nightly_macos_arm64_only": arm_only})
+            self.assertEqual(github_expr(ordinary_upload.get("if", "true"), context), expected)
+        self.assertIsNone(upload.get("continue-on-error"))
+        self.assertNotIn("always()", upload["if"])
+        self.assertEqual(upload["with"]["path"].splitlines(), [
+            "${{ steps.locate.outputs.dmg }}",
+            "${{ runner.temp }}/arm64-nightly-provenance.json",
+        ])
+        digest_step = next(step for step in arm_steps
+                           if step.get("name") == "Record ARM-only Actions artifact digest")
+        self.assertIn("steps.upload-arm64-nightly.outputs.artifact-digest", digest_step["env"]["ARTIFACT_DIGEST"])
 
 
 

@@ -20,18 +20,19 @@
 # Nightly release-shape build (nowledge-co/mem#7108, W5/W17):
 #   Platform breakage (Windows NSIS, submodule init, PDFium, timeouts) used to
 #   surface only 1.5-3 h into a release, and dependency bumps compiled cold
-#   inside the release. The nightly builds the five default desktop platforms
-#   from one pinned nowledge-co/mem commit with the exact release build
-#   steps, including macOS signing + notarization, so the same breakage turns
-#   a nightly red instead of a release and the compile caches are warm. It has
-#   NO side effects: `meta` resolves it to is_dry_run=false AND
-#   run_publish=false, so the prerelease, -vulkan attach, and publish jobs
-#   (the only jobs that write a GH Release, R2, APT, or the updater feed) are
-#   all skipped; Vulkan is forced off; build artifacts are not uploaded (an
-#   unreleased main build must not become a public download). It runs in its
-#   own concurrency group, so it can never queue behind, replace, or cancel a
-#   release run; release-shape-nightly.yml does not dispatch it while a
-#   release run is in flight.
+#   inside the release. The ordinary nightly builds the five default desktop
+#   platforms from one pinned nowledge-co/mem commit with the exact release
+#   build steps, including macOS signing + notarization, so the same breakage
+#   turns a nightly red instead of a release and the compile caches are warm.
+#   For this full-matrix mode, `meta` resolves is_dry_run=false and
+#   run_publish=false; release, R2, APT, updater, and Vulkan jobs are skipped,
+#   and no binaries are uploaded. The separate opt-in ARM-only qualification
+#   mode retains a smoked DMG and safe provenance for seven days; see
+#   docs/ARM_ONLY_NIGHTLY_QUALIFICATION.md. Both modes share the existing
+#   dedicated nightly concurrency group: they serialize with each other and
+#   cannot replace or cancel a release run. Ordinary nightlies upload no
+#   binaries; the ARM-only mode uploads only its smoke-verified DMG and safe
+#   source provenance as a seven-day Actions artifact.
 #
 # First-time setup: see docs/SETUP.md.
 
@@ -54,6 +55,11 @@ on:
         required: false
         type: boolean
         default: true
+      nightly_macos_arm64_only:
+        description: "Build only signed/notarized macOS ARM64 for nightly engineering qualification; requires tag=nightly and publish=false."
+        required: false
+        type: boolean
+        default: false
       latest:
         description: "Deprecated compatibility input; desktop latest is discovered from R2 and this value does not gate it."
         required: false
@@ -143,6 +149,7 @@ env:
 
 jobs:
   select-windows-runner:
+    if: ${{ inputs.nightly_macos_arm64_only != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -196,7 +203,7 @@ jobs:
   # releases use it too. An offline mini, a missing inventory credential, or
   # an API error falls back to GitHub-hosted, so it can never strand a release.
   select-macos-runner:
-    if: ${{ inputs.windows_only != true }}
+    if: ${{ inputs.windows_only != true && (inputs.nightly_macos_arm64_only != true || (github.event_name == 'workflow_dispatch' && inputs.tag == 'nightly' && inputs.publish == false && inputs.windows_runner_probe != true && inputs.windows_cache_benchmark != true)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -237,7 +244,7 @@ jobs:
 
   windows-runner-probe:
     needs: select-windows-runner
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows_runner_probe == true || inputs.windows_cache_benchmark == true) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.nightly_macos_arm64_only != true && (inputs.windows_runner_probe == true || inputs.windows_cache_benchmark == true) }}
     runs-on: windows-book-feasibility
     timeout-minutes: 10
     permissions:
@@ -298,7 +305,9 @@ jobs:
   # out the private repo at the right tag.
   # -----------------------------------------------------------------------
   meta:
-    if: ${{ inputs.windows_runner_probe != true && inputs.windows_cache_benchmark != true }}
+    # ARM-only input must reach the resolver even alongside probe flags so an
+    # invalid combination fails instead of silently skipping the requested build.
+    if: ${{ inputs.nightly_macos_arm64_only == true || (inputs.windows_runner_probe != true && inputs.windows_cache_benchmark != true) }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.resolve.outputs.version }}
@@ -307,6 +316,8 @@ jobs:
       run_publish: ${{ steps.resolve.outputs.run_publish }}
       run_vulkan: ${{ steps.resolve.outputs.run_vulkan }}
       is_nightly: ${{ steps.resolve.outputs.is_nightly }}
+      nightly_macos_arm64_only: ${{ steps.resolve.outputs.nightly_macos_arm64_only }}
+      source_sha_short: ${{ steps.resolve.outputs.source_sha_short }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -323,6 +334,9 @@ jobs:
           DISPATCH_VULKAN: ${{ inputs.build_vulkan }}
           DISPATCH_SOURCE_REF: ${{ inputs.source_ref }}
           WINDOWS_ONLY: ${{ inputs.windows_only }}
+          NIGHTLY_ARM64_ONLY: ${{ inputs.nightly_macos_arm64_only }}
+          WINDOWS_RUNNER_PROBE: ${{ inputs.windows_runner_probe }}
+          WINDOWS_CACHE_BENCHMARK: ${{ inputs.windows_cache_benchmark }}
           MEM_REPO_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
           PAYLOAD_REF: ${{ github.event.client_payload.ref }}
           PAYLOAD_VERSION: ${{ github.event.client_payload.version }}
@@ -330,6 +344,14 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          ARM64_ONLY="${NIGHTLY_ARM64_ONLY:-false}"
+          WINDOWS_ONLY="${WINDOWS_ONLY:-false}"
+          WINDOWS_RUNNER_PROBE="${WINDOWS_RUNNER_PROBE:-false}"
+          WINDOWS_CACHE_BENCHMARK="${WINDOWS_CACHE_BENCHMARK:-false}"
+          if [[ "$ARM64_ONLY" == "true" && ( "$EVENT_NAME" != "workflow_dispatch" || "$DISPATCH_TAG" != "nightly" || "$DISPATCH_PUBLISH" != "false" || "$WINDOWS_ONLY" == "true" || "$WINDOWS_RUNNER_PROBE" == "true" || "$WINDOWS_CACHE_BENCHMARK" == "true" ) ]]; then
+            echo "::error::nightly_macos_arm64_only requires manual tag=nightly, publish=false, windows_only=false, and both Windows probe inputs off."
+            exit 1
+          fi
           if [[ "${WINDOWS_ONLY:-false}" == "true" && ( "$EVENT_NAME" != "workflow_dispatch" || "$DISPATCH_TAG" != "nightly" ) ]]; then
             echo "::error::windows_only is accepted only for a non-publishing tag=nightly manual build."
             exit 1
@@ -393,11 +415,19 @@ jobs:
             VERSION="${PKG}-nightly.$(date -u +%Y%m%d)"
             PUBLISH="false"
             VULKAN="false"
-            {
-              echo "### Nightly release-shape build"
-              echo "- Source: nowledge-co/mem \`${NIGHTLY_REF}\` @ \`${SOURCE_REF}\`"
-              echo "- Version label: \`${VERSION}\` (artifact names only; nothing is published or uploaded)"
-            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            if [[ "$ARM64_ONLY" == "true" ]]; then
+              {
+                echo "### ARM-only nightly qualification"
+                echo "- Source: nowledge-co/mem @ \`${SOURCE_REF}\`"
+                echo "- This run retains only its smoke-verified macOS ARM64 DMG and safe provenance for seven days; it does not publish a release."
+              } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            else
+              {
+                echo "### Nightly release-shape build"
+                echo "- Source: nowledge-co/mem \`${NIGHTLY_REF}\` @ \`${SOURCE_REF}\`"
+                echo "- Version label: \`${VERSION}\` (artifact names only; nothing is published or uploaded)"
+              } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            fi
           fi
           # Any pre-release suffix (`-ci*`, `-rc*`, `-beta*`, etc.) is a dry
           # run. Only a bare semver `X.Y.Z` ever publishes. Same gate as
@@ -415,12 +445,20 @@ jobs:
           # Normalize VULKAN to a strict true/false ("" from a non-dispatch
           # trigger becomes false). NEVER touches publish/updater.
           if [[ "$VULKAN" == "true" ]]; then VULKAN="true"; else VULKAN="false"; fi
-          echo "version=$VERSION"        >> "$GITHUB_OUTPUT"
-          echo "source_ref=$SOURCE_REF"  >> "$GITHUB_OUTPUT"
-          echo "is_dry_run=$DRY"         >> "$GITHUB_OUTPUT"
-          echo "run_publish=$PUBLISH"    >> "$GITHUB_OUTPUT"
-          echo "run_vulkan=$VULKAN"      >> "$GITHUB_OUTPUT"
-          echo "is_nightly=$NIGHTLY"     >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$VERSION"
+            echo "source_ref=$SOURCE_REF"
+            echo "is_dry_run=$DRY"
+            echo "run_publish=$PUBLISH"
+            echo "run_vulkan=$VULKAN"
+            echo "is_nightly=$NIGHTLY"
+            echo "nightly_macos_arm64_only=$ARM64_ONLY"
+            if [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "source_sha_short=${SOURCE_REF:0:12}"
+            else
+              echo "source_sha_short="
+            fi
+          } >> "$GITHUB_OUTPUT"
           echo "Resolved: version=$VERSION source_ref=$SOURCE_REF dry=$DRY publish=$PUBLISH vulkan=$VULKAN nightly=$NIGHTLY"
 
       - name: Pre-flight GA policy before build and optional Vulkan jobs
@@ -897,11 +935,16 @@ jobs:
         shell: bash
         env:
           PACKAGE: ${{ steps.locate.outputs.dmg || steps.locate.outputs.deb }}
+          ARM64_ONLY: ${{ needs.meta.outputs.nightly_macos_arm64_only }}
         run: |
           set -euo pipefail
           # Source refs older than the script cannot run it; say so loudly
           # instead of failing a historical rebuild.
           if [[ ! -f scripts/release-smoke-core.sh ]]; then
+            if [[ "$ARM64_ONLY" == "true" ]]; then
+              echo "::error title=Release smoke unavailable::ARM-only qualification requires scripts/release-smoke-core.sh; refusing to retain an unverified artifact."
+              exit 1
+            fi
             echo "::warning title=Release smoke skipped::This source ref predates scripts/release-smoke-core.sh; run ./scripts/release-smoke.sh by hand before promoting."
             exit 0
           fi
@@ -910,15 +953,65 @@ jobs:
             --expect-version "$VERSION" \
             --expect-sha "$(git rev-parse HEAD)"
 
-      # A nightly builds main, which may hold unreleased work: keep it off
-      # the public repository's downloadable workflow artifacts.
+      # Ordinary nightlies build main, which may hold unreleased work: keep
+      # those packages off downloadable artifacts. The explicit ARM-only
+      # qualification upload below is the sole nightly exception.
       - uses: actions/upload-artifact@v4
-        if: needs.meta.outputs.is_nightly != 'true'
+        if: needs.meta.outputs.is_nightly != 'true' && needs.meta.outputs.nightly_macos_arm64_only != 'true'
         with:
           name: macos-arm64
           path: ${{ steps.locate.outputs.dmg }}
           if-no-files-found: error
           retention-days: 7
+
+      - name: Create ARM-only nightly provenance
+        if: needs.meta.outputs.nightly_macos_arm64_only == 'true'
+        id: nightly-provenance
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.meta.outputs.source_ref }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          DMG: ${{ steps.locate.outputs.dmg }}
+          PROVENANCE: ${{ runner.temp }}/arm64-nightly-provenance.json
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ -f "$DMG" ]]
+          dmg_sha="$(shasum -a 256 "$DMG" | awk '{print $1}')"
+          jq -n --arg source_sha "$SOURCE_SHA" --arg version "$VERSION" \
+            --arg run_id "$RUN_ID" --arg run_url "$RUN_URL" \
+            --arg workflow_sha "$WORKFLOW_SHA" --arg dmg_sha256 "$dmg_sha" \
+            '{source_sha:$source_sha,version:$version,run_id:$run_id,run_url:$run_url,workflow_sha:$workflow_sha,dmg_sha256:$dmg_sha256}' \
+            > "$PROVENANCE"
+          echo "ARM64 DMG SHA-256: \`$dmg_sha\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload ARM-only nightly qualification
+        if: needs.meta.outputs.nightly_macos_arm64_only == 'true'
+        id: upload-arm64-nightly
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ format('macos-arm64-nightly-{0}', needs.meta.outputs.source_sha_short) }}
+          path: |
+            ${{ steps.locate.outputs.dmg }}
+            ${{ runner.temp }}/arm64-nightly-provenance.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Record ARM-only Actions artifact digest
+        if: needs.meta.outputs.nightly_macos_arm64_only == 'true'
+        env:
+          ARTIFACT_DIGEST: ${{ steps.upload-arm64-nightly.outputs.artifact-digest }}
+          ARTIFACT_URL: ${{ steps.upload-arm64-nightly.outputs.artifact-url }}
+        run: |
+          set -euo pipefail
+          [[ -n "$ARTIFACT_DIGEST" ]]
+          {
+            echo "Actions artifact digest: \`$ARTIFACT_DIGEST\`"
+            echo "Actions artifact URL: $ARTIFACT_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # A self-hosted Mac keeps its user keychain search list and RUNNER_TEMP
       # between jobs: remove the signing keychain whatever happened above.
@@ -939,7 +1032,7 @@ jobs:
           rm -f "$RUNNER_TEMP/apple_cert.p12"
 
   build-macos-x86_64:
-    if: ${{ inputs.windows_only != true }}
+    if: ${{ inputs.windows_only != true && inputs.nightly_macos_arm64_only != true }}
     needs: [meta, select-macos-runner]
     runs-on: ${{ fromJSON(needs.select-macos-runner.outputs.x86_64) }}
     # 300, not 180: see build-macos-arm64 (0.10.101-rc1 evidence).
@@ -1193,6 +1286,7 @@ jobs:
           rm -f "$RUNNER_TEMP/apple_cert.p12"
 
   build-windows:
+    if: ${{ inputs.nightly_macos_arm64_only != true }}
     needs: [meta, select-windows-runner]
     runs-on: ${{ needs.select-windows-runner.outputs.label }}
     # 300, not 180, as for the macOS jobs. A cold-cache build runs past three
@@ -1590,7 +1684,7 @@ jobs:
           retention-days: 14
 
   build-linux-deb-appimage:
-    if: ${{ inputs.windows_only != true }}
+    if: ${{ inputs.windows_only != true && inputs.nightly_macos_arm64_only != true }}
     needs: meta
     # Builds every default Linux artifact (.deb, .AppImage, .rpm) from ONE
     # backend bundle and ONE Tauri shell build, against one explicit runtime
@@ -2829,7 +2923,7 @@ jobs:
       - build-macos-x86_64
       - build-windows
       - build-linux-deb-appimage
-    if: ${{ always() && inputs.tag == 'nightly' && inputs.windows_only != true }}
+    if: ${{ always() && inputs.tag == 'nightly' && inputs.windows_only != true && inputs.nightly_macos_arm64_only != true }}
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     permissions:
