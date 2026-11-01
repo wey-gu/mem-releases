@@ -1564,6 +1564,31 @@ class ReleaseShapeTriggerContractTest(unittest.TestCase):
             "-f", "tag=nightly", "-f", f"source_ref={NIGHTLY_SHA}"]])
 
 
+class HostedCargoResolutionContract(unittest.TestCase):
+    def test_valid_cargo_outside_home_bin_passes_and_broken_cargo_fails(self):
+        script = step_script(job_section(workflow_text("release-desktop.yml"), "build-macos-arm64"),
+                             "Pin default toolchain + sanity check cargo")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            home.mkdir()
+            binary = root / "homebrew-bin"
+            binary.mkdir()
+            cargo = binary / "cargo"
+            cargo.write_text('#!/bin/sh\nprintf "cargo 1.98.1\\n"\nexit "${TEST_CARGO_EXIT:-0}"\n')
+            cargo.chmod(0o755)
+            rustup = binary / "rustup"
+            rustup.write_text('#!/bin/sh\nif [ "$1" = which ]; then printf "%s\\n" "' + str(cargo) + '"; fi\n')
+            rustup.chmod(0o755)
+            env = dict(os.environ, HOME=str(home), PATH=str(binary) + ":/usr/bin:/bin")
+            self.assertFalse((home / ".cargo/bin").exists())
+            good = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+            self.assertEqual(good.returncode, 0, good.stdout + good.stderr)
+            broken = subprocess.run(["bash", "-c", script], env=dict(env, TEST_CARGO_EXIT="7"),
+                                    capture_output=True, text=True)
+            self.assertNotEqual(broken.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
 

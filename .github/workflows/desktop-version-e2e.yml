@@ -11,6 +11,11 @@ on:
         description: Source release tag, including v (for example v0.10.108 or v0.10.104-rc1)
         required: true
         type: string
+      build_tools_tag:
+        description: Optional immutable release-tools/<same-RC>-rN tag for a reviewed tools-only repair
+        required: false
+        type: string
+        default: ""
       source_sha:
         description: Exact 40-hex Mem RELEASE_SHA
         required: true
@@ -66,6 +71,7 @@ jobs:
           BUILD_RUN_ID: ${{ inputs.build_run_id }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           SOURCE_SHA: ${{ inputs.source_sha }}
+          BUILD_TOOLS_TAG: ${{ inputs.build_tools_tag }}
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess, sys
@@ -83,15 +89,24 @@ jobs:
           repo = env['GITHUB_REPOSITORY']
           run = api(f'repos/{repo}/actions/runs/{env["BUILD_RUN_ID"]}')
           assert run['repository']['full_name'] == repo
-          # Tag pushes and manual RC/GA builds must use the immutable release
-          # tag, never moving main, and match its peeled tools commit.
-          tools = api(f'repos/{repo}/commits/{env["RELEASE_TAG"]}')
+          # Normal builds use the immutable release tag. A tools-only RC repair
+          # uses a separate candidate-bound immutable tag merged through main.
+          tools_tag = env['BUILD_TOOLS_TAG'] or None
+          tools_ref = tools_tag or env['RELEASE_TAG']
+          if tools_tag is not None:
+              pattern = re.escape(f"release-tools/{env['RELEASE_TAG'][1:]}-r") + r'[1-9][0-9]*'
+              assert re.fullmatch(pattern, tools_tag), 'Tools tag is not bound to this candidate'
+              api(f'repos/{repo}/git/ref/tags/{tools_tag}')  # A branch name is not a tools tag.
+          tools = api(f'repos/{repo}/commits/{tools_ref}')
+          if tools_tag is not None:
+              ancestry = api(f"repos/{repo}/compare/{tools['sha']}...main")
+              assert ancestry['merge_base_commit']['sha'] == tools['sha'], 'Tools repair is not merged main'
           jobs = None
           if run['conclusion'] != 'success':
               inventory = api(f'repos/{repo}/actions/runs/{run["id"]}/attempts/{run["run_attempt"]}/jobs?per_page=100')
               assert inventory['total_count'] == len(inventory['jobs']), 'Incomplete producer job inventory'
               jobs = inventory['jobs']
-          validate_build_identity(run, env['RELEASE_TAG'], tools['sha'], jobs=jobs)
+          validate_build_identity(run, env['RELEASE_TAG'], tools['sha'], jobs=jobs, tools_tag=tools_tag)
           source = api(f'repos/nowledge-co/mem/commits/{env["RELEASE_TAG"]}', env['MEM_READ_TOKEN'])
           assert source['sha'] == env['SOURCE_SHA']
           artifacts = api(f'repos/{repo}/actions/runs/{env["BUILD_RUN_ID"]}/artifacts?per_page=100')['artifacts']
@@ -101,7 +116,7 @@ jobs:
               assert len(matches) == 1, name
               selected[name] = str(matches[0]['id'])
           identity = {'run': run, 'jobs': jobs, 'artifacts': artifacts,
-                      'source_sha': env['SOURCE_SHA'], 'release_tag': env['RELEASE_TAG']}
+                      'source_sha': env['SOURCE_SHA'], 'release_tag': env['RELEASE_TAG'], 'tools_tag': tools_ref}
           open('desktop-build-identity.json', 'w').write(json.dumps(identity, indent=2) + '\n')
           with open(env['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'version={match.group(1)}\n')

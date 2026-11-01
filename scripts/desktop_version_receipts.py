@@ -42,16 +42,25 @@ def validate_draft_upload_failure(run, jobs):
             "Incomplete publisher step")
 
 
-def validate_build_identity(run, release_tag, tools_sha=None, *, jobs=None):
+def validate_build_identity(run, release_tag, tools_sha=None, *, jobs=None, tools_tag=None):
     require(run.get("path") == ".github/workflows/release-desktop.yml", "Wrong build workflow")
     require(run.get("status") == "completed", "Build is not complete")
+    expected_ref = release_tag
+    if tools_tag is not None:
+        require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-rc[1-9][0-9]*", release_tag) is not None,
+                "Independent tools tags are limited to release candidates")
+        require(re.fullmatch(re.escape(f"release-tools/{release_tag[1:]}-r") + r"[1-9][0-9]*", tools_tag) is not None,
+                "Tools repair tag belongs to another candidate")
+        require(run.get("event") == "workflow_dispatch" and tools_sha is not None,
+                "Tools repairs require a manual build and exact tools SHA")
+        expected_ref = tools_tag
     tagged_dispatch = (
         run.get("event") == "workflow_dispatch"
         and re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-rc[1-9][0-9]*)?", release_tag) is not None
         and tools_sha is not None
     )
     require((run.get("event") == "push" or tagged_dispatch)
-            and run.get("head_branch") == release_tag, "Build run belongs to another release")
+            and run.get("head_branch") == expected_ref, "Build run belongs to another release")
     require(re.fullmatch(r"[0-9a-f]{40}", run.get("head_sha", "")) is not None, "Missing build workflow SHA")
     if tools_sha is not None:
         require(run["head_sha"] == tools_sha, "Build is not the peeled tools tag commit")
