@@ -127,6 +127,27 @@ class PackagedVersionContract(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(RuntimeError):
                 validate_build_identity(dict(run, **{key: value}), "v0.10.108", "c" * 40)
 
+    def test_hosted_rc_dispatch_requires_success_and_exact_immutable_tag(self):
+        tag = "v0.10.112-rc4"
+        tools = "c" * 40
+        run = {"path": ".github/workflows/release-desktop.yml", "status": "completed", "conclusion": "success",
+               "event": "workflow_dispatch", "head_branch": tag, "head_sha": tools, "run_attempt": 1}
+        validate_build_identity(run, tag, tools)
+        for supplied_tag, supplied_tools, changes in (
+            (tag, None, {}), (tag, "d" * 40, {}),
+            (tag, tools, {"head_branch": "main"}),
+            (tag, tools, {"head_branch": "v0.10.112-rc3"}),
+            ("v0.10.112-rc0", tools, {"head_branch": "v0.10.112-rc0"}),
+            ("v0.10.112-beta1", tools, {"head_branch": "v0.10.112-beta1"}),
+            (tag, tools, {"event": "repository_dispatch"}),
+            (tag, tools, {"path": "other.yml"}),
+            (tag, tools, {"status": "in_progress"}),
+            (tag, tools, {"conclusion": "cancelled"}),
+            (tag, tools, {"conclusion": "failure"}),
+        ):
+            with self.subTest(tag=supplied_tag, changes=changes), self.assertRaises(RuntimeError):
+                validate_build_identity(dict(run, **changes), supplied_tag, supplied_tools)
+
     def published_build(self):
         run = {"id": 123, "path": ".github/workflows/release-desktop.yml", "status": "completed",
                "conclusion": "failure", "event": "workflow_dispatch", "head_branch": "v0.10.108",
