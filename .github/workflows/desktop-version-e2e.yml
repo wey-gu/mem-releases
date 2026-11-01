@@ -18,6 +18,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/desktop-version-e2e.yml
+      - scripts/desktop_version_receipts.py
       - scripts/verify_packaged_desktop.py
       - scripts/test_verify_packaged_desktop.py
       - scripts/desktop_version_receipts.py
@@ -82,8 +83,8 @@ jobs:
           repo = env['GITHUB_REPOSITORY']
           run = api(f'repos/{repo}/actions/runs/{env["BUILD_RUN_ID"]}')
           assert run['repository']['full_name'] == repo
-          # RCs use tag pushes. Direct GA dispatch must run at the immutable
-          # release tag, never moving main, and match its peeled tools commit.
+          # Tag pushes and manual RC/GA builds must use the immutable release
+          # tag, never moving main, and match its peeled tools commit.
           tools = api(f'repos/{repo}/commits/{env["RELEASE_TAG"]}')
           jobs = None
           if run['conclusion'] != 'success':
