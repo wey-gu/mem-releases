@@ -148,6 +148,26 @@ class PackagedVersionContract(unittest.TestCase):
             with self.subTest(tag=supplied_tag, changes=changes), self.assertRaises(RuntimeError):
                 validate_build_identity(dict(run, **changes), supplied_tag, supplied_tools)
 
+    def test_rc_tools_repair_retains_source_tag_and_pins_an_independent_tag(self):
+        tag = "v0.10.112-rc4"
+        tools_tag = "release-tools/0.10.112-rc4-r1"
+        tools = "c" * 40
+        run = {"path": ".github/workflows/release-desktop.yml", "status": "completed", "conclusion": "success",
+               "event": "workflow_dispatch", "head_branch": tools_tag, "head_sha": tools, "run_attempt": 1}
+        validate_build_identity(run, tag, tools, tools_tag=tools_tag)
+        for source_tag, repair_tag, tools_sha, changes in (
+            (tag, tools_tag, None, {}), (tag, tools_tag, "d" * 40, {}),
+            (tag, "main", tools, {}), (tag, "release-tools/0.10.112-rc4-r0", tools, {}),
+            (tag, "release-tools/0.10.112-rc3-r1", tools, {}),
+            ("v0.10.112", tools_tag, tools, {}),
+            (tag, tools_tag, tools, {"head_branch": "main"}),
+            (tag, tools_tag, tools, {"head_branch": tag}),
+            (tag, tools_tag, tools, {"event": "push"}),
+            (tag, tools_tag, tools, {"conclusion": "failure"}),
+        ):
+            with self.subTest(tag=repair_tag, changes=changes), self.assertRaises(RuntimeError):
+                validate_build_identity(dict(run, **changes), source_tag, tools_sha, tools_tag=repair_tag)
+
     def published_build(self):
         run = {"id": 123, "path": ".github/workflows/release-desktop.yml", "status": "completed",
                "conclusion": "failure", "event": "workflow_dispatch", "head_branch": "v0.10.108",

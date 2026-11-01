@@ -753,7 +753,7 @@ jobs:
           echo "::group::cargo resolution"
           which cargo
           cargo --version
-          ls -la "$HOME/.cargo/bin/" | head -20
+          rustup which cargo
           echo "::endgroup::"
 
       - name: Import code-signing certificate
