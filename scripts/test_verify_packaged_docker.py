@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import verify_packaged_docker as verify
 
@@ -53,6 +54,8 @@ if pathlib.Path(sys.argv[0]).name == 'gh':
     else:
         raise AssertionError(path)
 elif pathlib.Path(sys.argv[0]).name == 'cosign':
+    if os.environ.get('FIXTURE_SIGNER'):
+        assert args[args.index('--certificate-identity') + 1] == os.environ['FIXTURE_SIGNER']
     print(json.dumps([{'critical': {'image': {'docker-manifest-digest': index}}}]))
 elif pathlib.Path(sys.argv[0]).name == 'nvidia-smi':
     print(os.environ.get('FIXTURE_HOST_GPU', gpu_output))
@@ -145,6 +148,15 @@ class NativeBoundary(unittest.TestCase):
         receipt = json.loads(self.receipt.read_text())
         verify.validate_receipt(receipt)
         self.assertEqual(set(receipt["outputs"]), set(verify.SURFACES))
+
+    @unittest.skipUnless(platform.system() == "Linux", "Native probe fixture requires the Linux host guard")
+    def test_tools_recovery_probe_requires_the_exact_signing_ref(self):
+        ref = "release-tools/0.10.104-rc2-r2"
+        self.identity.write_text(json.dumps(dict(IDENTITY, build_tools_tag=ref)))
+        signer = f"https://github.com/{verify.REPOSITORY}/.github/workflows/release-docker.yml@refs/tags/{ref}"
+        result = self.run_probe(FIXTURE_SIGNER=signer)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        verify.validate_receipt(json.loads(self.receipt.read_text()))
 
     def assert_cuda_runtime(self, script=None, **changes):
         identity = dict(IDENTITY, variant="cuda")
@@ -302,6 +314,65 @@ class NativeBoundary(unittest.TestCase):
                 os.environ["PYTHONPATH"] = old
         self.assertTrue(self.receipt.exists(), "Mutation did not reach the bad acceptance state")
         print("Mutation RED: unchanged rejection assertion caught CLI 0.10.103 accepted by validation bypass")
+
+
+class CpuToolsRecovery(unittest.TestCase):
+    def test_signature_uses_exact_validated_tools_tag_without_broadening_trust(self):
+        tools_tag = "release-tools/0.10.104-rc2-r2"
+        identity = dict(IDENTITY, build_tools_tag=tools_tag)
+        self.assertEqual(verify.signature_identity(identity),
+                         f"https://github.com/{verify.REPOSITORY}/.github/workflows/release-docker.yml@refs/tags/{tools_tag}")
+        self.assertTrue(verify.signature_identity(IDENTITY).endswith("@refs/tags/v0.10.104-rc2"))
+        for changed in [dict(build_tools_tag="main"), dict(build_tools_tag="release-tools/0.10.104-rc1-r2"),
+                        dict(variant="vulkan"), dict(release_tag="v0.10.104")]:
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                verify.signature_identity(dict(identity, **changed))
+
+    def test_recovery_requires_matching_rc_dispatch_ref_and_exact_tools(self):
+        tag = "v0.10.114-rc3"
+        tools_tag = "release-tools/0.10.114-rc3-r2"
+        run = dict(repository=dict(full_name=verify.REPOSITORY), path=".github/workflows/release-docker.yml",
+                   event="workflow_dispatch", head_branch=tools_tag, head_sha=TOOLS, status="completed")
+        verify.validate_producer(run, tag, TOOLS, tools_tag=tools_tag)
+        for field, value in [("event", "push"), ("head_branch", "main"), ("head_sha", SOURCE),
+                             ("path", ".github/workflows/release-desktop.yml"),
+                             ("repository", dict(full_name="another/repository"))]:
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                verify.validate_producer(dict(run, **{field: value}), tag, TOOLS, tools_tag=tools_tag)
+        for candidate, ref in [("v0.10.114", tools_tag), (tag, "main"),
+                               (tag, "release-tools/0.10.114-rc2-r2"),
+                               (tag, "release-tools/0.10.114-rc3-r0")]:
+            with self.subTest(candidate=candidate, ref=ref), self.assertRaises(RuntimeError):
+                verify.validate_producer(run, candidate, TOOLS, tools_tag=ref)
+
+    def test_tools_resolution_requires_existing_exact_tag_and_main_ancestry(self):
+        tag = "v0.10.114-rc3"
+        ref = "release-tools/0.10.114-rc3-r2"
+
+        def responses(target=TOOLS, ancestor=TOOLS, annotated=False):
+            def api(path):
+                if "/commits/" in path:
+                    return dict(sha=TOOLS)
+                if "/git/ref/tags/" in path:
+                    return dict(object=dict(type="tag" if annotated else "commit", sha=target))
+                if "/git/tags/" in path:
+                    return dict(object=dict(type="commit", sha=target))
+                if "/compare/" in path:
+                    return dict(merge_base_commit=dict(sha=ancestor))
+                raise AssertionError(path)
+            return api
+
+        for annotated in [False, True]:
+            with self.subTest(annotated=annotated), patch.object(verify, "api", side_effect=responses(annotated=annotated)):
+                self.assertEqual(verify.resolve_tools(tag, ref)["sha"], TOOLS)
+        for target, ancestor in [(SOURCE, TOOLS), (TOOLS, SOURCE)]:
+            with self.subTest(target=target, ancestor=ancestor), patch.object(verify, "api", side_effect=responses(target, ancestor)), self.assertRaises(RuntimeError):
+                verify.resolve_tools(tag, ref)
+        with patch.object(verify, "api", side_effect=RuntimeError("tag not found")), self.assertRaises(RuntimeError):
+            verify.resolve_tools(tag, ref)
+        with patch.object(verify, "api") as api, self.assertRaises(RuntimeError):
+            verify.resolve_tools(tag, "main")
+        api.assert_not_called()
 
 
 class IdentityAndAggregation(unittest.TestCase):

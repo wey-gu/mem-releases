@@ -27,6 +27,11 @@ on:
         required: false
         type: boolean
         default: true
+      cpu_only:
+        description: "RC tools recovery only: build the missing CPU image without rebuilding GPU variants"
+        required: false
+        type: boolean
+        default: false
   push:
     # Auto-fire on RC-style tags ONLY (anything with a `-` suffix:
     # `-rcN`, `-betaN`, `-ciN`). Clean-semver GA tags like `v0.8.4`
@@ -83,6 +88,17 @@ jobs:
             echo "Refusing to publish: version '$VERSION' is not semver-ish." >&2
             exit 1
           fi
+          if [[ "${{ inputs.cpu_only }}" == "true" ]]; then
+            TOOLS_PREFIX="release-tools/${VERSION}-r"
+            if [[ "${{ github.event_name }}" != "workflow_dispatch" ]] \
+              || [[ "$GITHUB_REF_TYPE" != "tag" ]] \
+              || ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc[1-9][0-9]*$ ]] \
+              || [[ "$GITHUB_REF_NAME" != "$TOOLS_PREFIX"* ]] \
+              || ! [[ "${GITHUB_REF_NAME#"$TOOLS_PREFIX"}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "CPU-only recovery requires an immutable tools tag for the same RC." >&2
+              exit 1
+            fi
+          fi
           # Pre-release tags must NOT mark :latest.
           IS_PRERELEASE="false"
           if [[ "$VERSION" == *-* || "$VERSION" == *.dev* ]]; then
@@ -112,7 +128,7 @@ jobs:
 
   build-amd64:
     needs: meta
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
@@ -297,6 +313,7 @@ jobs:
   # are never `:latest`.
 
   build-cuda:
+    if: github.event_name != 'workflow_dispatch' || !inputs.cpu_only
     needs: meta
     runs-on: ubuntu-latest
     env:
@@ -384,6 +401,7 @@ jobs:
       - *upload_docker_resources
 
   build-vulkan:
+    if: github.event_name != 'workflow_dispatch' || !inputs.cpu_only
     needs: meta
     # Vulkan GPU image (AMD/Intel via Mesa, NVIDIA via the Vulkan ICD). Same
     # schedule and tag policy as :cuda — built on rc tags so GA promotion is a

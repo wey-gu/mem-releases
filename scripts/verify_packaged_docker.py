@@ -51,18 +51,58 @@ def validate_identity(identity):
     require(TAG.fullmatch(identity["release_tag"]) is not None, "Invalid release tag")
     require(identity["variant"] in ARCHES, "Invalid variant")
     require(DIGEST.fullmatch(identity["digest"]) is not None, "Invalid image digest")
+    if identity.get("build_tools_tag"):
+        require(identity["variant"] == "cpu" and re.fullmatch(
+            re.escape(f"release-tools/{identity['release_tag'][1:]}-r") + r"[1-9][0-9]*",
+            identity["build_tools_tag"]) is not None
+            and re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-rc[1-9][0-9]*", identity["release_tag"]) is not None,
+            "Signature tools ref does not belong to this CPU RC")
 
 
-def validate_producer(run, tag, tools_sha):
+def signature_identity(identity):
+    validate_identity(identity)
+    ref = identity.get("build_tools_tag") or identity["release_tag"]
+    return f"https://github.com/{REPOSITORY}/.github/workflows/release-docker.yml@refs/tags/{ref}"
+
+
+def validate_producer(run, tag, tools_sha, *, tools_tag=None):
     require(run["repository"]["full_name"] == REPOSITORY, "Wrong producer repository")
     require(run["path"] == ".github/workflows/release-docker.yml", "Wrong producer workflow")
     tagged_ga_dispatch = (run["event"] == "workflow_dispatch"
                           and re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag) is not None)
-    require((run["event"] == "push" or tagged_ga_dispatch)
-            and run["head_branch"] == tag, "Wrong producer tag event")
+    if tools_tag is not None:
+        require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-rc[1-9][0-9]*", tag) is not None,
+                "Tools recovery is limited to RCs")
+        require(re.fullmatch(re.escape(f"release-tools/{tag[1:]}-r") + r"[1-9][0-9]*", tools_tag) is not None,
+                "Tools tag belongs to another candidate")
+        require(run["event"] == "workflow_dispatch" and run["head_branch"] == tools_tag,
+                "Tools recovery requires its immutable dispatch ref")
+    else:
+        require((run["event"] == "push" or tagged_ga_dispatch)
+                and run["head_branch"] == tag, "Wrong producer tag event")
     require(run["head_sha"] == tools_sha and SHA.fullmatch(tools_sha) is not None,
             "Producer is not the peeled tools tag commit")
     require(run["status"] in ("in_progress", "completed"), "Producer has not started")
+
+
+def resolve_tools(release_tag, tools_tag):
+    if tools_tag:
+        require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-rc[1-9][0-9]*", release_tag) is not None
+                and re.fullmatch(re.escape(f"release-tools/{release_tag[1:]}-r") + r"[1-9][0-9]*", tools_tag) is not None,
+                "Expected a same-RC immutable tools tag")
+    tools = api(f"repos/{REPOSITORY}/commits/{tools_tag or release_tag}")
+    require(SHA.fullmatch(tools["sha"]) is not None, "Invalid peeled tools commit")
+    if tools_tag:
+        target = api(f"repos/{REPOSITORY}/git/ref/tags/{tools_tag}")["object"]
+        for _ in range(5):
+            if target["type"] != "tag":
+                break
+            target = api(f"repos/{REPOSITORY}/git/tags/{target['sha']}")["object"]
+        require(target["type"] == "commit" and target["sha"] == tools["sha"],
+                "Tools recovery must resolve to the exact immutable tag")
+        ancestry = api(f"repos/{REPOSITORY}/compare/{tools['sha']}...main")
+        require(ancestry["merge_base_commit"]["sha"] == tools["sha"], "Tools recovery is not merged on main")
+    return tools
 
 
 def unique_job(jobs, name):
@@ -77,9 +117,10 @@ def identity(args):
     require(args.build_run_id > 0 and TAG.fullmatch(args.release_tag) is not None
             and SHA.fullmatch(args.source_sha) is not None and DIGEST.fullmatch(args.digest) is not None,
             "Invalid candidate inputs")
+    require(not args.build_tools_tag or args.variant == "cpu", "Tools recovery is limited to the CPU variant")
     run = api(f"repos/{REPOSITORY}/actions/runs/{args.build_run_id}")
-    tools = api(f"repos/{REPOSITORY}/commits/{args.release_tag}")
-    validate_producer(run, args.release_tag, tools["sha"])
+    tools = resolve_tools(args.release_tag, args.build_tools_tag or None)
+    validate_producer(run, args.release_tag, tools["sha"], tools_tag=args.build_tools_tag or None)
     source = api(f"repos/nowledge-co/mem/commits/{args.release_tag}", source=True)
     require(source["sha"] == args.source_sha, "Mem source tag mismatch")
     jobs = api(f"repos/{REPOSITORY}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100")
@@ -106,6 +147,8 @@ def identity(args):
         "producer_status": run["status"], "producer_conclusion": run["conclusion"],
         "required_job_ids": {job["name"]: job["id"] for job in selected},
     }
+    if args.build_tools_tag:
+        result["build_tools_tag"] = args.build_tools_tag
     validate_identity(result)
     return result
 
@@ -220,7 +263,7 @@ def probe(identity, arch):
             "Wrong build repository label")
     signatures = json.loads(command([
         "cosign", "verify", reference,
-        "--certificate-identity", f"https://github.com/{REPOSITORY}/.github/workflows/release-docker.yml@refs/tags/{identity['release_tag']}",
+        "--certificate-identity", signature_identity(identity),
         "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com",
     ], timeout=120))
     require(isinstance(signatures, list) and signatures, "Missing original digest signature")
@@ -294,6 +337,7 @@ def main():
     producer = sub.add_parser("identity")
     producer.add_argument("--build-run-id", required=True, type=int)
     producer.add_argument("--release-tag", required=True)
+    producer.add_argument("--build-tools-tag", default="")
     producer.add_argument("--source-sha", required=True)
     producer.add_argument("--variant", required=True, choices=ARCHES)
     producer.add_argument("--digest", required=True)
