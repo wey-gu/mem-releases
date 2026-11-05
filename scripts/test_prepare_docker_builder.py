@@ -10,6 +10,34 @@ from scripts import prepare_docker_builder as builder
 
 
 class DockerBuilderTest(unittest.TestCase):
+    def test_cpu_only_recovery_preserves_rc_and_runner_admission(self):
+        workflow = Path(__file__).resolve().parents[1] / ".github/workflows/release-docker.yml"
+        text = workflow.read_text()
+        cpu = text.split("\n  build-amd64:\n", 1)[1].split("\n  build-arm64:\n", 1)[0]
+        self.assertIn("runs-on: ubuntu-24.04", cpu)
+        self.assertIn("prepare_docker_builder", cpu)
+        for job in ["build-cuda", "build-vulkan"]:
+            body = text.split(f"\n  {job}:\n", 1)[1].split("\n    needs:", 1)[0]
+            self.assertIn("if: github.event_name != 'workflow_dispatch' || !inputs.cpu_only", body)
+        command = text.split("      - id: v\n        run: |\n", 1)[1].split("\n      # Resolve", 1)[0]
+        command = "\n".join(line[10:] if line.startswith("          ") else line for line in command.splitlines())
+        for event, version, ref, ref_type, enabled, succeeds in [
+            ("push", "", "v0.10.114-rc3", "tag", "", True),
+            ("workflow_dispatch", "0.10.114-rc3", "main", "branch", "false", True),
+            ("workflow_dispatch", "0.10.114-rc3", "release-tools/0.10.114-rc3-r2", "tag", "true", True),
+            ("workflow_dispatch", "0.10.114-rc3", "release-tools/0.10.114-rc3-r2", "branch", "true", False),
+            ("workflow_dispatch", "0.10.114-rc3", "main", "branch", "true", False),
+            ("workflow_dispatch", "0.10.114-rc3", "release-tools/0.10.114-rc2-r2", "tag", "true", False),
+            ("workflow_dispatch", "0.10.114", "release-tools/0.10.114-r2", "tag", "true", False),
+        ]:
+            with self.subTest(event=event, ref=ref), tempfile.TemporaryDirectory() as directory:
+                script = command.replace("${{ github.event_name }}", event).replace("${{ inputs.tag }}", version).replace("${{ inputs.latest }}", "false").replace("${{ inputs.cpu_only }}", enabled)
+                output = Path(directory) / "output"
+                result = subprocess.run(["bash", "-c", script], env={"PATH": "/usr/bin:/bin", "GITHUB_REF_NAME": ref, "GITHUB_REF_TYPE": ref_type, "GITHUB_OUTPUT": str(output)}, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, succeeds, result.stderr)
+                if succeeds:
+                    self.assertIn("push_latest=false", output.read_text())
+
     def test_linux_desktop_admits_and_retains_resources_before_compilation(self):
         workflow = Path(__file__).resolve().parents[1] / ".github/workflows/release-desktop.yml"
         text = workflow.read_text()

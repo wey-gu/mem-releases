@@ -800,7 +800,8 @@ class GAPromotionContractTest(unittest.TestCase):
         script = textwrap.dedent(script.split("\n\n", 1)[0]) + "\n"
         script = (script.replace("${{ github.event_name }}", "push")
                         .replace("${{ inputs.tag }}", "")
-                        .replace("${{ inputs.latest }}", ""))
+                        .replace("${{ inputs.latest }}", "")
+                        .replace("${{ inputs.cpu_only }}", ""))
         for ref, prerelease, latest in (("v0.10.80-rc1", "true", "false"),
                                         ("v0.10.80", "false", "true")):
             with self.subTest(ref=ref), tempfile.TemporaryDirectory() as tmp:

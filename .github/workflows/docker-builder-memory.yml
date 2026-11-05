@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-22.04, ubuntu-latest, ubuntu-24.04-arm]
+        runner: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:
@@ -76,7 +76,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04
             platform: linux/amd64
             recipe: Dockerfile.rust
             cache: amd64

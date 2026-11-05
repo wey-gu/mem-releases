@@ -15,6 +15,11 @@ on:
         description: Full Mem source commit
         required: true
         type: string
+      build_tools_tag:
+        description: "Optional immutable release-tools/<same-RC>-rN tag for a reviewed CPU recovery"
+        required: false
+        default: ''
+        type: string
       variant:
         description: Independently accepted image variant
         required: true
@@ -68,10 +73,11 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           VARIANT: ${{ inputs.variant }}
           DIGEST: ${{ inputs.digest }}
+          BUILD_TOOLS_TAG: ${{ inputs.build_tools_tag }}
         run: |
           python scripts/verify_packaged_docker.py identity --build-run-id "$BUILD_RUN_ID" \
             --release-tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA" --variant "$VARIANT" \
-            --digest "$DIGEST" --output identity.json
+            --digest "$DIGEST" --build-tools-tag "$BUILD_TOOLS_TAG" --output identity.json
       - id: matrix
         env:
           VARIANT: ${{ inputs.variant }}
