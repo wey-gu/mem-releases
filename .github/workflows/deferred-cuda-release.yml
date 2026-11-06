@@ -28,6 +28,67 @@ permissions:
   actions: read
 
 jobs:
+  hosted-cuda-diagnostic:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      IMAGE: docker.io/nowledgelabs/mem@sha256:f98a38b8228f690a97fe04bedaa578d41c0581dbb7f3d61cf509f1f4fa562273
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - uses: sigstore/cosign-installer@v3
+      - name: Verify the original CUDA signature and pull without rebuilding
+        run: |
+          set -euo pipefail
+          cosign verify "$IMAGE" \
+            --certificate-identity 'https://github.com/wey-gu/mem-releases/.github/workflows/release-docker.yml@refs/tags/v0.10.115-rc2' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > signature.json
+          docker pull --platform linux/amd64 "$IMAGE"
+          docker image inspect "$IMAGE" > image-config.json
+      - name: Execute the original packaged commands on the hosted CPU runner
+        run: |
+          set -euo pipefail
+          mkdir outputs
+          commands=('uname -m' 'id -u' 'id -g' 'nmem-server --version' 'nmem --version' 'nmem tui --version' 'nmem-tui --version' 'nmem-legacy-graph-reader --version')
+          names=(arch uid gid server cli cli_tui tui legacy_reader)
+          failed=0
+          for i in "${!commands[@]}"; do
+            name="nmem-cuda-cpu-${GITHUB_RUN_ID}-${i}"
+            docker create --name "$name" --network none --entrypoint /bin/sh "$IMAGE" -ec "${commands[$i]}"
+            if docker start --attach "$name" > "outputs/${names[$i]}.txt" 2>&1; then status=0; else status=$?; failed=1; fi
+            docker inspect "$name" > "outputs/${names[$i]}.state.json"
+            docker rm --force --volumes "$name"
+            printf '\nCommand: %s; exit: %s\n' "${commands[$i]}" "$status"
+            cat "outputs/${names[$i]}.txt"
+          done
+          [[ "$failed" == 0 ]]
+          python3 - <<'PY'
+          import json, sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          import verify_packaged_docker as verify
+          outputs = {key: Path('outputs', key + '.txt').read_text().strip() for key in verify.SURFACES}
+          verify.validate_outputs(outputs, '0.10.115', 'addec9b72ef0792bd801116c93bbb2fefe4c0684')
+          assert Path('outputs/arch.txt').read_text().strip() == 'x86_64'
+          assert Path('outputs/uid.txt').read_text().strip() == '10001'
+          assert Path('outputs/gid.txt').read_text().strip() == '10001'
+          config = json.loads(Path('image-config.json').read_text())
+          assert len(config) == 1 and config[0]['Config']['User'] == 'nowledge'
+          print('CPU-hosted original CUDA packaged versions passed; GPU functionality is unverified')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cuda-hosted-diagnostic
+          path: |
+            signature.json
+            image-config.json
+            outputs/
+          if-no-files-found: error
+
   contract:
     runs-on: ubuntu-22.04
     timeout-minutes: 5
