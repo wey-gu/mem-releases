@@ -5,11 +5,12 @@ listens for completion of `release-docker` and only admits a producer listed
 in the reviewed `release-plans/deferred-cuda.json`. It is an additional lane
 for an already accepted public GA, not a way to admit a new App release.
 
-The plan freezes the original producer, RC, source SHA, tools SHA and CUDA
-digest, and links the completed core GA acceptance. Add or change a plan only
-through normal review, CI and merge. The original RC image must exist before
-recording its digest. If its job finishes before the complete producer run,
-the completion event can still deliver CUDA later without an operator watching.
+The plan freezes the original producer, RC, source SHA and tools SHA, and links
+the completed core GA acceptance. Add or change a plan only through normal
+review, CI and merge. Register it while a slow CUDA build is still running.
+Include `expected_digest` when already known; otherwise the completion handler
+extracts the unique original digest from the successful CUDA publication job.
+Admission always freezes that digest before native acceptance and promotion.
 
 Set repository variable `CUDA_RELEASE_RUNNER` to the single label of an
 approved existing native AMD64 NVIDIA runner. It must provide the compatible

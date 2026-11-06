@@ -93,6 +93,30 @@ class DeferredAdmissionTest(unittest.TestCase):
                     with self.assertRaises(RuntimeError):
                         deferred.admit(PLAN, "approved-nvidia")
 
+    def test_plan_can_be_armed_before_digest_exists_but_original_publication_must_be_unique(self):
+        plan = {key: value for key, value in PLAN.items() if key != "expected_digest"}
+        deferred.validate_plan(plan)
+        run = dict(id=123, run_attempt=1, status="completed", conclusion="success",
+                   head_sha=PLAN["tools_sha"])
+        jobs = dict(total_count=1, jobs=[dict(id=7, name="build-cuda", status="completed",
+                                            conclusion="success")])
+        line = '"containerimage.digest": "' + IDENTITY["digest"] + '"'
+        for log, accepted in [(line, True), ("", False), (line + "\n" + line, False)]:
+            response = io.StringIO(json.dumps(dict(found=True, version="0.10.115", date="2026-11-06")))
+            response.status = 200
+            with self.subTest(log=log), \
+                    patch.object(deferred.docker, "api", side_effect=[run, jobs, log, LATEST,
+                                                                      {"sha": PLAN["source_sha"]}]), \
+                    patch.object(deferred.docker, "identity", return_value=copy.deepcopy(IDENTITY)) as identity, \
+                    patch.object(deferred, "urlopen", return_value=response):
+                if accepted:
+                    self.assertEqual(deferred.admit(plan, "approved-nvidia"), IDENTITY)
+                    self.assertEqual(identity.call_args.args[0].digest, IDENTITY["digest"])
+                else:
+                    with self.assertRaises(RuntimeError):
+                        deferred.admit(plan, "approved-nvidia")
+                    identity.assert_not_called()
+
 
 class DeferredRetagTest(unittest.TestCase):
     def run_retag(self, *, source_digest=None, ga_digest=None, expected=None, latest=None, gh_exit=0):

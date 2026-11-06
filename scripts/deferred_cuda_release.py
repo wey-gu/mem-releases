@@ -24,8 +24,9 @@ def validate_plan(plan):
         require(docker.SHA.fullmatch(plan.get(field, "")) is not None, "Invalid frozen SHA")
     require(type(plan.get("producer_run_id")) is int and plan["producer_run_id"] > 0,
             "Invalid original producer")
-    require(docker.DIGEST.fullmatch(plan.get("expected_digest", "")) is not None,
-            "Missing original CUDA digest")
+    if "expected_digest" in plan:
+        require(docker.DIGEST.fullmatch(plan["expected_digest"]) is not None,
+                "Invalid original CUDA digest")
     require(re.fullmatch(r"https://github\.com/nowledge-co/mem/issues/[1-9][0-9]*#issuecomment-[0-9]+",
                          plan.get("core_acceptance", "")) is not None,
             "A reviewed core GA acceptance receipt is required")
@@ -62,7 +63,9 @@ def validate_binding(plan, identity):
     docker.validate_identity(identity)
     expected = dict(build_run_id=plan["producer_run_id"], source_sha=plan["source_sha"],
                     build_workflow_sha=plan["tools_sha"], release_tag=plan["release_tag"],
-                    variant="cuda", digest=plan["expected_digest"])
+                    variant="cuda")
+    if "expected_digest" in plan:
+        expected["digest"] = plan["expected_digest"]
     require(all(identity.get(key) == value for key, value in expected.items()),
             "Native candidate differs from the reviewed CUDA plan")
 
@@ -74,10 +77,21 @@ def admit(plan, runner):
     require(run["status"] == "completed" and run["conclusion"] == "success",
             "Original producer has not succeeded; hold CUDA")
     require(run["head_sha"] == plan["tools_sha"], "Original build tools changed")
+    digest = plan.get("expected_digest")
+    if digest is None:
+        jobs = docker.api(f"repos/{docker.REPOSITORY}/actions/runs/{run['id']}"
+                          f"/attempts/{run['run_attempt']}/jobs?per_page=100")
+        require(jobs["total_count"] == len(jobs["jobs"]), "Producer jobs pagination required")
+        publisher = docker.unique_job(jobs["jobs"], "build-cuda")
+        log = docker.api(f"repos/{docker.REPOSITORY}/actions/jobs/{publisher['id']}/logs", raw=True)
+        digests = re.findall(r'"containerimage.digest": "(sha256:[0-9a-f]{64})"', log)
+        require(len(digests) == 1, "Original CUDA publication digest is missing or ambiguous")
+        digest = digests[0]
     identity = docker.identity(SimpleNamespace(
         build_run_id=plan["producer_run_id"], release_tag=plan["release_tag"],
-        source_sha=plan["source_sha"], variant="cuda", digest=plan["expected_digest"],
+        source_sha=plan["source_sha"], variant="cuda", digest=digest,
         build_tools_tag=""))
+    require(identity["digest"] == digest, "Original publication digest mismatch")
     validate_binding(plan, identity)
     latest = published_ga(plan)
     request = Request("https://mem.nowledge.co/api/changelog/release-notes?locale=en",
@@ -110,6 +124,7 @@ def main():
                 "Native receipt belongs to another acceptance run")
         plan = admission["plan"]
         validate_plan(plan)
+        require("expected_digest" in plan, "Admission did not freeze the original publication digest")
         validate_binding(plan, identity)
         published_ga(plan)
         tags = [plan["ga_version"] + "-cuda", plan["ga_version"].rsplit(".", 1)[0] + "-cuda"]
@@ -134,6 +149,7 @@ def main():
         print("No reviewed plan for this producer; no publication")
         return
     identity = admit(plan, args.runner)
+    plan = dict(plan, expected_digest=identity["digest"])
     Path("identity.json").write_text(json.dumps(identity, indent=2) + "\n")
     Path("admission.json").write_text(json.dumps(dict(
         plan=plan, identity=identity, runner=args.runner,
