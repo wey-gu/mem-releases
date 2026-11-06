@@ -41,6 +41,16 @@ on:
         required: false
         type: string
         default: retag
+      expected_digest:
+        description: "Optional native-accepted digest; refuse RC drift or replacement of another GA digest."
+        required: false
+        type: string
+        default: ''
+      require_latest_ga:
+        description: "Require this GA to remain the current public latest immediately before retagging."
+        required: false
+        type: boolean
+        default: false
     secrets:
       MEM_REPO_TOKEN:
         required: true
@@ -73,6 +83,9 @@ jobs:
       VARIANT: ${{ inputs.variant }}
       SOURCE: ${{ inputs.source }}
       MOVE_FLOATING: ${{ inputs.move_floating }}
+      EXPECTED_DIGEST: ${{ inputs.expected_digest }}
+      REQUIRE_LATEST_GA: ${{ inputs.require_latest_ga }}
+      GH_TOKEN: ${{ github.token }}
       SIGNER: '^https://github\.com/${{ github.repository }}/\.github/workflows/(release-docker|release-docker-updater|promote-gpu-variant)\.yml@'
     steps:
       - uses: sigstore/cosign-installer@v3
@@ -109,6 +122,25 @@ jobs:
             exit 1
           fi
           echo "rc ${SRC} digest: ${RC_DIGEST}"
+          if [[ -n "${EXPECTED_DIGEST:-}" ]]; then
+            [[ "$EXPECTED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$RC_DIGEST" == "$EXPECTED_DIGEST" ]] || {
+              echo "::error::RC digest differs from native-accepted digest."
+              exit 1
+            }
+            lookup_error="$(mktemp)"
+            if existing="$(digest_of "${IMAGE}:${GA}-${VARIANT}" 2>"$lookup_error")"; then
+              [[ "$existing" == "$EXPECTED_DIGEST" ]] || {
+                echo "::error::Refusing to replace a different immutable GA digest."
+                rm -f -- "$lookup_error"
+                exit 1
+              }
+            elif ! grep -Eiq 'manifest unknown|not found|no such manifest' "$lookup_error"; then
+              cat "$lookup_error" >&2
+              rm -f -- "$lookup_error"
+              exit 1
+            fi
+            rm -f -- "$lookup_error"
+          fi
           if ! cosign verify "${IMAGE}@${RC_DIGEST}" \
               --certificate-identity-regexp="$SIGNER" \
               --certificate-oidc-issuer="https://token.actions.githubusercontent.com" >/dev/null; then
@@ -121,6 +153,20 @@ jobs:
           fi
           declare -a ARGS=()
           for t in "${TAGS[@]}"; do ARGS+=( -t "${IMAGE}:$t" ); done
+          if [[ "${REQUIRE_LATEST_GA:-false}" == "true" ]]; then
+            [[ -n "${EXPECTED_DIGEST:-}" ]] || {
+              echo "::error::Deferred promotion requires the native-accepted digest."
+              exit 1
+            }
+            gh api "repos/${GITHUB_REPOSITORY}/releases/latest" > latest-ga.json
+            python3 - <<'PY'
+          import json, os
+          latest = json.load(open('latest-ga.json'))
+          assert latest['tag_name'] == 'v' + os.environ['GA'], 'GA superseded; hold CUDA'
+          assert latest['draft'] is False and latest['prerelease'] is False
+          assert latest['published_at']
+          PY
+          fi
           docker buildx imagetools create "${ARGS[@]}" "${IMAGE}@${RC_DIGEST}"
           for tag in "${TAGS[@]}"; do
             GA_DIGEST="$(digest_of "${IMAGE}:${tag}")"

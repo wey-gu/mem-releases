@@ -1,0 +1,155 @@
+name: deferred-cuda-release
+
+on:
+  workflow_run:
+    workflows: [release-docker]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      ga_version:
+        description: Already accepted GA with a reviewed deferred CUDA plan
+        required: true
+        type: string
+        default: '0.10.115'
+  pull_request:
+    paths:
+      - .github/workflows/deferred-cuda-release.yml
+      - .github/workflows/promote-gpu-variant.yml
+      - release-plans/deferred-cuda.json
+      - scripts/deferred_cuda_release.py
+      - scripts/test_deferred_cuda_release.py
+
+concurrency:
+  group: deferred-cuda-${{ github.event_name == 'pull_request' && github.ref || 'production' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m unittest discover -s scripts -p test_deferred_cuda_release.py -v
+
+  admit:
+    if: github.event_name != 'pull_request'
+    needs: contract
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      eligible: ${{ steps.plan.outputs.eligible }}
+      ga: ${{ steps.plan.outputs.ga }}
+      rc: ${{ steps.plan.outputs.rc }}
+      digest: ${{ steps.plan.outputs.digest }}
+      runner: ${{ steps.plan.outputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - id: plan
+        name: Admit the reviewed exact candidate and published core GA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM_READ_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+          GA_VERSION: ${{ inputs.ga_version }}
+          CUDA_RUNNER: ${{ vars.CUDA_RELEASE_RUNNER }}
+        run: python scripts/deferred_cuda_release.py --version "$GA_VERSION" --runner "$CUDA_RUNNER"
+      - uses: actions/upload-artifact@v4
+        if: steps.plan.outputs.eligible == 'true'
+        with:
+          name: deferred-cuda-admission
+          path: |
+            identity.json
+            admission.json
+          if-no-files-found: error
+
+  native:
+    needs: admit
+    if: needs.admit.outputs.eligible == 'true'
+    runs-on: ${{ needs.admit.outputs.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: docker/setup-buildx-action@v3
+      - uses: sigstore/cosign-installer@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: deferred-cuda-admission
+      - name: Execute the original CUDA image with real NVIDIA devices
+        run: |
+          python scripts/verify_packaged_docker.py probe --identity identity.json --arch amd64 --output receipts/amd64.json
+          python scripts/verify_packaged_docker.py aggregate --identity identity.json --receipts receipts --output accepted.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deferred-cuda-native
+          path: |
+            receipts/amd64.json
+            accepted.json
+          if-no-files-found: error
+
+  promote:
+    needs: [admit, native]
+    if: needs.admit.outputs.eligible == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/promote-gpu-variant.yml
+    with:
+      rc_tag: ${{ needs.admit.outputs.rc }}
+      ga_tag: ${{ needs.admit.outputs.ga }}
+      variant: cuda
+      source: retag
+      move_floating: true
+      expected_digest: ${{ needs.admit.outputs.digest }}
+      require_latest_ga: true
+    secrets: inherit
+
+  record:
+    needs: [admit, promote]
+    if: needs.admit.outputs.eligible == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: deferred-cuda-admission
+      - uses: actions/download-artifact@v4
+        with:
+          name: deferred-cuda-native
+          path: native
+      - name: Verify public tags and retain separate CUDA completion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM_READ_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+        run: |
+          mkdir receipts
+          cp native/receipts/amd64.json receipts/
+          python scripts/deferred_cuda_release.py --record
+          cat cuda-publication.json >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deferred-cuda-publication
+          path: cuda-publication.json
+          if-no-files-found: error

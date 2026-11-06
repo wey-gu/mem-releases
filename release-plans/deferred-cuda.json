@@ -1,0 +1,11 @@
+[
+  {
+    "ga_version": "0.10.115",
+    "release_tag": "v0.10.115-rc2",
+    "source_sha": "addec9b72ef0792bd801116c93bbb2fefe4c0684",
+    "tools_sha": "bad077b5de7f4f5e67862a1a431f125a62b4dc9f",
+    "producer_run_id": 42177182006,
+    "expected_digest": "sha256:f98a38b8228f690a97fe04bedaa578d41c0581dbb7f3d61cf509f1f4fa562273",
+    "core_acceptance": "https://github.com/nowledge-co/mem/issues/9726#issuecomment-6682239296"
+  }
+]
