@@ -19,6 +19,8 @@ Environment:
 """
 import json
 import os
+import re
+import uuid
 import sys
 import time
 import urllib.error
@@ -29,6 +31,7 @@ import jwt
 BASE = "https://api.appstoreconnect.apple.com"
 POLL_ATTEMPTS = 40
 POLL_SECONDS = 30
+BUNDLE_ID = "co.nowledge.mem.mobile"
 
 
 def _token(key_id: str, issuer: str, private_key: str) -> str:
@@ -64,7 +67,39 @@ class Client:
             raise RuntimeError(f"{method} {path} -> {error.code} {detail}") from error
 
 
-def wait_for_valid_build(client: Client, app_id: str, version: str) -> dict:
+def verify_original_upload(run, jobs, log, version, source_sha, build_id):
+    """Bind recovery to the source and Delivery UUID of one successful upload."""
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        raise RuntimeError("Recovery requires a clean release version")
+    if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+        raise RuntimeError("Recovery requires an exact source SHA")
+    if str(uuid.UUID(build_id)) != build_id:
+        raise RuntimeError("Recovery requires the original Delivery UUID")
+    if run.get("path") != ".github/workflows/release-mobile.yml" or run.get("event") != "workflow_dispatch":
+        raise RuntimeError("Original run is not a manual mobile release")
+    if run.get("status") != "completed":
+        raise RuntimeError("Original upload run must be terminal")
+    ios = [job for job in jobs["jobs"] if job["name"] == "iOS -> TestFlight"]
+    if len(ios) != 1 or not any(step["name"] == "Build, sign and upload to TestFlight" and step["conclusion"] == "success" for step in ios[0]["steps"]):
+        raise RuntimeError("Original signed upload did not succeed")
+    plain = "\n".join(re.sub(r"^\d{4}-\d\d-\d\dT\S+ ", "", line) for line in log.splitlines())
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", plain)
+    if not re.search(r"git log -1 --format=%H\n" + re.escape(source_sha) + r"(?:\n|$)", plain):
+        raise RuntimeError("Original upload source SHA does not match")
+    identity = f"tag={version} tauri.conf={version} plist.short={version} plist.build={version}"
+    if identity not in plain or "UPLOAD SUCCEEDED with no errors" not in plain or f"Delivery UUID: {build_id}" not in plain:
+        raise RuntimeError("Original upload version or Delivery UUID does not match")
+    return dict(passed=True, source_run=run["id"], source_sha=source_sha, version=version, build_id=build_id)
+
+
+def find_app(client):
+    apps = client.call("GET", f"/v1/apps?filter[bundleId]={BUNDLE_ID}&limit=2")["data"]
+    if len(apps) != 1 or apps[0]["attributes"]["bundleId"] != BUNDLE_ID:
+        raise RuntimeError("Expected exactly the Nowledge Mem iOS app")
+    return apps[0]["id"]
+
+
+def wait_for_valid_build(client: Client, app_id: str, version: str, expected_build_id: str | None = None) -> dict:
     """Return the newest build for `version` once App Store Connect calls it VALID.
 
     Sorting by -uploadedDate matters: a re-run of the same tag leaves older
@@ -79,6 +114,10 @@ def wait_for_valid_build(client: Client, app_id: str, version: str) -> dict:
         )["data"]
         if hits:
             build = hits[0]
+            if build["attributes"]["version"] != version:
+                raise RuntimeError("App Store Connect returned a different build version")
+            if expected_build_id and build["id"] != expected_build_id:
+                raise RuntimeError("Expected original uploaded build ID does not match")
             state = build["attributes"]["processingState"]
             print(f"build {build['id']} version={version} state={state}", flush=True)
             if state == "VALID":
@@ -107,8 +146,8 @@ def main() -> int:
 
     client = Client(key_id, issuer, private_key)
     try:
-        app_id = client.call("GET", "/v1/apps?limit=1")["data"][0]["id"]
-        build = wait_for_valid_build(client, app_id, version)
+        app_id = find_app(client)
+        build = wait_for_valid_build(client, app_id, version, os.environ.get("EXPECTED_BUILD_ID"))
 
         # "What to Test", shown to testers in TestFlight and read by the Beta
         # App Review team. Set BEFORE submitting: a submitted build's
@@ -190,4 +229,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if len(sys.argv) > 1 and sys.argv[1] == "verify-upload":
+        from pathlib import Path
+        run, jobs, log = [Path(path) for path in sys.argv[2:5]]
+        receipt = verify_original_upload(json.loads(run.read_text()), json.loads(jobs.read_text()), log.read_text(), os.environ["VERSION"], os.environ["SOURCE_SHA"], os.environ["EXPECTED_BUILD_ID"])
+        Path("testflight-upload-admission.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    else:
+        raise SystemExit(main())

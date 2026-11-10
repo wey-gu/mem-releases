@@ -1,0 +1,86 @@
+name: distribute-testflight-existing
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Clean version of the already uploaded build"
+        required: true
+        type: string
+      source_run:
+        description: "Original release-mobile workflow run with a successful signed upload"
+        required: true
+        type: string
+      source_sha:
+        description: "Exact Mem source SHA from that original upload"
+        required: true
+        type: string
+      build_id:
+        description: "Original upload Delivery UUID, also the App Store Connect build ID"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: testflight-existing-${{ inputs.build_id }}
+  cancel-in-progress: false
+
+jobs:
+  distribute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ inputs.version }}
+      SOURCE_RUN: ${{ inputs.source_run }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      EXPECTED_BUILD_ID: ${{ inputs.build_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install API client dependencies
+        run: python -m pip install --disable-pip-version-check pyjwt cryptography
+      - name: Admit only the original successful upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" > "$RUNNER_TEMP/source-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN/jobs?per_page=100" > "$RUNNER_TEMP/source-jobs.json"
+          JOB="$(jq -er '[.jobs[] | select(.name == "iOS -> TestFlight")] | if length == 1 then .[0].id else error("Expected one iOS job") end' "$RUNNER_TEMP/source-jobs.json")"
+          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$JOB/logs" > "$RUNNER_TEMP/source-ios.log"
+          python scripts/testflight-distribute.py verify-upload "$RUNNER_TEMP/source-run.json" "$RUNNER_TEMP/source-jobs.json" "$RUNNER_TEMP/source-ios.log"
+      - name: Stage App Store Connect API key
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+          echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+      - name: Distribute the exact existing TestFlight build
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          BETA_GROUP_ID: ${{ vars.TESTFLIGHT_BETA_GROUP_ID }}
+        run: python scripts/testflight-distribute.py
+      - name: Read back App Store Connect state
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: python scripts/app_store_release.py status "$VERSION"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: testflight-upload-admission-${{ inputs.build_id }}
+          path: testflight-upload-admission.json
+          if-no-files-found: error
