@@ -54,7 +54,7 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" > "$RUNNER_TEMP/source-run.json"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN/jobs?per_page=100" > "$RUNNER_TEMP/source-jobs.json"
           JOB="$(jq -er '[.jobs[] | select(.name == "iOS -> TestFlight")] | if length == 1 then .[0].id else error("Expected one iOS job") end' "$RUNNER_TEMP/source-jobs.json")"
-          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$JOB/logs" > "$RUNNER_TEMP/source-ios.log"
+          gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/$JOB/logs" > "$RUNNER_TEMP/source-ios.log"
           python scripts/testflight-distribute.py verify-upload "$RUNNER_TEMP/source-run.json" "$RUNNER_TEMP/source-jobs.json" "$RUNNER_TEMP/source-ios.log"
       - name: Stage App Store Connect API key
         env:
