@@ -26,6 +26,8 @@ on:
       - scripts/desktop_version_receipts.py
       - scripts/verify_packaged_desktop.py
       - scripts/test_verify_packaged_desktop.py
+      - scripts/install_desktop_version_runtime.py
+      - scripts/test_install_desktop_version_runtime.py
       - scripts/desktop_version_receipts.py
 
 permissions:
@@ -40,7 +42,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
-      - run: python -m unittest discover -s scripts -p test_verify_packaged_desktop.py -v
+      - run: |
+          python -m unittest discover -s scripts -p test_verify_packaged_desktop.py -v
+          python -m unittest discover -s scripts -p test_install_desktop_version_runtime.py -v
+      - name: Diagnose Ubuntu runtime DNS
+        if: github.event_name == 'pull_request'
+        run: |
+          cat /etc/resolv.conf
+          resolvectl status || true
+          for hostname in archive.ubuntu.com security.ubuntu.com; do
+            echo "Runner user DNS: $hostname"
+            timeout 10 getent ahostsv4 "$hostname" || true
+            echo "Root DNS: $hostname"
+            sudo timeout 10 getent ahostsv4 "$hostname" || true
+            echo "APT sandbox DNS: $hostname"
+            sudo -u _apt timeout 10 getent ahostsv4 "$hostname" || true
+          done
+      - name: Verify signed Ubuntu runtime dependency installation
+        if: github.event_name == 'pull_request'
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT python3 scripts/install_desktop_version_runtime.py --platform linux-appimage
 
   windows-command-contract:
     runs-on: windows-2022
@@ -203,9 +223,8 @@ jobs:
           PACKAGE: ${{ steps.package.outputs.path }}
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y xvfb dbus-x11 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libfuse2
-          if [[ "$VERIFY_PLATFORM" == linux-deb ]]; then sudo apt-get install -y "$PACKAGE"; fi
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT python3 scripts/install_desktop_version_runtime.py \
+            --platform "$VERIFY_PLATFORM" --package "$PACKAGE"
       - name: Install original NSIS package
         if: matrix.platform == 'win'
         env:
