@@ -1,6 +1,9 @@
 """Install native acceptance dependencies from isolated, signed Ubuntu sources."""
 
 import argparse
+from contextlib import contextmanager
+import ipaddress
+import json
 import os
 from pathlib import Path
 import platform
@@ -12,8 +15,65 @@ PACKAGES = ('xvfb', 'dbus-x11', 'libwebkit2gtk-4.1-0',
             'libayatana-appindicator3-1', 'libfuse2')
 
 
+@contextmanager
+def runtime_dns(*, run=subprocess.run, hosted=None):
+    """Restore the hosted runner's link DNS even when APT or recovery fails."""
+    def command(*args):
+        return run(list(args), check=True, timeout=10,
+                   capture_output=True, text=True).stdout
+
+    def resolves():
+        for hostname in ('archive.ubuntu.com', 'security.ubuntu.com'):
+            try:
+                command('getent', 'ahostsv4', hostname)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                return False
+        return True
+
+    if resolves():
+        yield
+        return
+    if hosted is None:
+        hosted = (os.environ.get('GITHUB_ACTIONS') == 'true'
+                  and os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted')
+    if not hosted:
+        raise RuntimeError('DNS recovery is limited to disposable GitHub-hosted runners')
+    routes = json.loads(command('ip', '-json', 'route', 'show', 'default'))
+    devices = {route['dev'] for route in routes if 'dev' in route}
+    if len(devices) != 1:
+        raise RuntimeError('Expected one default-route interface before DNS recovery')
+    device = devices.pop()
+
+    def nameservers():
+        output = command('resolvectl', 'dns', device)
+        prefix, separator, values = output.partition(':')
+        if not separator or f'({device})' not in prefix:
+            raise RuntimeError('Unrecognized per-link resolver response')
+        servers = values.split()
+        if not servers:
+            raise RuntimeError('Cannot recover DNS without a retained original resolver')
+        for server in servers:
+            ipaddress.ip_address(server)
+        return servers
+
+    original = nameservers()
+    print('Runner DNS failed; temporarily using public DNS for signed APT setup', flush=True)
+    try:
+        command('resolvectl', 'dns', device, '1.1.1.1', '1.0.0.1')
+        command('resolvectl', 'flush-caches')
+        if not resolves():
+            raise RuntimeError('Ubuntu repository DNS still fails after bounded recovery')
+        yield
+    finally:
+        command('resolvectl', 'dns', device, *original)
+        command('resolvectl', 'flush-caches')
+        if nameservers() != original:
+            raise RuntimeError('Original runner resolver was not restored')
+        print('Original runner DNS restored and read back', flush=True)
+
+
 def install_runtime(surface, package=None, *, release=None, keyring=KEYRING,
-                    run=subprocess.run):
+                    run=subprocess.run, dns_context=runtime_dns):
     if surface not in {'linux-deb', 'linux-appimage'}:
         raise ValueError('Only the Ubuntu DEB and AppImage acceptance lanes are supported')
     release = platform.freedesktop_os_release() if release is None else release
@@ -28,7 +88,7 @@ def install_runtime(surface, package=None, *, release=None, keyring=KEYRING,
         if not package.is_file() or package.suffix != '.deb':
             raise ValueError('The original package must be a DEB file')
 
-    with tempfile.TemporaryDirectory(prefix='mem-native-apt-') as temporary:
+    with dns_context(), tempfile.TemporaryDirectory(prefix='mem-native-apt-') as temporary:
         root = Path(temporary)
         root.chmod(0o755)
         lists = root / 'lists'

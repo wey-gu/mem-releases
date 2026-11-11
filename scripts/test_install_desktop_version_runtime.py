@@ -1,11 +1,12 @@
 """Check source isolation and fail-closed runtime installation boundaries."""
 
+from contextlib import nullcontext
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 
-from install_desktop_version_runtime import PACKAGES, install_runtime
+from install_desktop_version_runtime import PACKAGES, install_runtime, runtime_dns
 
 
 class RuntimeInstallation(unittest.TestCase):
@@ -42,7 +43,8 @@ class RuntimeInstallation(unittest.TestCase):
     def install(self, surface='linux-appimage', package=None, **kwargs):
         install_runtime(surface, package,
                         release=kwargs.pop('release', {'ID': 'ubuntu', 'VERSION_ID': '22.04'}),
-                        keyring=self.keyring, run=kwargs.pop('run', self.record_command), **kwargs)
+                        keyring=self.keyring, run=kwargs.pop('run', self.record_command),
+                        dns_context=nullcontext, **kwargs)
 
     def test_appimage_uses_signed_official_sources_and_fresh_lists(self):
         self.install()
@@ -96,6 +98,75 @@ class RuntimeInstallation(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.install()
         self.assertEqual(self.commands, [])
+
+
+class ResolverRecovery(unittest.TestCase):
+    def setUp(self):
+        self.commands = []
+        self.servers = ['168.63.129.16']
+        self.healthy = False
+        self.fallback_works = True
+
+    def command(self, command, **kwargs):
+        self.commands.append(command)
+        self.assertTrue(kwargs['check'])
+        self.assertEqual(kwargs['timeout'], 10)
+        output = ''
+        if command[0] == 'getent':
+            if not self.healthy and not (self.servers == ['1.1.1.1', '1.0.0.1']
+                                        and self.fallback_works):
+                raise subprocess.CalledProcessError(2, command)
+        elif command[0] == 'ip':
+            output = '[{"dev":"eth0"}]'
+        elif command[:2] == ['resolvectl', 'dns']:
+            if len(command) == 3:
+                output = 'Link 2 (eth0): ' + ' '.join(self.servers)
+            else:
+                self.servers = command[3:]
+        return subprocess.CompletedProcess(command, 0, stdout=output)
+
+    def test_healthy_dns_never_changes_configuration(self):
+        self.healthy = True
+        with runtime_dns(run=self.command, hosted=True):
+            pass
+        self.assertTrue(all(c[0] == 'getent' for c in self.commands))
+
+    def test_fallback_restores_original_after_body_failure(self):
+        with self.assertRaisesRegex(RuntimeError, 'APT failed'):
+            with runtime_dns(run=self.command, hosted=True):
+                self.assertEqual(self.servers, ['1.1.1.1', '1.0.0.1'])
+                raise RuntimeError('APT failed')
+        self.assertEqual(self.servers, ['168.63.129.16'])
+        self.assertEqual(self.commands[-1], ['resolvectl', 'dns', 'eth0'])
+
+    def test_failed_fallback_restores_without_entering_install(self):
+        self.fallback_works = False
+        entered = False
+        with self.assertRaisesRegex(RuntimeError, 'still fails'):
+            with runtime_dns(run=self.command, hosted=True):
+                entered = True
+        self.assertFalse(entered)
+        self.assertEqual(self.servers, ['168.63.129.16'])
+
+    def test_successful_fallback_restores_original(self):
+        with runtime_dns(run=self.command, hosted=True):
+            self.assertEqual(self.servers, ['1.1.1.1', '1.0.0.1'])
+        self.assertEqual(self.servers, ['168.63.129.16'])
+
+    def test_restoration_failure_is_not_success(self):
+        def fail_restore(command, **kwargs):
+            if command == ['resolvectl', 'dns', 'eth0', '168.63.129.16']:
+                raise subprocess.CalledProcessError(1, command)
+            return self.command(command, **kwargs)
+        with self.assertRaises(subprocess.CalledProcessError):
+            with runtime_dns(run=fail_restore, hosted=True):
+                pass
+
+    def test_fallback_denied_outside_hosted_ci(self):
+        with self.assertRaisesRegex(RuntimeError, 'GitHub-hosted'):
+            with runtime_dns(run=self.command, hosted=False):
+                self.fail('Must not enter installation')
+        self.assertTrue(all(c[0] == 'getent' for c in self.commands))
 
 
 if __name__ == '__main__':
