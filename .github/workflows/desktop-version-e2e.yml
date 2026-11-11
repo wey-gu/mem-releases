@@ -45,6 +45,19 @@ jobs:
       - run: |
           python -m unittest discover -s scripts -p test_verify_packaged_desktop.py -v
           python -m unittest discover -s scripts -p test_install_desktop_version_runtime.py -v
+      - name: Diagnose Ubuntu runtime DNS
+        if: github.event_name == 'pull_request'
+        run: |
+          cat /etc/resolv.conf
+          resolvectl status || true
+          for hostname in archive.ubuntu.com security.ubuntu.com; do
+            echo "Runner user DNS: $hostname"
+            timeout 10 getent ahostsv4 "$hostname" || true
+            echo "Root DNS: $hostname"
+            sudo timeout 10 getent ahostsv4 "$hostname" || true
+            echo "APT sandbox DNS: $hostname"
+            sudo -u _apt timeout 10 getent ahostsv4 "$hostname" || true
+          done
       - name: Verify signed Ubuntu runtime dependency installation
         if: github.event_name == 'pull_request'
         run: sudo python3 scripts/install_desktop_version_runtime.py --platform linux-appimage
