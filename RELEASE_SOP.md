@@ -40,6 +40,15 @@ credentials in the dependency.
 Do not cut an RC merely to discover a missing credential. An RC tag is
 immutable release evidence, not a disposable CI retry handle.
 
+### Local release orchestration
+
+Use the [resumable local release driver](docs/release-driver.md) for new helper
+plans instead of copying per-version observer launchers. It pins helper inputs,
+resolves working directories, joins dependencies and retains operation logs.
+Successful actions are not repeated; uncertain actions require reconciliation.
+Existing qualification helpers still own every gate below. Do not retrofit a
+driver onto an active or sealed release record.
+
 ### Windows release and Bazel validation
 
 The Windows CPU release uses the Cargo PowerShell entry point,
