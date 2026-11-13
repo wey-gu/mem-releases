@@ -110,7 +110,7 @@ jobs:
             printf '%-8s ' "$t"; command -v "$t" || { echo "::error::$t not on PATH (see ~/actions-runner/.path)"; exit 1; }
           done
           python3 --version
-          rustup default 1.98.1
+          rustup default 1.99.1
           rustup target add "$TARGET"
           rustc --version
           df -h "$GITHUB_WORKSPACE" | tail -1
