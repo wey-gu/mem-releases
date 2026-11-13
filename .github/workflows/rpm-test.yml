@@ -30,6 +30,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  RUSTUP_TOOLCHAIN: "1.99.1"
+
 jobs:
   build-linux-rpm:
     runs-on: ubuntu-latest

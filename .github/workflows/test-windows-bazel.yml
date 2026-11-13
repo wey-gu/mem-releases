@@ -16,6 +16,7 @@ concurrency:
   group: test-windows-bazel-${{ inputs.source_ref }}
   cancel-in-progress: false
 env:
+  RUSTUP_TOOLCHAIN: "1.99.1"
   NMEM_BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-nowledge
   GCP_BAZEL_CACHE_PROJECT_ID: ci-cd-503413
   GCP_BAZEL_CACHE_SERVICE_ACCOUNT: github-bazel-cache@ci-cd-503413.iam.gserviceaccount.com

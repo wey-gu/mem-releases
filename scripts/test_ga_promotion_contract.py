@@ -1603,3 +1603,47 @@ class NightlyWindowsRunnerDefaultTest(unittest.TestCase):
         self.assertEqual(dispatch["default"], "hosted")
         mode = next(s for s in workflow["jobs"]["select-windows-runner"]["steps"] if s.get("id") == "mode")
         self.assertEqual(mode["env"]["MODE"], "${{ inputs.windows_runner || 'hosted' }}")
+
+
+class RustupInstalledToolchainContract(unittest.TestCase):
+    def test_source_checkout_builders_execute_the_installed_pinned_channel(self):
+        import yaml
+        workflows = ["build-rust-bundle.yml", "release-desktop.yml", "release-mobile.yml",
+                     "macos-self-hosted-bench.yml", "rpm-test.yml", "test-windows-bazel.yml"]
+        for name in workflows:
+            with self.subTest(workflow=name):
+                text = workflow_text(name)
+                workflow = yaml.safe_load(text)
+                selected = workflow.get("env", {}).get("RUSTUP_TOOLCHAIN")
+                self.assertIsInstance(selected, str, "A source rust-toolchain.toml overrides rustup default")
+                self.assertRegex(selected, r"^\d+\.\d+\.\d+$")
+                installed = re.findall(r"dtolnay/rust-toolchain@(\d+\.\d+\.\d+)", text)
+                installed += re.findall(r"(?:rustup default|--default-toolchain)\s+(\d+\.\d+\.\d+)", text)
+                self.assertTrue(installed, "The runtime pin must have an installer")
+                self.assertEqual(set(installed), {selected})
+                for job in workflow["jobs"].values():
+                    self.assertEqual(job.get("env", {}).get("RUSTUP_TOOLCHAIN", selected), selected)
+                    for step in job.get("steps", []):
+                        self.assertEqual(step.get("env", {}).get("RUSTUP_TOOLCHAIN", selected), selected)
+
+    def test_real_rustup_runtime_pin_beats_a_checkout_override_without_installing(self):
+        # Use the already-installed default twice under distinct identifiers.
+        # This exercises rustup's actual precedence without toolchain downloads.
+        env = dict(os.environ)
+        env.pop("RUSTUP_TOOLCHAIN", None)
+        with tempfile.TemporaryDirectory() as directory:
+            def run(args, selected_env=env):
+                result = subprocess.run(args, cwd=directory, env=selected_env,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return result.stdout.strip()
+            default = run(["rustup", "default"]).split()[0]
+            sysroot = run(["rustup", "run", default, "rustc", "--print", "sysroot"])
+            Path(directory, "rust-toolchain.toml").write_text(
+                "[toolchain]\npath = " + json.dumps(sysroot) + "\n")
+            baseline = run(["rustup", "show", "active-toolchain"])
+            restored = run(["rustup", "show", "active-toolchain"], dict(env, RUSTUP_TOOLCHAIN=default))
+            self.assertIn("rust-toolchain.toml", baseline)
+            self.assertIn("RUSTUP_TOOLCHAIN", restored)
+            self.assertEqual(restored.split()[0], default)
+            self.assertNotEqual(baseline.split()[0], restored.split()[0])
