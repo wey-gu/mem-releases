@@ -12,9 +12,9 @@ edition="2024"
 'pub fn answer() -> u32 { 42 }' | Set-Content (Join-Path $root 'fixture\src\lib.rs') -Encoding ascii
 'fn main() { assert_eq!(cache_safety_proof::answer(), 42); }' |
     Set-Content (Join-Path $root 'fixture\src\main.rs') -Encoding ascii
-& cargo +1.98.1 check --offline --manifest-path (Join-Path $root 'fixture\Cargo.toml')
+& cargo +1.99.1 check --offline --manifest-path (Join-Path $root 'fixture\Cargo.toml')
 if ($LASTEXITCODE -ne 0) { throw 'sccache broke cargo check/incremental compatibility' }
-& cargo +1.98.1 build --offline --manifest-path (Join-Path $root 'fixture\Cargo.toml')
+& cargo +1.99.1 build --offline --manifest-path (Join-Path $root 'fixture\Cargo.toml')
 if ($LASTEXITCODE -ne 0) { throw 'sccache broke developer incremental compilation' }
 & (Join-Path $root 'fixture\target\debug\cache-safety-proof.exe')
 if ($LASTEXITCODE -ne 0) { throw 'Developer fixture runtime failed' }
@@ -31,7 +31,7 @@ foreach ($name in @('local-test', 'runner')) {
     $info = [Diagnostics.ProcessStartInfo]::new((Get-Command cargo).Source)
     $info.UseShellExecute = $false
     $info.RedirectStandardError = $true
-    foreach ($arg in @('+1.98.1', 'build', '-p', 'nmem-wire', '--release', '--locked', '--offline',
+    foreach ($arg in @('+1.99.1', 'build', '-p', 'nmem-wire', '--release', '--locked', '--offline',
         '--manifest-path', $manifest, '--target-dir', $target)) { $info.ArgumentList.Add($arg) }
     $process = [Diagnostics.Process]::Start($info)
     $stderr = $process.StandardError.ReadToEndAsync()

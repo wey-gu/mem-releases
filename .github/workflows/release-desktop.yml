@@ -270,7 +270,7 @@ jobs:
           'fn main() { println!("windows-runner-native-proof:ok"); }' |
             Set-Content (Join-Path $root 'src\main.rs') -Encoding ascii
           $timer = [Diagnostics.Stopwatch]::StartNew()
-          & cargo +1.98.1 build --release --offline --manifest-path (Join-Path $root 'Cargo.toml') --target-dir (Join-Path $root 'target')
+          & cargo +1.99.1 build --release --offline --manifest-path (Join-Path $root 'Cargo.toml') --target-dir (Join-Path $root 'target')
           if ($LASTEXITCODE -ne 0) { throw 'Native Rust/MSVC build failed' }
           $result = & (Join-Path $root 'target\release\windows-runner-native-proof.exe')
           if ($LASTEXITCODE -ne 0 -or $result -ne 'windows-runner-native-proof:ok') {
@@ -630,7 +630,7 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: aarch64-apple-darwin
 
@@ -642,7 +642,7 @@ jobs:
       - name: Pin default toolchain (workaround for arm64 rustup proxy)
         run: |
           set -euo pipefail
-          rustup default 1.98.1
+          rustup default 1.99.1
           rustup show
 
       - name: Initialize Rust path dependencies before cache restore
@@ -748,7 +748,7 @@ jobs:
       - name: Pin default toolchain + sanity check cargo
         run: |
           set -euo pipefail
-          rustup default 1.98.1
+          rustup default 1.99.1
           rustup show
           echo "::group::cargo resolution"
           which cargo
@@ -980,7 +980,7 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: x86_64-apple-darwin
 
@@ -1228,9 +1228,9 @@ jobs:
           . (Join-Path $env:USERPROFILE 'ci-tools\Enter-BuildEnvironment.ps1')
           & python3 -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
           if ($LASTEXITCODE -ne 0) { throw 'Preinstalled Python 3.12 is required on this runner' }
-          & rustup which --toolchain 1.98.1 rustc | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Preinstalled Rust 1.98.1 is required on this runner' }
-          $env:RUSTUP_TOOLCHAIN = '1.98.1'
+          & rustup which --toolchain 1.99.1 rustc | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Preinstalled Rust 1.99.1 is required on this runner' }
+          $env:RUSTUP_TOOLCHAIN = '1.99.1'
           if ((Get-PSDrive C).Free -lt 40GB) { throw 'At least 40 GiB free is required before a Desktop build' }
           $env:CARGO_TARGET_DIR = Join-Path $env:USERPROFILE 'ci-cache\runner-target'
           $env:XDG_CACHE_HOME = Join-Path $env:USERPROFILE 'ci-cache\pdfium'
@@ -1276,7 +1276,7 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
         if: runner.environment != 'self-hosted'
         with:
           targets: x86_64-pc-windows-msvc
@@ -1685,7 +1685,7 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Initialize Rust path dependencies before cache restore
         shell: bash
@@ -1933,7 +1933,7 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: x86_64-pc-windows-msvc
 
@@ -2199,7 +2199,7 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Initialize Rust path dependencies before cache restore
         shell: bash

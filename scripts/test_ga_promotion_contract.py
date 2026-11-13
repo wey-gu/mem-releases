@@ -1283,7 +1283,7 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
         rust = next(step for step in self.jobs["build-windows"]["steps"]
                     if str(step.get("uses", "")).startswith("dtolnay/rust-toolchain"))
         self.assertEqual(rust["if"], "runner.environment != 'self-hosted'")
-        self.assertIn("$env:RUSTUP_TOOLCHAIN = '1.98.1'", configure["run"])
+        self.assertIn("$env:RUSTUP_TOOLCHAIN = '1.99.1'", configure["run"])
 
     def test_self_hosted_pnpm_store_survives_action_setup_and_checkout(self):
         steps = self.jobs["build-windows"]["steps"]
@@ -1576,7 +1576,7 @@ class HostedCargoResolutionContract(unittest.TestCase):
             binary = root / "homebrew-bin"
             binary.mkdir()
             cargo = binary / "cargo"
-            cargo.write_text('#!/bin/sh\nprintf "cargo 1.98.1\\n"\nexit "${TEST_CARGO_EXIT:-0}"\n')
+            cargo.write_text('#!/bin/sh\nprintf "cargo 1.99.1\\n"\nexit "${TEST_CARGO_EXIT:-0}"\n')
             cargo.chmod(0o755)
             rustup = binary / "rustup"
             rustup.write_text('#!/bin/sh\nif [ "$1" = which ]; then printf "%s\\n" "' + str(cargo) + '"; fi\n')
