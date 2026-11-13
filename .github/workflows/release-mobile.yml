@@ -61,6 +61,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  RUSTUP_TOOLCHAIN: "1.99.1"
+
 jobs:
   ios-testflight:
     name: iOS -> TestFlight
