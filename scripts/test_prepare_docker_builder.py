@@ -84,6 +84,29 @@ class DockerBuilderTest(unittest.TestCase):
                         position = body.index(helper)
                     self.assertLess(position, body.index("docker/setup-buildx-action@"))
 
+    def test_docker_admission_is_uploaded_before_compilation(self):
+        workflow = Path(__file__).resolve().parents[1] / ".github/workflows/release-docker.yml"
+        text = workflow.read_text()
+        import yaml
+        jobs = yaml.safe_load(text)["jobs"]
+        for job in ("build-amd64", "build-arm64", "build-cuda", "build-vulkan"):
+            with self.subTest(job=job):
+                steps = jobs[job]["steps"]
+                names = [step.get("name") for step in steps]
+                prepare = names.index("Prepare hosted Docker builder resources")
+                retain = names.index("Retain Docker builder admission before compilation")
+                buildx = next(i for i, step in enumerate(steps) if step.get("uses", "").startswith("docker/setup-buildx-action@"))
+                self.assertLess(prepare, retain)
+                self.assertLess(retain, buildx)
+                upload = steps[retain]
+                self.assertEqual(upload["if"], "always()")
+                self.assertEqual(upload["with"]["if-no-files-found"], "error")
+                self.assertEqual(upload["with"]["path"], "${{ runner.temp }}/docker-builder-prepared.json")
+                final = next(step for step in steps if step.get("name") == "Upload Docker builder resource receipts")
+                self.assertNotEqual(upload["with"]["name"], final["with"]["name"])
+                recipe = next(step for step in steps if step.get("name") == "Prepare exact-source Docker recipes")
+                self.assertIn("--serial-cpu-build", recipe["run"])
+
     def resources(self, ram=16, swap=0, disk=60):
         return dict(ram_bytes=ram * builder.GIB, swap_bytes=swap * builder.GIB,
                     disk_free_bytes=disk * builder.GIB)
