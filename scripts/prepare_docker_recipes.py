@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 
@@ -20,7 +21,19 @@ def insert_before_web_build(recipe: str, copy_instruction: str, recipe_name: str
     return recipe.replace(WEB_BUILD_COMMAND, copy_instruction + WEB_BUILD_COMMAND, 1)
 
 
-def prepare_docker_recipes(source_root: Path, output: Path, source_sha: str) -> None:
+def serialize_cpu_builder(recipe: str) -> str:
+    # Cargo propagates its job budget to native build scripts through NUM_JOBS.
+    # Scope the budget to the compiler stage; runtime images must not inherit it.
+    builders = list(re.finditer(r"^FROM [^\n]+ AS builder[ \t]*$", recipe, re.MULTILINE))
+    if len(builders) != 1 or "CARGO_BUILD_JOBS" in recipe:
+        raise ValueError("unexpected CPU builder recipe")
+    boundary = builders[0].end()
+    return recipe[:boundary] + "\nENV CARGO_BUILD_JOBS=1" + recipe[boundary:]
+
+
+def prepare_docker_recipes(
+    source_root: Path, output: Path, source_sha: str, *, serial_cpu_build: bool = False
+) -> None:
     output.mkdir(parents=True, exist_ok=True)
     has_space_contract = (source_root / "contracts/space-encoding.mjs").is_file()
 
@@ -32,6 +45,8 @@ def prepare_docker_recipes(source_root: Path, output: Path, source_sha: str) -> 
             recipe = insert_before_web_build(recipe, WEB_STATIC_COPY, recipe_name)
         if has_space_contract:
             recipe = insert_before_web_build(recipe, SPACE_ENCODING_COPY, recipe_name)
+        if serial_cpu_build and recipe_name == "Dockerfile.rust":
+            recipe = serialize_cpu_builder(recipe)
         (output / recipe_name).write_text(recipe)
 
 
@@ -40,8 +55,11 @@ def main() -> None:
     parser.add_argument("--source-root", type=Path, default=Path("."))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--serial-cpu-build", action="store_true")
     args = parser.parse_args()
-    prepare_docker_recipes(args.source_root, args.output, args.source_sha)
+    prepare_docker_recipes(
+        args.source_root, args.output, args.source_sha, serial_cpu_build=args.serial_cpu_build
+    )
 
 
 if __name__ == "__main__":

@@ -150,6 +150,15 @@ jobs:
         name: Prepare hosted Docker builder resources
         run: python3 release-tools/scripts/prepare_docker_builder.py --receipt "$RUNNER_TEMP/docker-builder-prepared.json"
 
+      - &retain_docker_builder_admission
+        name: Retain Docker builder admission before compilation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-builder-prepared-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/docker-builder-prepared.json
+          if-no-files-found: error
+
       # Prefer the source-owned release contract. The fallback keeps historical
       # source tags, which predate the helper, reproducibly buildable.
       - name: Init Rust fork submodules (https)
@@ -175,6 +184,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           python3 release-tools/scripts/prepare_docker_recipes.py \
             --source-sha "$SOURCE_SHA" \
+            --serial-cpu-build \
             --output "$RUNNER_TEMP/nmem-dockerfiles"
 
       - uses: docker/setup-buildx-action@v3
@@ -252,6 +262,7 @@ jobs:
 
       - *checkout_release_tooling
       - *prepare_docker_builder
+      - *retain_docker_builder_admission
 
       # Prefer the source-owned release contract. The fallback keeps historical
       # source tags, which predate the helper, reproducibly buildable.
@@ -329,6 +340,7 @@ jobs:
 
       - *checkout_release_tooling
       - *prepare_docker_builder
+      - *retain_docker_builder_admission
       - name: Init Rust fork submodules (https)
         run: |
           git config --global --add safe.directory '*' || true
@@ -421,6 +433,7 @@ jobs:
 
       - *checkout_release_tooling
       - *prepare_docker_builder
+      - *retain_docker_builder_admission
       - name: Init Rust fork submodules (https)
         run: |
           git config --global --add safe.directory '*' || true
