@@ -10,6 +10,7 @@ from scripts.prepare_docker_recipes import (
     RECIPE_NAMES,
     SPACE_ENCODING_COPY,
     WEB_BUILD_COMMAND,
+    insert_before_web_build,
     prepare_docker_recipes,
     serialize_cpu_builder,
 )
@@ -51,6 +52,38 @@ class PrepareDockerRecipesTest(unittest.TestCase):
                 recipe = (output / name).read_text()
                 self.assertNotIn(SPACE_ENCODING_COPY, recipe, name)
                 self.assertEqual(recipe.count(WEB_BUILD_COMMAND), 1, name)
+
+    def test_preserves_product_owned_copies_in_all_recipes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_source(root, include_space_contract=True)
+            recipe = (
+                "FROM node:22 AS web-builder\n"
+                "COPY nowledge-graph/ ./\n"
+                f"{SPACE_ENCODING_COPY}"
+                "COPY nmem-cloud/web-static/src/lib.rs /nmem-cloud/web-static/src/lib.rs\n"
+                f"{WEB_BUILD_COMMAND}"
+                "FROM rust AS builder\n"
+            )
+            for name in RECIPE_NAMES:
+                (root / "nowledge-graph/docker" / name).write_text(recipe)
+
+            output = root / "output"
+            prepare_docker_recipes(root, output, "product-owned-source")
+
+            for name in RECIPE_NAMES:
+                self.assertEqual((output / name).read_text(), recipe, name)
+
+    def test_rejects_duplicate_late_or_other_stage_copies(self) -> None:
+        for recipe in (
+            f"FROM node\n{SPACE_ENCODING_COPY}{SPACE_ENCODING_COPY}{WEB_BUILD_COMMAND}",
+            f"FROM node\n{WEB_BUILD_COMMAND}{SPACE_ENCODING_COPY}",
+            f"FROM base\n{SPACE_ENCODING_COPY}FROM node\n{WEB_BUILD_COMMAND}",
+            f"FROM node\n{SPACE_ENCODING_COPY}{WEB_BUILD_COMMAND}{WEB_BUILD_COMMAND}",
+            f"FROM node\n{SPACE_ENCODING_COPY}RUN pnpm run unknown\n",
+        ):
+            with self.subTest(recipe=recipe), self.assertRaisesRegex(ValueError, "Web build recipe"):
+                insert_before_web_build(recipe, SPACE_ENCODING_COPY, "Dockerfile.rust")
 
     def test_serial_budget_changes_only_cpu_builder(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
