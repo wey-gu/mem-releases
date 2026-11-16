@@ -52,11 +52,11 @@ def validate_identity(identity):
     require(identity["variant"] in ARCHES, "Invalid variant")
     require(DIGEST.fullmatch(identity["digest"]) is not None, "Invalid image digest")
     if identity.get("build_tools_tag"):
-        require(identity["variant"] == "cpu" and re.fullmatch(
+        require(identity["variant"] in {"cpu", "vulkan"} and re.fullmatch(
             re.escape(f"release-tools/{identity['release_tag'][1:]}-r") + r"[1-9][0-9]*",
             identity["build_tools_tag"]) is not None
             and re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-rc[1-9][0-9]*", identity["release_tag"]) is not None,
-            "Signature tools ref does not belong to this CPU RC")
+            "Signature tools ref does not belong to this CPU or Vulkan RC")
 
 
 def signature_identity(identity):
@@ -117,7 +117,8 @@ def identity(args):
     require(args.build_run_id > 0 and TAG.fullmatch(args.release_tag) is not None
             and SHA.fullmatch(args.source_sha) is not None and DIGEST.fullmatch(args.digest) is not None,
             "Invalid candidate inputs")
-    require(not args.build_tools_tag or args.variant == "cpu", "Tools recovery is limited to the CPU variant")
+    require(not args.build_tools_tag or args.variant in {"cpu", "vulkan"},
+            "Tools recovery is limited to CPU and Vulkan variants")
     run = api(f"repos/{REPOSITORY}/actions/runs/{args.build_run_id}")
     tools = resolve_tools(args.release_tag, args.build_tools_tag or None)
     validate_producer(run, args.release_tag, tools["sha"], tools_tag=args.build_tools_tag or None)

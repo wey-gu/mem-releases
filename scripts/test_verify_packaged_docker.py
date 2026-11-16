@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import verify_packaged_docker as verify
@@ -157,6 +158,20 @@ class NativeBoundary(unittest.TestCase):
         result = self.run_probe(FIXTURE_SIGNER=signer)
         self.assertEqual(result.returncode, 0, result.stderr)
         verify.validate_receipt(json.loads(self.receipt.read_text()))
+
+    @unittest.skipUnless(platform.system() == "Linux" and platform.machine() == "x86_64",
+                         "Vulkan probe requires the native Linux amd64 host guard")
+    def test_vulkan_recovery_probe_rejects_a_different_signing_ref(self):
+        ref = "release-tools/0.10.104-rc2-r2"
+        self.identity.write_text(json.dumps(dict(IDENTITY, variant="vulkan", build_tools_tag=ref)))
+        signer = f"https://github.com/{verify.REPOSITORY}/.github/workflows/release-docker.yml@refs/tags/{ref}"
+        result = self.run_probe(FIXTURE_SIGNER=signer)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        verify.validate_receipt(json.loads(self.receipt.read_text()))
+        self.receipt.unlink()
+        result = self.run_probe(FIXTURE_SIGNER=signer.replace("rc2-r2", "rc2-r3"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.receipt.exists())
 
     def assert_cuda_runtime(self, script=None, **changes):
         identity = dict(IDENTITY, variant="cuda")
@@ -316,17 +331,58 @@ class NativeBoundary(unittest.TestCase):
         print("Mutation RED: unchanged rejection assertion caught CLI 0.10.103 accepted by validation bypass")
 
 
-class CpuToolsRecovery(unittest.TestCase):
+class ToolsRecovery(unittest.TestCase):
     def test_signature_uses_exact_validated_tools_tag_without_broadening_trust(self):
         tools_tag = "release-tools/0.10.104-rc2-r2"
         identity = dict(IDENTITY, build_tools_tag=tools_tag)
-        self.assertEqual(verify.signature_identity(identity),
-                         f"https://github.com/{verify.REPOSITORY}/.github/workflows/release-docker.yml@refs/tags/{tools_tag}")
+        for variant in ("cpu", "vulkan"):
+            with self.subTest(variant=variant):
+                self.assertEqual(verify.signature_identity(dict(identity, variant=variant)),
+                                 f"https://github.com/{verify.REPOSITORY}/.github/workflows/release-docker.yml@refs/tags/{tools_tag}")
         self.assertTrue(verify.signature_identity(IDENTITY).endswith("@refs/tags/v0.10.104-rc2"))
         for changed in [dict(build_tools_tag="main"), dict(build_tools_tag="release-tools/0.10.104-rc1-r2"),
-                        dict(variant="vulkan"), dict(release_tag="v0.10.104")]:
+                        dict(variant="cuda"), dict(release_tag="v0.10.104")]:
             with self.subTest(changed=changed), self.assertRaises(RuntimeError):
                 verify.signature_identity(dict(identity, **changed))
+
+    def test_vulkan_identity_binds_recovery_producer_digest_and_source(self):
+        ref = "release-tools/0.10.104-rc2-r2"
+        args = SimpleNamespace(build_run_id=123, release_tag=IDENTITY["release_tag"],
+                               source_sha=SOURCE, digest=INDEX, variant="vulkan", build_tools_tag=ref)
+        run = dict(id=123, run_attempt=1, repository=dict(full_name=verify.REPOSITORY),
+                   path=".github/workflows/release-docker.yml", event="workflow_dispatch",
+                   head_branch=ref, head_sha=TOOLS, status="completed", conclusion="success")
+
+        def responses(*, source_sha=SOURCE, digest=INDEX, conclusion="success"):
+            def api(path, **kwargs):
+                if path.endswith("/actions/runs/123"):
+                    return run
+                if "/nowledge-co/mem/commits/" in path:
+                    return dict(sha=source_sha)
+                if "/attempts/1/jobs?" in path:
+                    jobs = [dict(id=1, name="meta", status="completed", conclusion="success"),
+                            dict(id=2, name="build-vulkan", status="completed", conclusion=conclusion)]
+                    return dict(total_count=len(jobs), jobs=jobs)
+                if path.endswith("/jobs/2/logs"):
+                    return f'"containerimage.digest": "{digest}"'
+                raise AssertionError(path)
+            return api
+
+        with patch.object(verify, "resolve_tools", return_value=dict(sha=TOOLS)), \
+                patch.object(verify, "api", side_effect=responses()):
+            identity = verify.identity(args)
+            self.assertEqual(identity["build_tools_tag"], ref)
+            self.assertEqual(identity["required_job_ids"], {"meta": 1, "build-vulkan": 2})
+        for changed in (dict(source_sha="0" * 40), dict(digest="sha256:" + "0" * 64),
+                        dict(conclusion="failure")):
+            with self.subTest(changed=changed), \
+                    patch.object(verify, "resolve_tools", return_value=dict(sha=TOOLS)), \
+                    patch.object(verify, "api", side_effect=responses(**changed)), \
+                    self.assertRaises(RuntimeError):
+                verify.identity(args)
+        with patch.object(verify, "api") as api, self.assertRaises(RuntimeError):
+            verify.identity(SimpleNamespace(**(vars(args) | dict(variant="cuda"))))
+        api.assert_not_called()
 
     def test_recovery_requires_matching_rc_dispatch_ref_and_exact_tools(self):
         tag = "v0.10.114-rc3"
