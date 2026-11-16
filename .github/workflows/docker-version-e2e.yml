@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       build_tools_tag:
-        description: "Optional immutable release-tools/<same-RC>-rN tag for a reviewed CPU recovery"
+        description: "Optional immutable release-tools/<same-RC>-rN tag for a reviewed CPU or Vulkan recovery"
         required: false
         default: ''
         type: string
