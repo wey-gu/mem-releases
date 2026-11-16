@@ -16,8 +16,17 @@ RECIPE_NAMES = ("Dockerfile.rust", "Dockerfile.rust.cuda", "Dockerfile.rust.vulk
 
 
 def insert_before_web_build(recipe: str, copy_instruction: str, recipe_name: str) -> str:
-    if recipe.count(WEB_BUILD_COMMAND) != 1 or copy_instruction in recipe:
+    if recipe.count(WEB_BUILD_COMMAND) != 1 or recipe.count(copy_instruction) > 1:
         raise ValueError(f"unexpected Web build recipe: {recipe_name}")
+    if copy_instruction in recipe:
+        copy_start = recipe.index(copy_instruction)
+        build_start = recipe.index(WEB_BUILD_COMMAND)
+        stages = [match.start() for match in re.finditer(r"^FROM\s", recipe, re.MULTILINE)]
+        # Newer product recipes already own this dependency. Accept it only
+        # before the build in the same stage; do not hide malformed copies.
+        if copy_start > build_start or any(copy_start < stage < build_start for stage in stages):
+            raise ValueError(f"unexpected Web build recipe: {recipe_name}")
+        return recipe
     return recipe.replace(WEB_BUILD_COMMAND, copy_instruction + WEB_BUILD_COMMAND, 1)
 
 
