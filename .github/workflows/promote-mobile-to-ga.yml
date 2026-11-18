@@ -1,0 +1,235 @@
+name: promote-mobile-to-ga
+
+on:
+  workflow_dispatch:
+    inputs:
+      rc_tag:
+        description: "Accepted RC without v, for example 0.10.121-rc3"
+        required: true
+        type: string
+      ga_tag:
+        description: "Clean matching App GA version"
+        required: true
+        type: string
+      source_sha:
+        description: "Exact merged Mem source recorded by that RC"
+        required: true
+        type: string
+      source_run:
+        description: "Original successful release-mobile build-only run"
+        required: true
+        type: string
+      tools_sha:
+        description: "Original producer's merged tooling SHA"
+        required: true
+        type: string
+      operation_id:
+        description: "Persisted canonical operation UUID; reconcile before repeating"
+        required: true
+        type: string
+      publish:
+        description: "Upload the exact validated bytes; false is read-only validation"
+        type: boolean
+        default: false
+      distribute:
+        description: "Wait for processing and submit/attach TestFlight; cannot grant Apple approval"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: promote-mobile-${{ inputs.ga_tag }}
+  cancel-in-progress: false
+
+jobs:
+  admit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools build-tools;36.0.0"
+      - name: Verify original producer, source and complete signed archive bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_READ_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+          VERSION: ${{ inputs.ga_tag }}
+          RC_TAG: ${{ inputs.rc_tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_RUN: ${{ inputs.source_run }}
+          TOOLS_SHA: ${{ inputs.tools_sha }}
+          OPERATION_ID: ${{ inputs.operation_id }}
+          PUBLISH: ${{ inputs.publish }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          extra=()
+          if [[ "$PUBLISH" == "true" ]]; then extra+=(--publish); fi
+          python scripts/mobile_promotion.py --version "$VERSION" --rc-tag "$RC_TAG" \
+            --source-sha "$SOURCE_SHA" --tools-sha "$TOOLS_SHA" --source-run "$SOURCE_RUN" \
+            --operation-id "$OPERATION_ID" "${extra[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: admitted-mobile-${{ inputs.operation_id }}
+          path: mobile-promotion/
+          if-no-files-found: error
+          retention-days: 30
+
+  upload-ios:
+    name: iOS -> TestFlight
+    needs: admit
+    if: inputs.publish
+    runs-on: macos-15
+    timeout-minutes: 45
+    outputs:
+      build_id: ${{ steps.upload.outputs.build_id }}
+    env:
+      VERSION: ${{ inputs.ga_tag }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      OPERATION_ID: ${{ inputs.operation_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          ref: v${{ inputs.ga_tag }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --disable-pip-version-check pyjwt cryptography
+      - uses: actions/download-artifact@v4
+        with:
+          name: admitted-mobile-${{ inputs.operation_id }}
+          path: mobile-promotion
+      - name: Stage App Store Connect API key
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, os, re
+          from pathlib import Path
+          key_id = os.environ["APPLE_API_KEY"]
+          if not re.fullmatch(r"[A-Za-z0-9]+", key_id):
+              raise SystemExit("Invalid App Store Connect key ID")
+          folder = Path.home() / ".appstoreconnect/private_keys"
+          folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+          path = folder / ("AuthKey_" + key_id + ".p8")
+          descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(descriptor, "wb") as stream:
+              stream.write(base64.b64decode(os.environ["APPLE_API_KEY_BASE64"], validate=True))
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write("APPLE_API_KEY_PATH=" + str(path) + "\n")
+          PY
+      - name: Upload the exact signed RC IPA
+        id: upload
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: python scripts/upload_existing_ipa.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-original-upload-${{ inputs.operation_id }}
+          path: |
+            ios-upload-intent.json
+            ios-upload-receipt.json
+            ios-upload-uncertain.json
+            ios-upload.log
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Remove temporary API key
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${APPLE_API_KEY_PATH:-}" ]]; then rm -f -- "$APPLE_API_KEY_PATH"; fi
+
+  publish-android:
+    needs: admit
+    if: inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ inputs.ga_tag }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      OPERATION_ID: ${{ inputs.operation_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: admitted-mobile-${{ inputs.operation_id }}
+          path: mobile-promotion
+      - name: Publish the exact admitted APK without clobbering
+        env:
+          GH_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
+        run: python scripts/publish_existing_apk.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-original-promotion-${{ inputs.operation_id }}
+          path: |
+            android-promotion-intent.json
+            android-promotion-receipt.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  distribute-ios:
+    needs: upload-ios
+    if: inputs.publish && inputs.distribute
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ inputs.ga_tag }}
+      EXPECTED_BUILD_ID: ${{ needs.upload-ios.outputs.build_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --disable-pip-version-check pyjwt cryptography
+      - name: Stage API key after the original upload succeeded
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEY_PATH="$RUNNER_TEMP/appstore-key.p8"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+          echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+      - name: Distribute the original uploaded build, without uploading again
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          BETA_GROUP_ID: ${{ vars.TESTFLIGHT_BETA_GROUP_ID }}
+        run: |
+          test -n "$EXPECTED_BUILD_ID"
+          python scripts/testflight-distribute.py
+      - name: Read back actual App Store state
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: python scripts/app_store_release.py status "$VERSION"
+      - name: Remove temporary API key
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/appstore-key.p8"
