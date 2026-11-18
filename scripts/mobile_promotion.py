@@ -101,10 +101,12 @@ def extract_checked(archive, destination):
                 "Mobile archive exceeds bounded extraction limits")
         names = set()
         for member in members:
-            name = PurePosixPath(member.filename)
+            raw_name = member.orig_filename
+            name = PurePosixPath(raw_name)
             require(not name.is_absolute() and ".." not in name.parts
-                    and "\\" not in member.filename and ":" not in member.filename
-                    and "\n" not in member.filename and "\r" not in member.filename,
+                    and "\\" not in raw_name and ":" not in raw_name
+                    and "\n" not in raw_name and "\r" not in raw_name
+                    and "\x00" not in raw_name,
                     "Unsafe archive member path")
             portable_name = name.as_posix().casefold()
             require(portable_name not in names, "Duplicate or aliased archive member")

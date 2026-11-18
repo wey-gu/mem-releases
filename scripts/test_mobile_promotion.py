@@ -84,7 +84,9 @@ class OriginalBytesTest(unittest.TestCase):
             for name in ["../escape", "/absolute", "C:/escape", "dir\\escape", "bad\nfile"]:
                 archive = root / "input.zip"
                 with zipfile.ZipFile(archive, "w") as bundle:
-                    bundle.writestr(name, b"not allowed")
+                    member = zipfile.ZipInfo("placeholder")
+                    member.filename = name
+                    bundle.writestr(member, b"not allowed")
                 with self.subTest(name=name), self.assertRaises(RuntimeError):
                     mobile.extract_checked(archive, root / "output")
                 self.assertFalse((root / "output").exists())
