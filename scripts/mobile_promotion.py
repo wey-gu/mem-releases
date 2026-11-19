@@ -25,6 +25,22 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
+
+def confirmed_upload_delivery(output):
+    """Accept explicit Apple success and one delivery, including warning-only receipts."""
+    success = re.findall(r"^UPLOAD SUCCEEDED (with no errors|with [1-9][0-9]* warnings?, 0 messages)$",
+                         output, re.MULTILINE)
+    require(len(success) == 1 and not re.search(r"UPLOAD FAILED|ERROR: |Validation failed", output),
+            "App Store upload was not explicitly confirmed")
+    if success[0] != "with no errors":
+        require(re.search(r"^No errors uploading .+\.ipa['\"]?$", output, re.MULTILINE),
+                "Warning-only upload lacks the explicit no-errors receipt")
+    deliveries = {str(uuid.UUID(value)) for value in re.findall(
+        r"Delivery UUID:\s*([0-9a-fA-F-]{36})", output)}
+    require(len(deliveries) == 1, "Expected one unambiguous upload Delivery UUID")
+    return deliveries.pop()
+
+
 def checksum(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()

@@ -151,6 +151,20 @@ class UploadBoundaryTest(unittest.TestCase):
             with self.subTest(code=code, text=text), self.assertRaises(RuntimeError):
                 confirm_upload(code, text)
 
+    def test_warning_only_receipt_needs_no_errors_and_one_delivery(self):
+        receipt = ("UPLOAD SUCCEEDED with 1 warning, 0 messages\nDelivery UUID: "
+                   + DELIVERY + "\nNo errors uploading 'original.ipa'\n")
+        self.assertEqual(confirm_upload(0, receipt), DELIVERY)
+        for text in [receipt.replace("0 messages", "1 message"),
+                     receipt.replace("No errors uploading 'original.ipa'", ""),
+                     receipt + "\nDelivery UUID: 11111111-1111-4111-8111-111111111111",
+                     receipt + "\nUPLOAD FAILED",
+                     receipt.replace("with 1 warning", "with 0 warnings")]:
+            with self.subTest(text=text), self.assertRaises(RuntimeError):
+                confirm_upload(0, text)
+        with self.assertRaises(RuntimeError):
+            confirm_upload(1, receipt)
+
     def test_existing_store_build_stops_before_another_upload(self):
         client = Mock()
         client.call.return_value = dict(data=[])
