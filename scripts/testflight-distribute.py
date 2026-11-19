@@ -28,6 +28,8 @@ import urllib.request
 
 import jwt
 
+from mobile_promotion import confirmed_upload_delivery
+
 BASE = "https://api.appstoreconnect.apple.com"
 POLL_ATTEMPTS = 40
 POLL_SECONDS = 30
@@ -84,16 +86,34 @@ def verify_original_upload(run, jobs, log, version, source_sha, build_id):
     if run.get("status") != "completed":
         raise RuntimeError("Original upload run must be terminal")
     ios = [job for job in jobs["jobs"] if job["name"] == "iOS -> TestFlight"]
-    if len(ios) != 1 or not any(step["name"] == upload_steps[run["path"]] and step["conclusion"] == "success" for step in ios[0]["steps"]):
-        raise RuntimeError("Original signed upload did not succeed")
+    if len(ios) != 1:
+        raise RuntimeError("Expected one original iOS upload job")
+    upload = [step for step in ios[0]["steps"] if step["name"] == upload_steps[run["path"]]]
+    if len(upload) != 1:
+        raise RuntimeError("Expected one original signed upload step")
     plain = "\n".join(re.sub(r"^\d{4}-\d\d-\d\dT\S+ ", "", line) for line in log.splitlines())
     plain = re.sub(r"\x1b\[[0-9;]*m", "", plain)
     if not re.search(r"git log -1 --format=%H\n" + re.escape(source_sha) + r"(?:\n|$)", plain):
         raise RuntimeError("Original upload source SHA does not match")
     identity = f"tag={version} tauri.conf={version} plist.short={version} plist.build={version}"
-    if identity not in plain or "UPLOAD SUCCEEDED with no errors" not in plain or f"Delivery UUID: {build_id}" not in plain:
+    if identity not in plain or confirmed_upload_delivery(plain) != build_id:
         raise RuntimeError("Original upload version or Delivery UUID does not match")
-    return dict(passed=True, source_run=run["id"], source_sha=source_sha, version=version, build_id=build_id)
+    legacy_warning = (
+        run["path"] == ".github/workflows/promote-mobile-to-ga.yml"
+        and run.get("head_sha") == "520eea6effa0a08ca9d3150134ca983b558903e8"
+        and run.get("run_attempt") == 1
+        and upload[0]["conclusion"] == "failure"
+        and "UPLOAD SUCCEEDED with 1 warning, 0 messages" in plain
+        and "SDK version issue." in plain and "(90725)" in plain
+        and "RuntimeError: App Store upload was not confirmed; preserve logs before recovery" in plain
+    )
+    if upload[0]["conclusion"] != "success" and not legacy_warning:
+        raise RuntimeError("Original signed upload did not succeed")
+    # All paths still wait for this exact Apple build to become VALID before any mutation.
+    result = dict(passed=True, source_run=run["id"], source_sha=source_sha, version=version, build_id=build_id)
+    if legacy_warning:
+        result["legacy_warning_receipt_recovered"] = True
+    return result
 
 
 def find_app(client):

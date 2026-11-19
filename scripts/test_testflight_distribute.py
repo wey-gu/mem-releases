@@ -35,6 +35,24 @@ class UploadAdmissionTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.admit(run=run)
 
+    def test_legacy_warning_parser_failure_resumes_only_the_exact_released_tools(self):
+        run = self.run | dict(path=".github/workflows/promote-mobile-to-ga.yml",
+                              head_sha="520eea6effa0a08ca9d3150134ca983b558903e8", run_attempt=1)
+        jobs = dict(jobs=[dict(name="iOS -> TestFlight", steps=[
+            dict(name="Upload the exact signed RC IPA", conclusion="failure")])])
+        log = self.log.replace("UPLOAD SUCCEEDED with no errors",
+            "UPLOAD SUCCEEDED with 1 warning, 0 messages") + (
+                "No errors uploading 'original.ipa'\nSDK version issue. (90725)\n"
+                "RuntimeError: App Store upload was not confirmed; preserve logs before recovery\n")
+        self.assertTrue(self.admit(run=run, jobs=jobs, log=log)["legacy_warning_receipt_recovered"])
+        for change in [dict(run=run | dict(head_sha="b" * 40)),
+                       dict(run=run | dict(run_attempt=2)),
+                       dict(log=log.replace("(90725)", "(other)")),
+                       dict(log=log.replace("RuntimeError: App Store upload was not confirmed; preserve logs before recovery", "")),
+                       dict(log=log.replace("No errors uploading 'original.ipa'", ""))]:
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                self.admit(**(dict(run=run, jobs=jobs, log=log) | change))
+
     def test_rejects_wrong_source_version_delivery_and_unsigned_upload(self):
         bad_jobs = copy.deepcopy(self.jobs)
         bad_jobs["jobs"][0]["steps"][0]["conclusion"] = "failure"

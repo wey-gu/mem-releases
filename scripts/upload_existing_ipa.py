@@ -10,16 +10,12 @@ import re
 import subprocess
 import uuid
 
-from mobile_promotion import extract_checked, ipa_identity, require, verify_files
+from mobile_promotion import confirmed_upload_delivery, extract_checked, ipa_identity, require, verify_files
 
 
 def confirm_upload(returncode, output):
-    require(returncode == 0 and "UPLOAD SUCCEEDED with no errors" in output
-            and not re.search(r"UPLOAD FAILED|ERROR: |Validation failed", output),
-            "App Store upload was not confirmed; preserve logs before recovery")
-    deliveries = re.findall(r"Delivery UUID:\s*([0-9a-fA-F-]{36})", output)
-    require(len(deliveries) == 1, "Expected one confirmed upload Delivery UUID")
-    return str(uuid.UUID(deliveries[0]))
+    require(returncode == 0, "App Store upload command failed; retain original logs")
+    return confirmed_upload_delivery(output)
 
 
 def assert_unuploaded(client, app_id, version):
