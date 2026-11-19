@@ -27,6 +27,14 @@ class UploadAdmissionTest(unittest.TestCase):
     def test_accepts_only_the_original_successful_upload(self):
         self.assertEqual(self.admit()["build_id"], BUILD)
 
+    def test_exact_rc_promotion_upload_can_resume_without_reupload(self):
+        run = self.run | dict(path=".github/workflows/promote-mobile-to-ga.yml")
+        jobs = dict(jobs=[dict(name="iOS -> TestFlight", steps=[
+            dict(name="Upload the exact signed RC IPA", conclusion="success")])])
+        self.assertEqual(self.admit(run=run, jobs=jobs)["build_id"], BUILD)
+        with self.assertRaises(RuntimeError):
+            self.admit(run=run)
+
     def test_rejects_wrong_source_version_delivery_and_unsigned_upload(self):
         bad_jobs = copy.deepcopy(self.jobs)
         bad_jobs["jobs"][0]["steps"][0]["conclusion"] = "failure"

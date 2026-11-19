@@ -75,12 +75,16 @@ def verify_original_upload(run, jobs, log, version, source_sha, build_id):
         raise RuntimeError("Recovery requires an exact source SHA")
     if str(uuid.UUID(build_id)) != build_id:
         raise RuntimeError("Recovery requires the original Delivery UUID")
-    if run.get("path") != ".github/workflows/release-mobile.yml" or run.get("event") != "workflow_dispatch":
+    upload_steps = {
+        ".github/workflows/release-mobile.yml": "Build, sign and upload to TestFlight",
+        ".github/workflows/promote-mobile-to-ga.yml": "Upload the exact signed RC IPA",
+    }
+    if run.get("path") not in upload_steps or run.get("event") != "workflow_dispatch":
         raise RuntimeError("Original run is not a manual mobile release")
     if run.get("status") != "completed":
         raise RuntimeError("Original upload run must be terminal")
     ios = [job for job in jobs["jobs"] if job["name"] == "iOS -> TestFlight"]
-    if len(ios) != 1 or not any(step["name"] == "Build, sign and upload to TestFlight" and step["conclusion"] == "success" for step in ios[0]["steps"]):
+    if len(ios) != 1 or not any(step["name"] == upload_steps[run["path"]] and step["conclusion"] == "success" for step in ios[0]["steps"]):
         raise RuntimeError("Original signed upload did not succeed")
     plain = "\n".join(re.sub(r"^\d{4}-\d\d-\d\dT\S+ ", "", line) for line in log.splitlines())
     plain = re.sub(r"\x1b\[[0-9;]*m", "", plain)
