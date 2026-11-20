@@ -7,7 +7,7 @@ import plistlib
 import stat
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import zipfile
 
 import mobile_promotion as mobile
@@ -49,10 +49,23 @@ class OriginalProducerTest(unittest.TestCase):
         return mobile.verify_build_only(**(values | changes))
 
     def test_same_original_both_platforms_are_required(self):
-        self.assertEqual(self.admit(), dict(ios=1, android=2))
+        for ref in [f"release-tools/{RC}-r1", f"v{RC}"]:
+            with self.subTest(ref=ref):
+                self.assertEqual(self.admit(run=self.run | {"head_branch": ref}), dict(ios=1, android=2))
+
+    @patch("mobile_promotion.api")
+    def test_checks_the_actual_tag_for_the_original_producer(self, api):
+        ref = f"v{RC}"
+        api.return_value = {"object": {"type": "commit", "sha": TOOLS}}
+        mobile.verify_producer_tag(ref, TOOLS)
+        api.assert_called_once_with(f"repos/{mobile.REPOSITORY}/git/ref/tags/{ref}")
+        api.return_value = {"object": {"type": "commit", "sha": "c" * 40}}
+        with self.assertRaisesRegex(RuntimeError, "tooling tag differs"):
+            mobile.verify_producer_tag(ref, TOOLS)
 
     def test_rejects_another_or_retried_producer(self):
         for change in [dict(head_sha="c" * 40), dict(head_branch="main"),
+                       dict(head_branch=f"v{VERSION}-rc2"), dict(head_branch=f"release-tools/{RC}-r2"),
                        dict(run_attempt=2), dict(conclusion="failure"),
                        dict(status="in_progress"), dict(event="push")]:
             with self.subTest(change=change), self.assertRaises(RuntimeError):
