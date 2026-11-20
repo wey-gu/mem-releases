@@ -80,7 +80,7 @@ def verify_build_only(run, jobs, logs, version, rc_tag, source_sha, tools_sha):
             and run.get("conclusion") == "success"
             and run.get("run_attempt") == 1
             and run.get("head_sha") == tools_sha
-            and run.get("head_branch") == f"release-tools/{rc_tag}-r1",
+            and run.get("head_branch") in {f"v{rc_tag}", f"release-tools/{rc_tag}-r1"},
             "Expected the original successful same-RC mobile producer")
     expected = {"ios": "iOS -> TestFlight", "android": "Android -> APK + AAB"}
     selected = {}
@@ -107,6 +107,16 @@ def verify_build_only(run, jobs, logs, version, rc_tag, source_sha, tools_sha):
                     "Original Android producer was not signed and build-only")
         selected[platform] = job["id"]
     return selected
+
+
+def verify_producer_tag(ref, tools_sha):
+    target = api(f"repos/{REPOSITORY}/git/ref/tags/{ref}")["object"]
+    for _ in range(5):
+        if target["type"] != "tag":
+            break
+        target = api(f"repos/{REPOSITORY}/git/tags/{target['sha']}")["object"]
+    require(target["type"] == "commit" and target["sha"] == tools_sha,
+            "Original producer tooling tag differs")
 
 
 def extract_checked(archive, destination):
@@ -184,8 +194,6 @@ def admit(args):
     for sha in {args.tools_sha, os.environ["GITHUB_SHA"]}:
         require(api(f"repos/{REPOSITORY}/compare/{sha}...main")["merge_base_commit"]["sha"] == sha,
                 "Producer and promotion tools must be normally merged")
-    require(api(f"repos/{REPOSITORY}/commits/release-tools/{args.rc_tag}-r1")["sha"] == args.tools_sha,
-            "Original producer tooling tag differs")
     require(api(f"repos/nowledge-co/mem/commits/v{args.rc_tag}")["sha"] == args.source_sha,
             "Original RC source tag differs")
     require(api(f"repos/nowledge-co/mem/compare/{args.source_sha}...main")
@@ -207,6 +215,7 @@ def admit(args):
             f"repos/{REPOSITORY}/actions/jobs/{hits[0]['id']}/logs"], text=True)
     selected = verify_build_only(run, jobs, logs, args.version, args.rc_tag,
                                  args.source_sha, args.tools_sha)
+    verify_producer_tag(run["head_branch"], args.tools_sha)
     inventory = api(f"repos/{REPOSITORY}/actions/runs/{args.source_run}/artifacts?per_page=100")
     require(inventory["total_count"] == len(inventory["artifacts"]), "Truncated artifact inventory")
     root = args.output
@@ -255,6 +264,7 @@ def admit(args):
     receipt = dict(passed=True, operation_id=args.operation_id,
                    version=args.version, rc_tag=args.rc_tag, source_sha=args.source_sha,
                    tools_sha=args.tools_sha, source_run=run["id"], producer_attempt=1,
+                   producer_ref=run["head_branch"],
                    jobs=selected, archives=archives, files=files, community_sha=community[0],
                    rebuilt=False, resigned=False, device_execution_verified=False)
     (root / "admission.json").write_text(json.dumps(receipt, indent=2) + "\n")
