@@ -1656,3 +1656,18 @@ class RustupInstalledToolchainContract(unittest.TestCase):
             self.assertIn("RUSTUP_TOOLCHAIN", restored)
             self.assertEqual(restored.split()[0], default)
             self.assertNotEqual(baseline.split()[0], restored.split()[0])
+
+
+class SccacheVersionPinTest(unittest.TestCase):
+    def test_every_sccache_action_pins_the_same_version(self):
+        # An unpinned sccache-action installs the newest sccache; a new
+        # version changes cache keys and made 0.10.123-rc3 build everything
+        # cold (about 10% hits on every platform).
+        versions = set()
+        for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            text = path.read_text()
+            for match in re.finditer(r"uses: mozilla-actions/sccache-action@\S+\n((?: +.*\n){0,6})", text):
+                found = re.search(r'version: "(v\d+\.\d+\.\d+)"', match.group(1))
+                self.assertIsNotNone(found, f"{path.name}: sccache-action without a pinned version")
+                versions.add(found.group(1))
+        self.assertEqual(len(versions), 1, versions)

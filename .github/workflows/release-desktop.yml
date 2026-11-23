@@ -703,6 +703,11 @@ jobs:
         if: runner.environment != 'self-hosted' || runner.os == 'macOS'
         continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          # Pinned: sccache keys change across versions, so an unpinned
+          # upgrade (0.19.0 -> 0.20.0 on 2026-11-23, 0.10.123-rc3) turns the
+          # whole R2 cache cold on every platform (Windows 78 -> 213 min).
+          version: "v0.20.0"
       - &wait_before_sccache_retry
         name: Wait before retrying sccache setup
         if: steps.setup_sccache.outcome == 'failure'
@@ -714,6 +719,11 @@ jobs:
         if: steps.setup_sccache.outcome == 'failure'
         continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          # Pinned: sccache keys change across versions, so an unpinned
+          # upgrade (0.19.0 -> 0.20.0 on 2026-11-23, 0.10.123-rc3) turns the
+          # whole R2 cache cold on every platform (Windows 78 -> 213 min).
+          version: "v0.20.0"
       - name: Point sccache at R2
         shell: bash
         env:
