@@ -29,6 +29,11 @@ PLATFORM_ARTIFACTS = {
     "mac": "macos-arm64", "mac_intel": "macos-x86_64", "win": "windows-x86_64",
     "linux-deb": "linux-deb-appimage", "linux-appimage": "linux-deb-appimage", "linux-rpm": "linux-rpm",
 }
+VULKAN_ARTIFACTS = {
+    "win": "windows-x86_64-vulkan",
+    "linux-deb": "linux-vulkan",
+    "linux-appimage": "linux-vulkan",
+}
 VERSION = re.compile(r"[1-9][0-9]*\.[0-9]+\.[0-9]+|0\.[1-9][0-9]*\.[0-9]+|0\.0\.[1-9][0-9]*")
 WINDOWS_UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Nowledge Mem"
 
@@ -234,6 +239,10 @@ def verify(args):
     require(args.build_attempt.isdigit() and int(args.build_attempt) > 0, "Invalid build attempt")
     require(args.artifact_id.isdigit() and int(args.artifact_id) > 0, "Invalid artifact ID")
     require(args.package.is_file(), "Package is missing")
+    if args.package_variant == "vulkan":
+        require(args.platform in VULKAN_ARTIFACTS, "Unsupported Vulkan packaging path")
+    require(("-vulkan" in args.package.name.lower()) == (args.package_variant == "vulkan"),
+            "Package name does not match the variant being verified")
     require(not args.receipt.exists(), "Receipt already exists")
     require(os.environ.get("GITHUB_ACTIONS") == "true", "Disposable native GitHub Actions runner required")
     work = args.work.resolve()
@@ -257,7 +266,12 @@ def verify(args):
     app_output = command([*app, "--version"], env=env, timeout=20)
     require(app_output == f"Nowledge Mem {args.version} ({args.platform})", f"App identity mismatch: {app_output!r}")
     server = bundled_server(resources, args.platform)
-    server_output = command([server, "--version"], env=env, timeout=20)
+    server_env = env
+    if args.package_variant == "vulkan" and args.platform == "linux-appimage":
+        loader = resources / "usr/lib/libvulkan.so.1"
+        require(loader.is_file(), "Vulkan AppImage is missing its loader")
+        server_env = {**env, "LD_LIBRARY_PATH": str(loader.parent)}
+    server_output = command([server, "--version"], env=server_env, timeout=20)
     validate_server_output(server_output, args.version, args.source_sha)
     log_path = work / "app.log"
     with log_path.open("wb") as log:
@@ -293,6 +307,7 @@ def verify(args):
             require(proc.poll() is None, "App exited during CLI verification")
             receipt = {
                 "schema": 1, "passed": True, "platform": args.platform, "version": args.version,
+                "package_variant": args.package_variant,
                 "source_sha": args.source_sha, "build_run_id": args.build_run_id,
                 "release_tag": args.release_tag, "build_workflow_sha": args.build_workflow_sha,
                 "build_attempt": args.build_attempt, "artifact_id": args.artifact_id,
@@ -320,6 +335,7 @@ def main():
     parser.add_argument("--package", type=lambda p: Path(p).resolve(), required=True)
     parser.add_argument("--app", type=lambda p: Path(p).resolve())
     parser.add_argument("--platform", choices=PLATFORMS, required=True)
+    parser.add_argument("--package-variant", choices=("standard", "vulkan"), default="standard")
     parser.add_argument("--version", required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--build-run-id", required=True)

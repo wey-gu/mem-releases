@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Require six successful receipts bound to the same candidate and build run."""
+"""Require a receipt for every package bound to the same candidate and build run."""
 
 import json
 import os
@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import sys
 
-from verify_packaged_desktop import PLATFORM_ARTIFACTS, PLATFORMS, require, runtime_is_ready, validate_server_output
+from verify_packaged_desktop import PLATFORM_ARTIFACTS, VULKAN_ARTIFACTS, require, runtime_is_ready, validate_server_output
 from verify_packaged_desktop import validate_windows_package_record
 
 
@@ -71,20 +71,82 @@ def validate_build_identity(run, release_tag, tools_sha=None, *, jobs=None, tool
         validate_draft_upload_failure(run, jobs)
 
 
+VULKAN_JOBS = {
+    "build-windows-vulkan": "windows-x86_64-vulkan",
+    "build-linux-vulkan": "linux-vulkan",
+}
+
+RUNNERS_AND_EXTENSIONS = {
+    "mac": ("macos-15", "dmg"),
+    "mac_intel": ("macos-15-intel", "dmg"),
+    "win": ("windows-2022", "exe"),
+    "linux-deb": ("ubuntu-22.04", "deb"),
+    "linux-appimage": ("ubuntu-22.04", "AppImage"),
+    "linux-rpm": ("ubuntu-22.04", "rpm"),
+}
+
+
+def select_artifacts(artifacts, jobs):
+    names = set(PLATFORM_ARTIFACTS.values())
+    jobs_by_name = {job["name"]: job for job in jobs}
+    require(len(jobs_by_name) == len(jobs), "Duplicate producer job")
+    variant_jobs = VULKAN_JOBS.keys() & jobs_by_name.keys()
+    if variant_jobs:
+        require(variant_jobs == VULKAN_JOBS.keys(), "Incomplete Vulkan producer jobs")
+        outcomes = {jobs_by_name[name]["conclusion"] for name in variant_jobs}
+        require(outcomes in ({"skipped"}, {"success"}), f"Inconsistent Vulkan producer outcomes: {outcomes}")
+        if outcomes == {"success"}:
+            names.update(VULKAN_JOBS.values())
+    selected = {}
+    for name in sorted(names):
+        matches = [item for item in artifacts if item["name"] == name and not item["expired"]]
+        require(len(matches) == 1, f"Expected one unexpired artifact: {name}")
+        selected[name] = str(matches[0]["id"])
+    unexpected = {item["name"] for item in artifacts} & (set(VULKAN_JOBS.values()) - names)
+    require(not unexpected, f"Unexpected Vulkan artifacts: {unexpected}")
+    return selected
+
+
+def package_matrix(artifacts):
+    vulkan_buckets = set(VULKAN_ARTIFACTS.values())
+    present = vulkan_buckets & artifacts.keys()
+    require(not present or present == vulkan_buckets, "Incomplete Vulkan artifact set")
+    variants = [("standard", PLATFORM_ARTIFACTS)]
+    if present:
+        variants.append(("vulkan", VULKAN_ARTIFACTS))
+
+    cases = []
+    for variant, artifact_names in variants:
+        for platform, artifact in artifact_names.items():
+            runner, extension = RUNNERS_AND_EXTENSIONS[platform]
+            if variant == "vulkan" and platform.startswith("linux-"):
+                runner = "ubuntu-24.04"
+            cases.append({
+                "case": platform if variant == "standard" else f"{platform}-vulkan",
+                "platform": platform, "variant": variant, "runner": runner,
+                "artifact": artifact, "extension": extension,
+            })
+    return cases
+
+
 def accept(root, version, source_sha, build_run_id, identity):
     paths = list(root.rglob("*.json"))
-    require(len(paths) == len(PLATFORMS), f"Expected six receipts, found {len(paths)}")
+    cases = {(case["platform"], case["variant"]): case for case in package_matrix(identity["artifacts"])}
+    require(len(paths) == len(cases), f"Expected {len(cases)} receipts, found {len(paths)}")
     seen = set()
     for path in paths:
         receipt = json.loads(path.read_text())
         platform = receipt.get("platform")
-        require(platform in PLATFORMS and platform not in seen, f"Duplicate/unknown platform: {platform}")
+        key = (platform, receipt.get("package_variant", "standard"))
+        require(key in cases, f"Unknown packaging path: {key}")
+        case = cases[key]
+        require(case["case"] not in seen, f"Duplicate packaging path: {key}")
         require(receipt.get("schema") == 1 and receipt.get("passed") is True, f"Failed receipt: {path}")
         for name, expected in (("version", version), ("source_sha", source_sha), ("build_run_id", build_run_id)):
             require(receipt.get(name) == expected, f"{name} mismatch: {path}")
         for name in ("release_tag", "build_workflow_sha", "build_attempt"):
             require(receipt.get(name) == identity[name], f"{name} mismatch: {path}")
-        require(receipt.get("artifact_id") == identity["artifacts"][PLATFORM_ARTIFACTS[platform]],
+        require(receipt.get("artifact_id") == identity["artifacts"][case["artifact"]],
                 f"Artifact identity mismatch: {path}")
         require(re.fullmatch(r"[0-9a-f]{64}", receipt.get("package_sha256", "")) is not None,
                 f"Missing package digest: {path}")
@@ -99,13 +161,13 @@ def accept(root, version, source_sha, build_run_id, identity):
         require(receipt.get("health_details", {}).get("build_sha") == source_sha, f"Runtime SHA mismatch: {path}")
         require(runtime_is_ready(receipt.get("health_details", {})), f"Backend is not ready: {path}")
         require(receipt.get("cli_output") == f"nmem {version}", f"CLI mismatch: {path}")
-        seen.add(platform)
-    require(seen == set(PLATFORMS), "Incomplete packaging coverage")
+        seen.add(case["case"])
+    require(seen == {case["case"] for case in cases.values()}, "Incomplete packaging coverage")
     return seen
 
 
 if __name__ == "__main__":
     identity = {"release_tag": os.environ["RELEASE_TAG"], "build_workflow_sha": os.environ["BUILD_WORKFLOW_SHA"],
                 "build_attempt": os.environ["BUILD_ATTEMPT"], "artifacts": json.loads(os.environ["ARTIFACTS"])}
-    accept(Path(sys.argv[1]), os.environ["VERIFY_VERSION"], os.environ["SOURCE_SHA"], os.environ["BUILD_RUN_ID"], identity)
-    print("PASS: 6/6 packaged Desktop version receipts")
+    accepted = accept(Path(sys.argv[1]), os.environ["VERIFY_VERSION"], os.environ["SOURCE_SHA"], os.environ["BUILD_RUN_ID"], identity)
+    print(f"PASS: {len(accepted)} packaged Desktop version receipts")

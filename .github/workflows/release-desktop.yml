@@ -65,10 +65,10 @@ on:
         type: boolean
         default: false
       build_vulkan:
-        description: "ALSO build the OPTIONAL -vulkan GPU variants (Windows + Linux only). Manual downloads only — NEVER added to the auto-updater feed. Off for tag-triggered runs."
+        description: "Build the Windows and Linux Vulkan variants for manual download. Applies to releases only."
         required: false
         type: boolean
-        default: false
+        default: true
       windows_only:
         description: "Only build standard Windows from the pinned source_ref; accepted only with tag=nightly, never publishes."
         required: false
@@ -335,11 +335,8 @@ jobs:
             echo "::error::windows_only is accepted only for a non-publishing tag=nightly manual build."
             exit 1
           fi
-          # VULKAN is the OPTIONAL -vulkan GPU variant gate. It is ONLY ever
-          # opt-in via the workflow_dispatch `build_vulkan` input; tag-push and
-          # repository_dispatch triggers always leave it off, so the normal
-          # automated release path is byte-for-byte unchanged.
-          VULKAN="false"
+          # Automatic releases build both variants. Manual releases can opt out.
+          VULKAN="true"
           NIGHTLY="false"
           NIGHTLY_REF=""
           case "$EVENT_NAME" in
@@ -355,7 +352,7 @@ jobs:
                 VERSION="$DISPATCH_TAG"
                 SOURCE_REF="v${VERSION}"
                 PUBLISH="$DISPATCH_PUBLISH"
-                VULKAN="$DISPATCH_VULKAN"
+                VULKAN="${DISPATCH_VULKAN:-true}"
               fi
               ;;
             push)
@@ -413,8 +410,7 @@ jobs:
           if [[ "$NIGHTLY" == "true" ]]; then
             DRY="false"; PUBLISH="false"
           fi
-          # Normalize VULKAN to a strict true/false ("" from a non-dispatch
-          # trigger becomes false). NEVER touches publish/updater.
+          # Expose a strict boolean string to the variant jobs.
           if [[ "$VULKAN" == "true" ]]; then VULKAN="true"; else VULKAN="false"; fi
           echo "version=$VERSION"        >> "$GITHUB_OUTPUT"
           echo "source_ref=$SOURCE_REF"  >> "$GITHUB_OUTPUT"
@@ -1877,14 +1873,7 @@ jobs:
   # =======================================================================
   # OPTIONAL -vulkan GPU variant jobs (Windows + Linux only).
   #
-  # WHY THESE ARE FULLY SEPARATE JOBS (not matrix entries on the CPU jobs):
-  #   - The default CPU build path MUST stay byte-for-byte unchanged when
-  #     the opt-in is off. These jobs only run when `meta.run_vulkan` is
-  #     'true', which is ONLY set by the workflow_dispatch `build_vulkan`
-  #     input. Tag-push / repository_dispatch leave it false, so the normal
-  #     automated release is untouched.
-  #   - macOS is intentionally absent: Metal is already the default there
-  #     (target-cfg dep override), so there is no -vulkan macOS artifact.
+  # Nightly and explicit manual opt-outs skip these separate jobs.
   #
   # AUTO-UPDATER SAFETY (the load-bearing invariant):
   #   These jobs are NOT in the `needs:` list of `publish` or the CPU

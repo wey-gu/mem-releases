@@ -114,6 +114,40 @@ def fake_tools(test, registry):
 
 
 class GAPromotionContractTest(unittest.TestCase):
+    def test_ga_staging_keeps_vulkan_out_of_standard_publish_paths(self):
+        from stage_desktop_ga_assets import VULKAN_SUFFIXES, stage
+
+        rc, ga = "0.10.123-rc3", "0.10.123"
+        standard = {
+            "dmg_arm": "_aarch64.dmg", "dmg_x64": "_x64.dmg",
+            "exe_win": "_x64-setup.exe", "deb": "_amd64.deb", "appimg": "_amd64.AppImage",
+        }
+        for with_vulkan in (False, True):
+            with self.subTest(with_vulkan=with_vulkan), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for suffix in standard.values():
+                    (root / f"Nowledge.Mem_{rc}{suffix}").write_bytes(b"standard")
+                if with_vulkan:
+                    for suffix in VULKAN_SUFFIXES:
+                        (root / f"Nowledge.Mem_{rc}{suffix}").write_bytes(b"vulkan")
+                outputs = stage(root, rc, ga)
+                self.assertEqual(set(outputs), set(standard))
+                for key, suffix in standard.items():
+                    self.assertEqual(outputs[key].name, f"Nowledge.Mem_{ga}{suffix}")
+                    self.assertEqual(outputs[key].read_bytes(), b"standard")
+                variants = {path.name: path.read_bytes() for path in (root / "vulkan").iterdir()}
+                self.assertEqual(variants, {
+                    f"Nowledge.Mem_{ga}{suffix}": b"vulkan" for suffix in VULKAN_SUFFIXES
+                } if with_vulkan else {})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            partial = root / f"Nowledge.Mem_{rc}{VULKAN_SUFFIXES[0]}"
+            partial.touch()
+            with self.assertRaisesRegex(ValueError, "complete RC Vulkan set"):
+                stage(root, rc, ga)
+            self.assertEqual(list(root.iterdir()), [partial])
+
     def test_release_bundle_commands_select_public_production_channel(self):
         for name, expected_bash, expected_powershell in (
             ("release-desktop.yml", 4, 2),
@@ -1157,11 +1191,14 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
         base.update(env)
         return self.run_script(self.step("meta", step_id="resolve")["run"], base)
 
-    def test_release_paths_resolve_exactly_as_before(self):
+    def test_release_paths_enable_vulkan_with_manual_opt_out(self):
+        self.assertIs(self.workflow[True]["workflow_dispatch"]["inputs"]["build_vulkan"]["default"], True)
         keys = ("version", "source_ref", "is_dry_run", "run_publish", "run_vulkan", "is_nightly")
         cases = (
             ("push", {"PUSH_REF": "v0.10.102-rc1"},
-             ("0.10.102-rc1", "v0.10.102-rc1", "true", "false", "false", "false")),
+             ("0.10.102-rc1", "v0.10.102-rc1", "true", "false", "true", "false")),
+            ("workflow_dispatch", {"DISPATCH_TAG": "0.10.102", "DISPATCH_PUBLISH": "true"},
+             ("0.10.102", "v0.10.102", "false", "true", "true", "false")),
             ("workflow_dispatch", {"DISPATCH_TAG": "0.10.102", "DISPATCH_PUBLISH": "true",
                                    "DISPATCH_VULKAN": "false"},
              ("0.10.102", "v0.10.102", "false", "true", "false", "false")),
@@ -1172,9 +1209,9 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
                                    "DISPATCH_VULKAN": "true"},
              ("0.10.102-ci1", "v0.10.102-ci1", "true", "false", "true", "false")),
             ("repository_dispatch", {"PAYLOAD_REF": "v0.10.102-rc2", "PAYLOAD_VERSION": "0.10.102-rc2"},
-             ("0.10.102-rc2", "v0.10.102-rc2", "true", "false", "false", "false")),
+             ("0.10.102-rc2", "v0.10.102-rc2", "true", "false", "true", "false")),
             ("repository_dispatch", {"PAYLOAD_REF": "v0.10.102", "PAYLOAD_VERSION": "0.10.102"},
-             ("0.10.102", "v0.10.102", "false", "true", "false", "false")),
+             ("0.10.102", "v0.10.102", "false", "true", "true", "false")),
         )
         for event, env, expected in cases:
             with self.subTest(event=event, env=env):

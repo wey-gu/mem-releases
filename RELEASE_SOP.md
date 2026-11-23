@@ -529,14 +529,17 @@ preflight fails before public mutation if `GPG_PRIVATE_KEY` is absent.
 While RPM promotion is deferred, direct GA's all-platform older-patch preflight
 also fails closed because the live RPM latest can differ from the six core
 platforms. Use the RC promotion flow for an approved older out-of-band patch.
-For clean GA tags, `publish=false, build_vulkan=true` is build-only: the
-Vulkan bundles remain Actions artifacts and do not create a GH Release draft.
-When `publish=true`, optional Vulkan assets attach only while the Release is
-draft and reconcile partial attachments by SHA-256. Core GA attachment uses
-the same rule:
-identical existing bytes are skipped, missing files are uploaded, and
-different bytes stop the run. Inspect a partial draft and its assets before
-any retry. Normal RC promotion and direct GA require their target R2 keys and
+Windows Vulkan NSIS and Linux Vulkan DEB/AppImage build by default for
+releases. A manual release can set `build_vulkan=false`. Nightly builds omit
+them. For a clean GA tag, `publish=false` keeps the bundles in Actions.
+Qualify all three Vulkan packages with the exact-build Desktop version E2E
+before publishing them. RC promotion copies the qualified packages to the GA
+draft under GA filenames. Vulkan packages are manual GitHub downloads. The
+standard package set remains the source for R2, APT, and Desktop updates.
+
+Draft attachments reconcile by SHA-256. Identical existing bytes are skipped,
+missing files are uploaded, and different bytes stop the run. Inspect a
+partial draft and its assets before any retry. Normal RC promotion and direct GA require their target R2 keys and
 GA Release tag to be unused before any parallel publication job starts. If a
 direct GA partially wrote R2, withhold its draft and cut a higher-version RC
 after inspection; `finish-ga-release` is for a validated RC promotion, not a

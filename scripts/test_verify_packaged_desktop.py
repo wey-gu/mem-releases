@@ -11,7 +11,7 @@ from unittest.mock import patch
 import unittest
 from types import SimpleNamespace
 
-from desktop_version_receipts import accept, validate_build_identity
+from desktop_version_receipts import VULKAN_JOBS, accept, package_matrix, select_artifacts, validate_build_identity
 from verify_packaged_desktop import PLATFORM_ARTIFACTS, PLATFORMS, command, exact_version, installed_cli, runtime_is_ready, unique
 from verify_packaged_desktop import validate_server_output, verify
 from verify_packaged_desktop import cli_command
@@ -257,6 +257,29 @@ class PackagedVersionContract(unittest.TestCase):
             with self.subTest(candidates=candidates), self.assertRaises(RuntimeError):
                 unique(candidates, "payload")
 
+    def test_vulkan_acceptance_tracks_exact_producer_jobs_and_artifacts(self):
+        standard = sorted(set(PLATFORM_ARTIFACTS.values()))
+        variants = list(VULKAN_JOBS.values())
+        artifacts = [{"id": index, "name": name, "expired": False}
+                     for index, name in enumerate(standard + variants, 1)]
+        jobs = [{"name": name, "conclusion": "success"} for name in VULKAN_JOBS]
+        selected = select_artifacts(artifacts, jobs)
+        self.assertEqual(set(selected), set(standard + variants))
+        cases = package_matrix(selected)
+        self.assertEqual(len(cases), 9)
+        self.assertEqual({case["case"] for case in cases if case["variant"] == "vulkan"},
+                         {"win-vulkan", "linux-deb-vulkan", "linux-appimage-vulkan"})
+
+        with self.assertRaisesRegex(RuntimeError, "unexpired artifact"):
+            select_artifacts(artifacts[:-1], jobs)
+        jobs[-1]["conclusion"] = "skipped"
+        with self.assertRaisesRegex(RuntimeError, "Inconsistent Vulkan"):
+            select_artifacts(artifacts, jobs)
+        jobs[0]["conclusion"] = "skipped"
+        self.assertEqual(len(package_matrix(select_artifacts(artifacts[:len(standard)], jobs))), 6)
+        with self.assertRaisesRegex(RuntimeError, "Unexpected Vulkan"):
+            select_artifacts(artifacts, jobs)
+
     def test_receipts_require_same_candidate_and_six_distinct_paths(self):
         sha = "a" * 40
         identity = {"release_tag": "v0.10.104-rc2", "build_workflow_sha": "c" * 40, "build_attempt": "1",
@@ -316,6 +339,20 @@ class PackagedVersionContract(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 accept(root, "0.10.104", sha, "123", identity)
 
+            for path, receipt in originals.items():
+                path.write_text(json.dumps(receipt))
+            identity["artifacts"].update({"windows-x86_64-vulkan": "20", "linux-vulkan": "21"})
+            for case in package_matrix(identity["artifacts"]):
+                if case["variant"] == "vulkan":
+                    original = originals[root / f'{case["platform"]}.json']
+                    variant = dict(original, package_variant="vulkan",
+                                   artifact_id=identity["artifacts"][case["artifact"]])
+                    (root / f'{case["case"]}.json').write_text(json.dumps(variant))
+            self.assertEqual(len(accept(root, "0.10.104", sha, "123", identity)), 9)
+            (root / "linux-appimage-vulkan.json").unlink()
+            with self.assertRaisesRegex(RuntimeError, "Expected 9 receipts"):
+                accept(root, "0.10.104", sha, "123", identity)
+
 
 @unittest.skipUnless(os.name == 'nt', 'Requires real Windows cmd.exe')
 class WindowsCommandContract(unittest.TestCase):
@@ -358,7 +395,8 @@ class ProducerFailureContract(unittest.TestCase):
         package.write_bytes(b'package identity fixture')
         self.sha = 'a' * 40
         self.args = SimpleNamespace(
-            package=package, app=None, platform='mac', version='0.10.104', source_sha=self.sha,
+            package=package, app=None, platform='mac', package_variant='standard',
+            version='0.10.104', source_sha=self.sha,
             release_tag='v0.10.104-rc2', build_run_id='123', build_workflow_sha='c' * 40,
             build_attempt='1', artifact_id='1', work=root/'work', receipt=root/'receipt.json',
         )

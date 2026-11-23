@@ -28,7 +28,6 @@ on:
       - scripts/test_verify_packaged_desktop.py
       - scripts/install_desktop_version_runtime.py
       - scripts/test_install_desktop_version_runtime.py
-      - scripts/desktop_version_receipts.py
 
 permissions:
   contents: read
@@ -82,6 +81,7 @@ jobs:
       build_workflow_sha: ${{ steps.identity.outputs.build_workflow_sha }}
       build_attempt: ${{ steps.identity.outputs.build_attempt }}
       artifacts: ${{ steps.identity.outputs.artifacts }}
+      packages: ${{ steps.identity.outputs.packages }}
     steps:
       - uses: actions/checkout@v4
       - id: identity
@@ -96,7 +96,7 @@ jobs:
           python3 - <<'PY'
           import json, os, re, subprocess, sys
           sys.path.insert(0, 'scripts')
-          from desktop_version_receipts import validate_build_identity
+          from desktop_version_receipts import package_matrix, select_artifacts, validate_build_identity
           env = os.environ
           assert re.fullmatch(r'[1-9][0-9]*', env['BUILD_RUN_ID'])
           match = re.fullmatch(r'v([0-9]+\.[0-9]+\.[0-9]+)(?:-rc[1-9][0-9]*)?', env['RELEASE_TAG'])
@@ -121,20 +121,14 @@ jobs:
           if tools_tag is not None:
               ancestry = api(f"repos/{repo}/compare/{tools['sha']}...main")
               assert ancestry['merge_base_commit']['sha'] == tools['sha'], 'Tools repair is not merged main'
-          jobs = None
-          if run['conclusion'] != 'success':
-              inventory = api(f'repos/{repo}/actions/runs/{run["id"]}/attempts/{run["run_attempt"]}/jobs?per_page=100')
-              assert inventory['total_count'] == len(inventory['jobs']), 'Incomplete producer job inventory'
-              jobs = inventory['jobs']
+          inventory = api(f'repos/{repo}/actions/runs/{run["id"]}/attempts/{run["run_attempt"]}/jobs?per_page=100')
+          assert inventory['total_count'] == len(inventory['jobs']), 'Incomplete producer job inventory'
+          jobs = inventory['jobs']
           validate_build_identity(run, env['RELEASE_TAG'], tools['sha'], jobs=jobs, tools_tag=tools_tag)
           source = api(f'repos/nowledge-co/mem/commits/{env["RELEASE_TAG"]}', env['MEM_READ_TOKEN'])
           assert source['sha'] == env['SOURCE_SHA']
           artifacts = api(f'repos/{repo}/actions/runs/{env["BUILD_RUN_ID"]}/artifacts?per_page=100')['artifacts']
-          selected = {}
-          for name in ('macos-arm64', 'macos-x86_64', 'windows-x86_64', 'linux-deb-appimage', 'linux-rpm'):
-              matches = [a for a in artifacts if a['name'] == name and not a['expired']]
-              assert len(matches) == 1, name
-              selected[name] = str(matches[0]['id'])
+          selected = select_artifacts(artifacts, jobs)
           identity = {'run': run, 'jobs': jobs, 'artifacts': artifacts,
                       'source_sha': env['SOURCE_SHA'], 'release_tag': env['RELEASE_TAG'], 'tools_tag': tools_ref}
           open('desktop-build-identity.json', 'w').write(json.dumps(identity, indent=2) + '\n')
@@ -143,6 +137,7 @@ jobs:
               output.write(f'build_workflow_sha={run["head_sha"]}\n')
               output.write(f'build_attempt={run["run_attempt"]}\n')
               output.write(f'artifacts={json.dumps(selected)}\n')
+              output.write(f'packages={json.dumps(package_matrix(selected))}\n')
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -155,35 +150,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: mac
-            runner: macos-15
-            artifact: macos-arm64
-            extension: dmg
-          - platform: mac_intel
-            runner: macos-15-intel
-            artifact: macos-x86_64
-            extension: dmg
-          - platform: win
-            runner: windows-2022
-            artifact: windows-x86_64
-            extension: exe
-          - platform: linux-deb
-            runner: ubuntu-22.04
-            artifact: linux-deb-appimage
-            extension: deb
-          - platform: linux-appimage
-            runner: ubuntu-22.04
-            artifact: linux-deb-appimage
-            extension: AppImage
-          - platform: linux-rpm
-            runner: ubuntu-22.04
-            artifact: linux-rpm
-            extension: rpm
+        include: ${{ fromJSON(needs.identity.outputs.packages) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     env:
       VERIFY_PLATFORM: ${{ matrix.platform }}
+      VERIFY_CASE: ${{ matrix.case }}
+      PACKAGE_VARIANT: ${{ matrix.variant }}
       VERIFY_VERSION: ${{ needs.identity.outputs.version }}
       SOURCE_SHA: ${{ inputs.source_sha }}
       BUILD_RUN_ID: ${{ inputs.build_run_id }}
@@ -213,7 +186,10 @@ jobs:
           packages = list(Path('packages').rglob('*.' + os.environ['PACKAGE_EXTENSION']))
           assert len(packages) == 1, packages
           package = packages[0].resolve()
-          assert os.environ['VERIFY_VERSION'] in package.name
+          vulkan = os.environ['PACKAGE_VARIANT'] == 'vulkan'
+          version = os.environ['RELEASE_TAG'][1:] if vulkan else os.environ['VERIFY_VERSION']
+          assert version in package.name
+          assert ('-vulkan' in package.name.lower()) == vulkan
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'path={package}\n')
           PY
@@ -224,7 +200,14 @@ jobs:
         run: |
           set -euo pipefail
           sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT python3 scripts/install_desktop_version_runtime.py \
-            --platform "$VERIFY_PLATFORM" --package "$PACKAGE"
+            --platform "$VERIFY_PLATFORM" --package "$PACKAGE" --package-variant "$PACKAGE_VARIANT"
+      - name: Install Windows Vulkan runtime
+        if: matrix.platform == 'win' && matrix.variant == 'vulkan'
+        uses: jakoch/install-vulkan-sdk-action@v1.2.5
+        with:
+          vulkan_version: 1.3.290.0
+          install_runtime: true
+          cache: true
       - name: Install original NSIS package
         if: matrix.platform == 'win'
         env:
@@ -247,10 +230,10 @@ jobs:
         run: |
           set -euo pipefail
           args=(--package "$PACKAGE" --platform "$VERIFY_PLATFORM" --version "$VERIFY_VERSION"
-                --source-sha "$SOURCE_SHA" --build-run-id "$BUILD_RUN_ID"
+                --package-variant "$PACKAGE_VARIANT" --source-sha "$SOURCE_SHA" --build-run-id "$BUILD_RUN_ID"
                 --release-tag "$RELEASE_TAG" --build-workflow-sha "$BUILD_WORKFLOW_SHA"
                 --build-attempt "$BUILD_ATTEMPT" --artifact-id "$ARTIFACT_ID"
-                --work "$RUNNER_TEMP/version-e2e" --receipt "receipts/$VERIFY_PLATFORM.json")
+                --work "$RUNNER_TEMP/version-e2e" --receipt "receipts/$VERIFY_CASE.json")
           case "$VERIFY_PLATFORM" in
             win) args+=(--app "$RUNNER_TEMP/version-e2e-install/nowledge-mem.exe") ;;
             linux-deb) args+=(--app /usr/bin/nowledge-mem) ;;
@@ -285,7 +268,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: version-e2e-${{ matrix.platform }}
+          name: version-e2e-${{ matrix.case }}
           path: |
             receipts/*.json
             ${{ runner.temp }}/version-e2e/app.log

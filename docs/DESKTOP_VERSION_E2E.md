@@ -7,8 +7,11 @@ acceptance workflow: it does not build replacements, publish packages, promote
 GA, or change the update authority.
 
 The workflow downloads the original artifacts from that run and requires all
-six packaging paths: ARM DMG, Intel DMG, NSIS, DEB, AppImage, and RPM. It copies
-the complete signed App from each DMG, installs original NSIS/DEB/RPM packages,
+six standard packaging paths: ARM DMG, Intel DMG, NSIS, DEB, AppImage, and RPM.
+When both Vulkan producer jobs run, it also requires the original Vulkan NSIS,
+DEB, and AppImage. A missing Vulkan artifact or a mixed pair of producer
+outcomes fails acceptance. It copies the complete signed App from each DMG,
+installs original NSIS/DEB/RPM packages,
 and uses AppImage's extracted AppRun with its original APPIMAGE/APPDIR identity.
 RPM executes as an unprivileged user on Fedora; each other case uses a fresh
 native hosted runner. Do not run the verifier against a developer profile.
@@ -42,7 +45,8 @@ requires its DisplayVersion, product name and executable identity to agree.
 Any install, launch, timeout, nonzero exit, malformed response, wrong identity,
 or absent CLI fails acceptance. Successful receipts include package SHA-256,
 build run ID, source SHA, actual execution paths, and observed outputs. The
-aggregate job requires six distinct successful receipts for the same candidate.
+aggregate job requires distinct successful receipts for all selected package paths
+from the same candidate.
 Parser/aggregate contract tests are not native artifact proof.
 
 The RC is not qualified while the workflow is pending or failed. Preserve its
