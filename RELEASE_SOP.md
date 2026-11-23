@@ -482,6 +482,34 @@ Publish the GitHub Release only after the intended asset set is present. If the
 core release is announced while RPM remains pending, state that RPM availability
 is pending and send a completion update after its promotion verifies.
 
+### 6.3 Distribute the accepted mobile packages
+
+For an App GA, have the original successful build-only iOS and Android run for
+the accepted RC ready before promotion. Once the public Changelog is verified,
+the RC is qualified, and the Mem GA tag resolves to the accepted RC source,
+dispatch the mobile promotion with the original producer identity:
+
+```bash
+gh workflow run promote-mobile-to-ga.yml -R wey-gu/mem-releases \
+  --ref <reviewed-release-tools-ref> \
+  -f rc_tag=<version>-rcN \
+  -f ga_tag=<version> \
+  -f source_sha=<exact-mem-sha> \
+  -f source_run=<original-signed-build-run-id> \
+  -f tools_sha=<original-producer-tools-sha> \
+  -f operation_id=<persisted-uuid>
+```
+
+GA mobile promotion defaults to `publish=true` and `distribute=true`. Pass
+`-f publish=false` for read-only admission. The separate RC build uses
+`publish=false` and `distribute=false` to retain signed originals.
+
+Read back the iOS build and external TestFlight group after submission. Record
+Apple's Beta App Review status separately from upload and submission. Verify
+the public Android APK bytes against the original SHA-256 before setting the
+community Release as latest. Read back the latest APK route and record both
+distribution outcomes in the GA release record.
+
 ## 7. Finalize only the website publication date
 
 After publishing the stable GitHub Release, run this from mem-releases using
