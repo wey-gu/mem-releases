@@ -47,6 +47,15 @@ def command(argv, *, env=None, cwd=None, timeout=30):
     return result.stdout.strip()
 
 
+def verify_source_checkout(checkout, tag, expected_sha):
+    require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-rc[1-9][0-9]*)?", tag) is not None,
+            "Invalid Mem release tag")
+    require(re.fullmatch(r"[0-9a-f]{40}", expected_sha) is not None, "Invalid Mem source SHA")
+    tagged = command(["git", "-C", checkout, "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"])
+    head = command(["git", "-C", checkout, "rev-parse", "--verify", "HEAD^{commit}"])
+    require(tagged == head == expected_sha, "Mem source tag or checkout mismatch")
+
+
 def exact_version(output, program, expected):
     first_line = output.splitlines()[0] if output else ""
     if program != "nmem-server":

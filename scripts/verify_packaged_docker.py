@@ -10,7 +10,7 @@ import re
 import subprocess
 import uuid
 
-from verify_packaged_desktop import command, exact_version, require, validate_server_output
+from verify_packaged_desktop import command, exact_version, require, validate_server_output, verify_source_checkout
 
 
 REPOSITORY = "wey-gu/mem-releases"
@@ -122,8 +122,7 @@ def identity(args):
     run = api(f"repos/{REPOSITORY}/actions/runs/{args.build_run_id}")
     tools = resolve_tools(args.release_tag, args.build_tools_tag or None)
     validate_producer(run, args.release_tag, tools["sha"], tools_tag=args.build_tools_tag or None)
-    source = api(f"repos/nowledge-co/mem/commits/{args.release_tag}", source=True)
-    require(source["sha"] == args.source_sha, "Mem source tag mismatch")
+    verify_source_checkout(args.source_checkout, args.release_tag, args.source_sha)
     jobs = api(f"repos/{REPOSITORY}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100")
     require(jobs["total_count"] == len(jobs["jobs"]), "Producer jobs pagination required")
     required = ["meta"]
@@ -340,6 +339,7 @@ def main():
     producer.add_argument("--release-tag", required=True)
     producer.add_argument("--build-tools-tag", default="")
     producer.add_argument("--source-sha", required=True)
+    producer.add_argument("--source-checkout", type=Path, required=True)
     producer.add_argument("--variant", required=True, choices=ARCHES)
     producer.add_argument("--digest", required=True)
     native = sub.add_parser("probe")

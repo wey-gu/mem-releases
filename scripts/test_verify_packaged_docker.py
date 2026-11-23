@@ -236,15 +236,29 @@ class NativeBoundary(unittest.TestCase):
         self.assertNotIn("cuda_runtime", json.loads(self.receipt.read_text()))
 
     def test_real_gh_command_captures_escaped_logs_and_binds_digest(self):
+        checkout = self.root / "candidate-source"
+        checkout.mkdir()
+
+        def git(*args):
+            return verify.command(["git", "-C", checkout, *args])
+
+        git("init", "-q")
+        git("config", "user.email", "release-test@example.invalid")
+        git("config", "user.name", "Release Test")
+        git("commit", "--allow-empty", "-qm", "Frozen source")
+        git("tag", IDENTITY["release_tag"])
+        source_sha = git("rev-parse", "HEAD")
         env = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ["PATH"],
-                   FIXTURE_ROOT=str(self.root), FIXTURE_ARCH=self.arch, MEM_READ_TOKEN="fixture-token")
+                   FIXTURE_ROOT=str(self.root), FIXTURE_ARCH=self.arch)
         argv = [sys.executable, verify.__file__, "identity", "--build-run-id", "123",
-                "--release-tag", IDENTITY["release_tag"], "--source-sha", SOURCE,
-                "--variant", "cpu", "--digest", INDEX, "--output", str(self.receipt)]
+                "--release-tag", IDENTITY["release_tag"], "--source-sha", source_sha,
+                "--source-checkout", str(checkout), "--variant", "cpu", "--digest", INDEX,
+                "--output", str(self.receipt)]
         result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         result_identity = json.loads(self.receipt.read_text())
         self.assertEqual(result_identity["digest"], INDEX)
+        self.assertEqual(result_identity["source_sha"], source_sha)
         self.receipt.unlink()
         env["FIXTURE_PUBLISHED_DIGEST"] = "sha256:" + "0" * 64
         result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30)
@@ -348,17 +362,16 @@ class ToolsRecovery(unittest.TestCase):
     def test_vulkan_identity_binds_recovery_producer_digest_and_source(self):
         ref = "release-tools/0.10.104-rc2-r2"
         args = SimpleNamespace(build_run_id=123, release_tag=IDENTITY["release_tag"],
-                               source_sha=SOURCE, digest=INDEX, variant="vulkan", build_tools_tag=ref)
+                               source_sha=SOURCE, source_checkout=Path("candidate-source"),
+                               digest=INDEX, variant="vulkan", build_tools_tag=ref)
         run = dict(id=123, run_attempt=1, repository=dict(full_name=verify.REPOSITORY),
                    path=".github/workflows/release-docker.yml", event="workflow_dispatch",
                    head_branch=ref, head_sha=TOOLS, status="completed", conclusion="success")
 
-        def responses(*, source_sha=SOURCE, digest=INDEX, conclusion="success"):
+        def responses(*, digest=INDEX, conclusion="success"):
             def api(path, **kwargs):
                 if path.endswith("/actions/runs/123"):
                     return run
-                if "/nowledge-co/mem/commits/" in path:
-                    return dict(sha=source_sha)
                 if "/attempts/1/jobs?" in path:
                     jobs = [dict(id=1, name="meta", status="completed", conclusion="success"),
                             dict(id=2, name="build-vulkan", status="completed", conclusion=conclusion)]
@@ -369,17 +382,25 @@ class ToolsRecovery(unittest.TestCase):
             return api
 
         with patch.object(verify, "resolve_tools", return_value=dict(sha=TOOLS)), \
-                patch.object(verify, "api", side_effect=responses()):
+                patch.object(verify, "api", side_effect=responses()), \
+                patch.object(verify, "verify_source_checkout") as checkout:
             identity = verify.identity(args)
+            checkout.assert_called_once_with(args.source_checkout, args.release_tag, SOURCE)
             self.assertEqual(identity["build_tools_tag"], ref)
             self.assertEqual(identity["required_job_ids"], {"meta": 1, "build-vulkan": 2})
-        for changed in (dict(source_sha="0" * 40), dict(digest="sha256:" + "0" * 64),
+        for changed in (dict(digest="sha256:" + "0" * 64),
                         dict(conclusion="failure")):
             with self.subTest(changed=changed), \
                     patch.object(verify, "resolve_tools", return_value=dict(sha=TOOLS)), \
                     patch.object(verify, "api", side_effect=responses(**changed)), \
+                    patch.object(verify, "verify_source_checkout"), \
                     self.assertRaises(RuntimeError):
                 verify.identity(args)
+        with patch.object(verify, "resolve_tools", return_value=dict(sha=TOOLS)), \
+                patch.object(verify, "api", side_effect=responses()), \
+                patch.object(verify, "verify_source_checkout", side_effect=RuntimeError("Mem source tag mismatch")), \
+                self.assertRaisesRegex(RuntimeError, "Mem source tag mismatch"):
+            verify.identity(args)
         with patch.object(verify, "api") as api, self.assertRaises(RuntimeError):
             verify.identity(SimpleNamespace(**(vars(args) | dict(variant="cuda"))))
         api.assert_not_called()
