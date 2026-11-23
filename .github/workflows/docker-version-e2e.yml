@@ -64,10 +64,18 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the exact Mem release tag
+        uses: actions/checkout@v4
+        with:
+          repository: nowledge-co/mem
+          ref: refs/tags/${{ inputs.release_tag }}
+          token: ${{ secrets.MEM_REPO_TOKEN }}
+          path: candidate-source
+          sparse-checkout: .github
+          persist-credentials: false
       - name: Bind the original producer and publication digest
         env:
           GH_TOKEN: ${{ github.token }}
-          MEM_READ_TOKEN: ${{ secrets.MEM_REPO_TOKEN }}
           BUILD_RUN_ID: ${{ inputs.build_run_id }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           SOURCE_SHA: ${{ inputs.source_sha }}
@@ -76,7 +84,8 @@ jobs:
           BUILD_TOOLS_TAG: ${{ inputs.build_tools_tag }}
         run: |
           python scripts/verify_packaged_docker.py identity --build-run-id "$BUILD_RUN_ID" \
-            --release-tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA" --variant "$VARIANT" \
+            --release-tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA" --source-checkout candidate-source \
+            --variant "$VARIANT" \
             --digest "$DIGEST" --build-tools-tag "$BUILD_TOOLS_TAG" --output identity.json
       - id: matrix
         env:

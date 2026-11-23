@@ -439,5 +439,32 @@ class ProducerFailureContract(unittest.TestCase):
         self.assertFalse(self.args.receipt.exists())
 
 
+class SourceCheckoutTests(unittest.TestCase):
+    def test_source_checkout_requires_the_exact_tag_and_head(self):
+        from verify_packaged_desktop import command, verify_source_checkout
+
+        release_tag = "v0.10.123-rc2"
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            def git(*args):
+                return command(["git", "-C", checkout, *args])
+
+            git("init", "-q")
+            git("config", "user.email", "release-test@example.invalid")
+            git("config", "user.name", "Release Test")
+            git("commit", "--allow-empty", "-qm", "Frozen source")
+            expected = git("rev-parse", "HEAD")
+            git("branch", release_tag)
+            with self.assertRaises(subprocess.CalledProcessError):
+                verify_source_checkout(checkout, release_tag, expected)
+            git("tag", "-am", "Release candidate", release_tag)
+            verify_source_checkout(checkout, release_tag, expected)
+            with self.assertRaisesRegex(RuntimeError, "Mem source tag or checkout mismatch"):
+                verify_source_checkout(checkout, release_tag, "a" * 40)
+            git("commit", "--allow-empty", "-qm", "Unrelated source")
+            with self.assertRaisesRegex(RuntimeError, "Mem source tag or checkout mismatch"):
+                verify_source_checkout(checkout, release_tag, expected)
+
+
 if __name__ == "__main__":
     unittest.main()
