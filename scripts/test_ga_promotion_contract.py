@@ -114,6 +114,15 @@ def fake_tools(test, registry):
 
 
 class GAPromotionContractTest(unittest.TestCase):
+    def test_mobile_upload_defaults_apply_only_to_ga_promotion(self):
+        import yaml
+
+        ga = yaml.safe_load(workflow_text("promote-mobile-to-ga.yml"))[True]["workflow_dispatch"]["inputs"]
+        build = yaml.safe_load(workflow_text("release-mobile.yml"))[True]["workflow_dispatch"]["inputs"]
+        self.assertIs(ga["publish"]["default"], True)
+        self.assertIs(ga["distribute"]["default"], True)
+        self.assertIs(build["publish"]["default"], False)
+
     def test_release_bundle_commands_select_public_production_channel(self):
         for name, expected_bash, expected_powershell in (
             ("release-desktop.yml", 4, 2),

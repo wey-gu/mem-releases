@@ -28,9 +28,9 @@ on:
         required: true
         type: string
       publish:
-        description: "Upload the exact validated bytes; false is read-only validation"
+        description: "Publish the exact validated GA packages. Disable for read-only validation."
         type: boolean
-        default: false
+        default: true
       distribute:
         description: "Wait for processing and submit/attach TestFlight; cannot grant Apple approval"
         type: boolean
