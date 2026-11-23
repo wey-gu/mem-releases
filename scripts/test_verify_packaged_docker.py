@@ -236,15 +236,29 @@ class NativeBoundary(unittest.TestCase):
         self.assertNotIn("cuda_runtime", json.loads(self.receipt.read_text()))
 
     def test_real_gh_command_captures_escaped_logs_and_binds_digest(self):
+        checkout = self.root / "candidate-source"
+        checkout.mkdir()
+
+        def git(*args):
+            return verify.command(["git", "-C", checkout, *args])
+
+        git("init", "-q")
+        git("config", "user.email", "release-test@example.invalid")
+        git("config", "user.name", "Release Test")
+        git("commit", "--allow-empty", "-qm", "Frozen source")
+        git("tag", IDENTITY["release_tag"])
+        source_sha = git("rev-parse", "HEAD")
         env = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ["PATH"],
-                   FIXTURE_ROOT=str(self.root), FIXTURE_ARCH=self.arch, MEM_READ_TOKEN="fixture-token")
+                   FIXTURE_ROOT=str(self.root), FIXTURE_ARCH=self.arch)
         argv = [sys.executable, verify.__file__, "identity", "--build-run-id", "123",
-                "--release-tag", IDENTITY["release_tag"], "--source-sha", SOURCE,
-                "--variant", "cpu", "--digest", INDEX, "--output", str(self.receipt)]
+                "--release-tag", IDENTITY["release_tag"], "--source-sha", source_sha,
+                "--source-checkout", str(checkout), "--variant", "cpu", "--digest", INDEX,
+                "--output", str(self.receipt)]
         result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         result_identity = json.loads(self.receipt.read_text())
         self.assertEqual(result_identity["digest"], INDEX)
+        self.assertEqual(result_identity["source_sha"], source_sha)
         self.receipt.unlink()
         env["FIXTURE_PUBLISHED_DIGEST"] = "sha256:" + "0" * 64
         result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30)
