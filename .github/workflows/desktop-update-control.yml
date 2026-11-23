@@ -179,7 +179,7 @@ jobs:
           set -euo pipefail
           gh release view "v${GA}" --repo "$REPO" \
             --json isDraft,isPrerelease,assets > /tmp/ga-release.json
-          jq -e '.isDraft == true and .isPrerelease == false and (.assets | length) == 6' \
+          jq -e '.isDraft == true and .isPrerelease == false' \
             /tmp/ga-release.json >/dev/null
           node scripts/build-desktop-update-manifest.mjs \
             --version "$GA" \

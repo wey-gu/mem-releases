@@ -72,13 +72,15 @@ def runtime_dns(*, run=subprocess.run, hosted=None):
         print('Original runner DNS restored and read back', flush=True)
 
 
-def install_runtime(surface, package=None, *, release=None, keyring=KEYRING,
-                    run=subprocess.run, dns_context=runtime_dns):
-    if surface not in {'linux-deb', 'linux-appimage'}:
-        raise ValueError('Only the Ubuntu DEB and AppImage acceptance lanes are supported')
+def install_runtime(surface, package=None, *, package_variant="standard",
+                    release=None, keyring=KEYRING, run=subprocess.run, dns_context=runtime_dns):
     release = platform.freedesktop_os_release() if release is None else release
-    if release.get('ID') != 'ubuntu' or release.get('VERSION_ID') != '22.04':
-        raise ValueError('Native acceptance dependencies require Ubuntu 22.04')
+    version, suite, packages = {
+        'standard': ('22.04', 'jammy', PACKAGES),
+        'vulkan': ('24.04', 'noble', (*PACKAGES[:-1], 'libfuse2t64', 'libvulkan1')),
+    }[package_variant]
+    if release.get('ID') != 'ubuntu' or release.get('VERSION_ID') != version:
+        raise ValueError(f'Native acceptance for {package_variant} requires Ubuntu {version}')
     if not keyring.is_file():
         raise ValueError('The installed Ubuntu archive signing keyring is required')
     if surface == 'linux-deb':
@@ -97,12 +99,12 @@ def install_runtime(surface, package=None, *, release=None, keyring=KEYRING,
         components = 'main restricted universe multiverse'
         # Do not inherit the runner's Azure mirror or stale package lists.
         source.write_text(''.join(
-            f'deb [signed-by={keyring}] {origin} {suite} {components}\n'
-            for origin, suite in [
-                ('https://archive.ubuntu.com/ubuntu', 'jammy'),
-                ('https://archive.ubuntu.com/ubuntu', 'jammy-updates'),
-                ('https://archive.ubuntu.com/ubuntu', 'jammy-backports'),
-                ('https://security.ubuntu.com/ubuntu', 'jammy-security'),
+            f'deb [signed-by={keyring}] {origin} {pocket} {components}\n'
+            for origin, pocket in [
+                ('https://archive.ubuntu.com/ubuntu', suite),
+                ('https://archive.ubuntu.com/ubuntu', f'{suite}-updates'),
+                ('https://archive.ubuntu.com/ubuntu', f'{suite}-backports'),
+                ('https://security.ubuntu.com/ubuntu', f'{suite}-security'),
             ]
         ))
         options = [
@@ -120,7 +122,7 @@ def install_runtime(surface, package=None, *, release=None, keyring=KEYRING,
                 env={**os.environ, 'DEBIAN_FRONTEND': 'noninteractive'})
 
         apt('update', '-qq')
-        apt('install', '-y', *PACKAGES)
+        apt('install', '-y', *packages)
         if surface == 'linux-deb':
             apt('install', '-y', str(package))
 
@@ -130,10 +132,11 @@ def main():
     parser.add_argument('--platform', required=True,
                         choices=['linux-deb', 'linux-appimage'])
     parser.add_argument('--package', type=Path)
+    parser.add_argument('--package-variant', choices=('standard', 'vulkan'), default='standard')
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('Run this dependency installer as root on the disposable CI runner')
-    install_runtime(args.platform, args.package)
+    install_runtime(args.platform, args.package, package_variant=args.package_variant)
 
 
 if __name__ == '__main__':

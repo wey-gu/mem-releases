@@ -78,10 +78,8 @@ jobs:
             echo "::error::v${GA} must exist as a draft release."
             exit 1
           }
-          [[ "$(jq '.assets | length' <<<"$release")" == "6" ]] || {
-            echo "::error::v${GA} must contain all six Desktop package assets."
-            exit 1
-          }
+          node scripts/build-desktop-update-manifest.mjs --assets-only \
+            --version "$GA" --release-json /dev/stdin <<<"$release"
           node scripts/verify-upgrade-pause.mjs
 
       - name: Remove only the APT pause route

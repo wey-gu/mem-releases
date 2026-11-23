@@ -58,6 +58,15 @@ class RuntimeInstallation(unittest.TestCase):
         self.assertNotIn('trusted=yes', self.sources[0])
         self.assertFalse(self.lists[0].exists())
 
+    def test_vulkan_setup_uses_noble_and_the_vulkan_loader(self):
+        self.install('linux-deb', self.package, package_variant='vulkan',
+                     release={'ID': 'ubuntu', 'VERSION_ID': '24.04'})
+        self.assertIn('libvulkan1', self.commands[1])
+        self.assertIn('libfuse2t64', self.commands[1])
+        self.assertIn(' noble-security ', self.sources[0])
+        self.assertNotIn('jammy', self.sources[0])
+        self.assertEqual(self.commands[-1][-1], str(self.package.resolve()))
+
     def test_deb_installs_exact_original_path_as_one_argument(self):
         self.install('linux-deb', self.package)
         self.assertEqual(len(self.commands), 3)

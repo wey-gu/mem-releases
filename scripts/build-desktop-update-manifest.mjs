@@ -16,6 +16,29 @@ function requireCondition(ok, message) {
   if (!ok) throw new Error(message);
 }
 
+export function validateDesktopReleaseAssets(version, release) {
+  requireCondition(/^\d+\.\d+\.\d+$/.test(version || ''), 'Version must be clean semver');
+  requireCondition(Array.isArray(release?.assets), 'Missing GA Release assets');
+  const standardNames = new Set(ARTIFACTS.map(([, assetName]) => assetName(version)));
+  const vulkanNames = new Set(['x64-vulkan-setup.exe', 'amd64-vulkan.deb', 'amd64-vulkan.AppImage']
+    .map((suffix) => `Nowledge.Mem_${version}_${suffix}`));
+  const standard = new Map();
+  const vulkan = new Set();
+  for (const asset of release.assets) {
+    const name = asset.name;
+    requireCondition(!standard.has(name) && !vulkan.has(name), `Duplicate Release asset: ${name}`);
+    if (standardNames.has(name)) {
+      standard.set(name, asset);
+    } else {
+      requireCondition(vulkanNames.has(name), `Unexpected Release asset: ${name}`);
+      vulkan.add(name);
+    }
+  }
+  requireCondition(standard.size === standardNames.size, 'GA Release must contain all six standard assets');
+  requireCondition(vulkan.size === 0 || vulkan.size === vulkanNames.size, 'Incomplete Vulkan asset set');
+  return standard;
+}
+
 function unquoteEtag(value) {
   return String(value || '').replace(/^"|"$/g, '');
 }
@@ -33,15 +56,12 @@ export async function buildDesktopUpdateManifest({
   requireCondition(typeof releaseNotes === 'string' && releaseNotes.length <= 8000,
     'Release notes must be a bounded string');
   requireCondition(Number.isFinite(Date.parse(pubDate || '')), 'Publication date must be ISO-compatible');
-  requireCondition(Array.isArray(release?.assets) && release.assets.length === ARTIFACTS.length,
-    'GA Release must contain exactly six assets');
+  const standardAssets = validateDesktopReleaseAssets(version, release);
 
   const artifacts = {};
   for (const [platform, assetName, target] of ARTIFACTS) {
     const name = assetName(version);
-    const matching = release.assets.filter((asset) => asset.name === name);
-    requireCondition(matching.length === 1, `Expected one Release asset named ${name}`);
-    const asset = matching[0];
+    const asset = standardAssets.get(name);
     const digest = String(asset.digest || '');
     requireCondition(/^sha256:[a-f0-9]{64}$/.test(digest), `Missing SHA-256 digest for ${name}`);
     requireCondition(Number.isSafeInteger(asset.size) && asset.size > 0, `Invalid size for ${name}`);
@@ -71,7 +91,14 @@ async function main() {
     'pub-date': { type: 'string' },
     'release-json': { type: 'string' },
     output: { type: 'string' },
+    'assets-only': { type: 'boolean' },
   } });
+  if (values['assets-only']) {
+    requireCondition(values['release-json'], '--release-json is required');
+    const release = JSON.parse(await readFile(values['release-json'], 'utf8'));
+    validateDesktopReleaseAssets(values.version, release);
+    return;
+  }
   for (const key of ['version', 'source-sha', 'release-notes', 'pub-date', 'release-json', 'output']) {
     requireCondition(values[key], `--${key} is required`);
   }

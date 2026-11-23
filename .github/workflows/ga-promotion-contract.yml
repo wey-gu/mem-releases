@@ -53,6 +53,8 @@ on:
       - scripts/test_remove_desktop_pause_routes.mjs
       - scripts/verify-controlled-desktop-update.mjs
       - scripts/test_verify_controlled_desktop_update.mjs
+      - scripts/build-desktop-update-manifest.mjs
+      - scripts/stage_desktop_ga_assets.py
       - scripts/upload-draft-release-assets.mjs
       - scripts/test_upload_draft_release_assets.mjs
       - scripts/assert-fresh-r2-version.mjs
@@ -118,6 +120,8 @@ on:
       - scripts/test_remove_desktop_pause_routes.mjs
       - scripts/verify-controlled-desktop-update.mjs
       - scripts/test_verify_controlled_desktop_update.mjs
+      - scripts/build-desktop-update-manifest.mjs
+      - scripts/stage_desktop_ga_assets.py
       - scripts/upload-draft-release-assets.mjs
       - scripts/test_upload_draft_release_assets.mjs
       - scripts/assert-fresh-r2-version.mjs

@@ -121,7 +121,7 @@ jobs:
             }
           done
           release="$(gh release view "v${GA}" --repo "$REPO" --json isDraft,isPrerelease,assets)"
-          jq -e '.isDraft == false and .isPrerelease == false and (.assets | length) == 6' \
+          jq -e '.isDraft == false and .isPrerelease == false' \
             <<<"$release" >/dev/null
           printf '%s\n' "$release" > /tmp/ga-release.json
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDesktopUpdateManifest } from './build-desktop-update-manifest.mjs';
+import { buildDesktopUpdateManifest, validateDesktopReleaseAssets } from './build-desktop-update-manifest.mjs';
 import { handleOperatorRequest } from './desktop-update-operator-worker.mjs';
 
 const token = 'a'.repeat(32);
@@ -119,6 +119,38 @@ test('builds a six-platform manifest from matching Release and R2 identities', a
   assert.equal(manifest.artifacts.mac.etag, 'etag');
   assert.equal(manifest.artifacts['linux-rpm'].key,
     'app/0.10.101/x86_64-unknown-linux-gnu.rpm');
+});
+
+test('accepts exactly the manual Vulkan set without adding it to Desktop updates', async () => {
+  const version = '0.10.101';
+  const standard = release(version);
+  const variants = ['x64-vulkan-setup.exe', 'amd64-vulkan.deb', 'amd64-vulkan.AppImage']
+    .map((suffix) => ({ name: `Nowledge.Mem_${version}_${suffix}` }));
+  const headKeys = [];
+  const manifest = await buildDesktopUpdateManifest({
+    version,
+    sourceSha: 'c'.repeat(40),
+    releaseNotes: '',
+    pubDate: '2026-10-12T18:00:00Z',
+    release: { assets: [...standard.assets, ...variants] },
+    headObject: async (key) => {
+      headKeys.push(key);
+      return { ContentLength: 123, ETag: 'etag' };
+    },
+  });
+  assert.equal(headKeys.length, 6);
+  assert.ok(headKeys.every((key) => !key.includes('vulkan')));
+  assert.equal(Object.keys(manifest.artifacts).length, 6);
+
+  const invalid = [
+    [[...standard.assets, variants[0]], /Incomplete Vulkan/],
+    [[...standard.assets, ...variants, variants[0]], /Duplicate Release asset/],
+    [[...standard.assets.slice(1), ...variants], /all six standard assets/],
+    [[...standard.assets, { name: 'other.exe' }], /Unexpected Release asset/],
+  ];
+  for (const [assets, error] of invalid) {
+    assert.throws(() => validateDesktopReleaseAssets(version, { assets }), error);
+  }
 });
 
 test('rejects a Release-to-R2 size mismatch', async () => {
