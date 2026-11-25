@@ -1630,7 +1630,9 @@ class HostedCargoResolutionContract(unittest.TestCase):
             rustup = binary / "rustup"
             rustup.write_text('#!/bin/sh\nif [ "$1" = which ]; then printf "%s\\n" "' + str(cargo) + '"; fi\n')
             rustup.chmod(0o755)
-            env = dict(os.environ, HOME=str(home), PATH=str(binary) + ":/usr/bin:/bin")
+            # The preceding source setup action exports this for the workaround.
+            env = dict(os.environ, HOME=str(home), PATH=str(binary) + ":/usr/bin:/bin",
+                       RUSTUP_TOOLCHAIN="1.99.1")
             self.assertFalse((home / ".cargo/bin").exists())
             good = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
             self.assertEqual(good.returncode, 0, good.stdout + good.stderr)
