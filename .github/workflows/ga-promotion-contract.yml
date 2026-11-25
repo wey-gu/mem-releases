@@ -30,6 +30,7 @@ on:
       - scripts/select-macos-runner.mjs
       - scripts/test_select_macos_runner.mjs
       - scripts/test_ga_promotion_contract.py
+      - scripts/test_pdfium_source_compat.ps1
       - scripts/verify-ga-delivery.mjs
       - scripts/test_verify_ga_delivery.mjs
       - scripts/publish-apt-landing.mjs
@@ -96,6 +97,7 @@ on:
       - scripts/select-macos-runner.mjs
       - scripts/test_select_macos_runner.mjs
       - scripts/test_ga_promotion_contract.py
+      - scripts/test_pdfium_source_compat.ps1
       - scripts/verify-ga-delivery.mjs
       - scripts/test_verify_ga_delivery.mjs
       - scripts/publish-apt-landing.mjs
@@ -137,6 +139,17 @@ permissions:
   contents: read
 
 jobs:
+  pdfium-source-compat:
+    runs-on: windows-2022
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Exercise the actual PDFium source compatibility step
+        shell: pwsh
+        run: ./scripts/test_pdfium_source_compat.ps1
+
   contract:
     runs-on: ubuntu-22.04
     steps:
