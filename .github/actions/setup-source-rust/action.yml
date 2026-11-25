@@ -1,0 +1,24 @@
+name: Set up source-pinned Rust
+description: Install and select the checked-out source compiler before builds and cache keys.
+inputs:
+  targets:
+    description: Additional Rust targets for this build.
+    required: false
+    default: ""
+  components:
+    description: Additional Rust components for this build.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - id: source
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/source-toolchain.sh" select "$GITHUB_WORKSPACE"
+    - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      with:
+        toolchain: ${{ steps.source.outputs.channel }}
+        targets: ${{ inputs.targets }}
+        components: ${{ inputs.components }}
+    - shell: bash
+      run: bash "$GITHUB_ACTION_PATH/source-toolchain.sh" verify "$GITHUB_WORKSPACE"

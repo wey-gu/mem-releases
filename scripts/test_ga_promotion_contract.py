@@ -1741,3 +1741,86 @@ class SccacheVersionPinTest(unittest.TestCase):
                 self.assertIsNotNone(found, f"{path.name}: sccache-action without a pinned version")
                 versions.add(found.group(1))
         self.assertEqual(len(versions), 1, versions)
+
+
+class SourcePinnedRustSelectionTest(unittest.TestCase):
+    script = ROOT / ".github/actions/setup-source-rust/source-toolchain.sh"
+
+    def fixture(self, root, channel, helper_exit=None):
+        root.joinpath("rust-toolchain.toml").write_text(
+            '[toolchain]\nchannel = ' + json.dumps(channel) + '\n')
+        if helper_exit is not None:
+            root.joinpath("rust-toolchain-version.txt").write_text("source identity\n")
+            helper = root / "bazel/release/install-rust-toolchain.sh"
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.write_text(
+                '#!/bin/bash\nset -eu\ntest "$(cd "$1" && pwd -P)" = "$(pwd -P)"\n'
+                'printf "%s" "$RUSTUP_TOOLCHAIN" > verified-channel.txt\n'
+                'exit ' + str(helper_exit) + '\n')
+
+    def run_script(self, root, operation):
+        env = dict(os.environ, RUSTUP_TOOLCHAIN="nightly-2026-11-25",
+                   GITHUB_ENV=str(root / "env"), GITHUB_OUTPUT=str(root / "output"))
+        env["PATH"] = str(root / "bin") + os.pathsep + env["PATH"]
+        return subprocess.run(["bash", str(self.script), operation, str(root)],
+                              cwd=root, env=env, capture_output=True, text=True, timeout=10)
+
+    def test_source_channel_overrides_workflow_bootstrap_and_preserves_legacy_refs(self):
+        for channel in ("1.99.1", "1.98.1", "nightly-2026-11-25", None):
+            with self.subTest(channel=channel), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                if channel:
+                    self.fixture(root, channel, 0 if channel.startswith("nightly-") else None)
+                result = self.run_script(root, "select")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                selected = channel or "1.99.1"
+                self.assertEqual(root.joinpath("env").read_text(),
+                                 "RUSTUP_TOOLCHAIN=" + selected + "\n")
+                self.assertEqual(root.joinpath("output").read_text(),
+                                 "channel=" + selected + "\n")
+                if channel and channel.startswith("nightly-"):
+                    verified = self.run_script(root, "verify")
+                    self.assertEqual(verified.returncode, 0, verified.stderr)
+                    self.assertEqual(root.joinpath("verified-channel.txt").read_text(), channel)
+
+    def test_partial_or_invalid_source_pins_refuse_before_installation(self):
+        for state in ("identity-only", "helper-only", "nightly-without-identity", "rolling", "duplicate", "other-section"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.fixture(root, "nightly-2026-11-25", 0)
+                if state == "identity-only":
+                    root.joinpath("bazel/release/install-rust-toolchain.sh").unlink()
+                elif state == "helper-only":
+                    root.joinpath("rust-toolchain-version.txt").unlink()
+                elif state == "nightly-without-identity":
+                    root.joinpath("bazel/release/install-rust-toolchain.sh").unlink()
+                    root.joinpath("rust-toolchain-version.txt").unlink()
+                elif state == "rolling":
+                    root.joinpath("rust-toolchain.toml").write_text('[toolchain]\nchannel = "nightly"\n')
+                elif state == "duplicate":
+                    with root.joinpath("rust-toolchain.toml").open("a") as file:
+                        file.write('channel = "1.99.1"\n')
+                else:
+                    root.joinpath("rust-toolchain.toml").write_text('[other]\nchannel = "1.99.1"\n')
+                result = self.run_script(root, "select")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertFalse(root.joinpath("env").exists(), "invalid source was admitted")
+                self.assertFalse(root.joinpath("verified-channel.txt").exists())
+
+    def test_source_verification_failure_and_wrong_legacy_compiler_are_terminal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, "nightly-2026-11-25", 7)
+            result = self.run_script(root, "verify")
+            self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+            self.assertEqual(root.joinpath("verified-channel.txt").read_text(), "nightly-2026-11-25")
+        for installed, expected_exit in (("1.99.1", 0), ("1.102.0-nightly", 1)):
+            with self.subTest(installed=installed), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.fixture(root, "1.99.1")
+                compiler = root / "bin/rustc"
+                compiler.parent.mkdir()
+                compiler.write_text('#!/bin/sh\nprintf "release: ' + installed + '\\n"\n')
+                compiler.chmod(0o700)
+                result = self.run_script(root, "verify")
+                self.assertEqual(result.returncode, expected_exit, result.stdout + result.stderr)

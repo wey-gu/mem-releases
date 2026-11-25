@@ -15,6 +15,7 @@ on:
       - .github/workflows/rpm-test.yml
       - .github/workflows/macos-self-hosted-bench.yml
       - .github/workflows/release-mobile.yml
+      - .github/actions/setup-source-rust/**
       - .github/workflows/promote-rpm-to-ga.yml
       - .github/workflows/promote-apt-to-ga.yml
       - .github/workflows/repair-apt-pool.yml
@@ -80,6 +81,7 @@ on:
       - .github/workflows/rpm-test.yml
       - .github/workflows/macos-self-hosted-bench.yml
       - .github/workflows/release-mobile.yml
+      - .github/actions/setup-source-rust/**
       - .github/workflows/promote-rpm-to-ga.yml
       - .github/workflows/promote-apt-to-ga.yml
       - .github/workflows/repair-apt-pool.yml
