@@ -1382,17 +1382,47 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
                                      ("workflow_dispatch", "0.10.102", False), ("push", None, False),
                                      ("repository_dispatch", None, False)):
             self.assertEqual(github_expr(report_if, {"github.event_name": event, "inputs.tag": tag, "inputs.windows_only": False,
+                                                    "inputs.windows_runner_probe": False, "inputs.windows_cache_benchmark": False,
                                                     "github.ref": "refs/heads/main"}),
                              expected, (event, tag))
         self.assertEqual(self.jobs["nightly-report"]["permissions"], {"issues": "write"})
 
     def test_candidate_workflow_build_cannot_modify_the_shared_nightly_tracker(self):
         condition = self.jobs["nightly-report"]["if"]
-        context = {"inputs.tag": "nightly", "inputs.windows_only": False}
+        context = {"inputs.tag": "nightly", "inputs.windows_only": False,
+                   "inputs.windows_runner_probe": False, "inputs.windows_cache_benchmark": False}
         self.assertTrue(github_expr(condition, dict(context, **{"github.ref": "refs/heads/main"})))
         for ref in ("refs/heads/compiler-candidate", "refs/tags/compiler-candidate"):
             with self.subTest(ref=ref):
                 self.assertFalse(github_expr(condition, dict(context, **{"github.ref": ref})))
+
+    def test_isolated_runner_probe_cannot_certify_the_shared_nightly_tracker(self):
+        condition = self.jobs["nightly-report"]["if"]
+        context = {"inputs.tag": "nightly", "inputs.windows_only": False,
+                   "inputs.windows_runner_probe": False, "inputs.windows_cache_benchmark": False,
+                   "github.ref": "refs/heads/main"}
+        self.assertTrue(github_expr(condition, context))
+        for flag in ("inputs.windows_runner_probe", "inputs.windows_cache_benchmark", "inputs.windows_only"):
+            with self.subTest(flag=flag):
+                self.assertFalse(github_expr(condition, dict(context, **{flag: True})))
+
+    def test_incomplete_nightly_results_cannot_close_the_tracker(self):
+        script = self.jobs["nightly-report"]["steps"][0]["run"]
+        green = {f"RESULT_{key}": "success" for key in (
+            "META", "MACOS_ARM64", "MACOS_X86_64", "WINDOWS", "LINUX")}
+        base = dict(green, REPO="wey-gu/mem-releases", RUN_URL="https://example.invalid/run/1",
+                    VERSION="0.10.102-nightly.20261014", SOURCE_REF=NIGHTLY_SHA,
+                    FAKE_GH_ISSUES=json.dumps([{"number": 7, "title": "Nightly release-shape build is failing"}]))
+        for changed, expected in (
+            ({}, [["issue", "comment"], ["issue", "close"]]),
+            ({"RESULT_WINDOWS": "skipped"}, [["issue", "comment"]]),
+            ({"RESULT_META": ""}, [["issue", "comment"]]),
+        ):
+            with self.subTest(results=changed):
+                result, _, calls, _ = self.run_script(script, dict(base, **changed))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                writes = [call["args"][:2] for call in calls if call["args"][:2] != ["issue", "list"]]
+                self.assertEqual(writes, expected)
 
     def test_nightly_report_tracks_one_issue(self):
         script = self.jobs["nightly-report"]["steps"][0]["run"]

@@ -24,7 +24,7 @@
 #   from one pinned nowledge-co/mem commit with the exact release build
 #   steps, including macOS signing + notarization, so the same breakage turns
 #   a nightly red instead of a release and the compile caches are warm. It has
-#   NO side effects: `meta` resolves it to is_dry_run=false AND
+#   no release/distribution publication: `meta` resolves it to is_dry_run=false AND
 #   run_publish=false, so the prerelease, -vulkan attach, and publish jobs
 #   (the only jobs that write a GH Release, R2, APT, or the updater feed) are
 #   all skipped; Vulkan is forced off; build artifacts are not uploaded (an
@@ -2850,7 +2850,7 @@ jobs:
       - build-macos-x86_64
       - build-windows
       - build-linux-deb-appimage
-    if: ${{ always() && inputs.tag == 'nightly' && inputs.windows_only != true && github.ref == 'refs/heads/main' }}
+    if: ${{ always() && inputs.tag == 'nightly' && inputs.windows_only != true && inputs.windows_runner_probe != true && inputs.windows_cache_benchmark != true && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     permissions:
@@ -2880,7 +2880,7 @@ jobs:
                       "build-linux-deb-appimage (+ RPM):$RESULT_LINUX"; do
             job="${pair%%:*}"; result="${pair#*:}"
             table+=$'\n'"| ${job} | ${result} |"
-            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then failed="true"; fi
+            if [[ "$result" != "success" ]]; then failed="true"; fi
           done
           {
             echo "### Nightly release-shape result"
