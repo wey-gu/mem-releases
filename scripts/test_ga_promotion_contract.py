@@ -1292,7 +1292,7 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
         rust = next(step for step in self.jobs["build-windows"]["steps"]
                     if str(step.get("uses", "")).startswith("dtolnay/rust-toolchain"))
         self.assertEqual(rust["if"], "runner.environment != 'self-hosted'")
-        self.assertIn("$env:RUSTUP_TOOLCHAIN = '1.99.1'", configure["run"])
+        self.assertIn(f"$env:RUSTUP_TOOLCHAIN = '{self.workflow['env']['RUSTUP_TOOLCHAIN']}'", configure["run"])
 
     def test_self_hosted_pnpm_store_survives_action_setup_and_checkout(self):
         steps = self.jobs["build-windows"]["steps"]
@@ -1615,25 +1615,55 @@ class NightlyWindowsRunnerDefaultTest(unittest.TestCase):
 
 
 class RustupInstalledToolchainContract(unittest.TestCase):
-    def test_source_checkout_builders_execute_the_installed_pinned_channel(self):
+    def assert_installed_channel(self, text):
         import yaml
+        workflow = yaml.safe_load(text)
+        selected = workflow.get("env", {}).get("RUSTUP_TOOLCHAIN")
+        self.assertIsInstance(selected, str, "A source rust-toolchain.toml overrides rustup default")
+        self.assertRegex(selected, r"^(?:\d+\.\d+\.\d+|nightly-\d{4}-\d{2}-\d{2})$")
+        installed = []
+        for job in workflow["jobs"].values():
+            for step in job.get("steps", []):
+                action = str(step.get("uses", ""))
+                if action.startswith("dtolnay/rust-toolchain@"):
+                    installed.append(step.get("with", {}).get("toolchain", action.split("@", 1)[1]))
+                installed += re.findall(
+                    r"(?:rustup (?:default|toolchain install)|--default-toolchain)\s+(\S+)",
+                    step.get("run", ""),
+                )
+        self.assertTrue(installed, "The runtime pin must have an installer")
+        self.assertEqual(set(installed), {selected})
+        for job in workflow["jobs"].values():
+            self.assertEqual(job.get("env", {}).get("RUSTUP_TOOLCHAIN", selected), selected)
+            for step in job.get("steps", []):
+                self.assertEqual(step.get("env", {}).get("RUSTUP_TOOLCHAIN", selected), selected)
+
+    def test_source_checkout_builders_execute_the_installed_pinned_channel(self):
         workflows = ["build-rust-bundle.yml", "release-desktop.yml", "release-mobile.yml",
                      "macos-self-hosted-bench.yml", "rpm-test.yml", "test-windows-bazel.yml"]
         for name in workflows:
             with self.subTest(workflow=name):
-                text = workflow_text(name)
-                workflow = yaml.safe_load(text)
-                selected = workflow.get("env", {}).get("RUSTUP_TOOLCHAIN")
-                self.assertIsInstance(selected, str, "A source rust-toolchain.toml overrides rustup default")
-                self.assertRegex(selected, r"^\d+\.\d+\.\d+$")
-                installed = re.findall(r"dtolnay/rust-toolchain@(\d+\.\d+\.\d+)", text)
-                installed += re.findall(r"(?:rustup default|--default-toolchain)\s+(\d+\.\d+\.\d+)", text)
-                self.assertTrue(installed, "The runtime pin must have an installer")
-                self.assertEqual(set(installed), {selected})
-                for job in workflow["jobs"].values():
-                    self.assertEqual(job.get("env", {}).get("RUSTUP_TOOLCHAIN", selected), selected)
-                    for step in job.get("steps", []):
-                        self.assertEqual(step.get("env", {}).get("RUSTUP_TOOLCHAIN", selected), selected)
+                self.assert_installed_channel(workflow_text(name))
+
+    def test_dated_nightly_requires_an_exact_matching_installer(self):
+        fixture = """env:
+  RUSTUP_TOOLCHAIN: nightly-2026-11-25
+jobs:
+  build:
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-11-25
+"""
+        self.assert_installed_channel(fixture)
+        for wrong in (
+            fixture.replace("nightly-2026-11-25", "nightly"),
+            fixture.replace("toolchain: nightly-2026-11-25", "toolchain: nightly-2026-11-24"),
+            fixture.replace("        with:\n          toolchain: nightly-2026-11-25\n", ""),
+            fixture.replace("      - uses: dtolnay/rust-toolchain@stable\n        with:\n          toolchain: nightly-2026-11-25\n", "      - run: rustc --version\n"),
+        ):
+            with self.subTest(workflow=wrong), self.assertRaises(AssertionError):
+                self.assert_installed_channel(wrong)
 
     def test_real_rustup_runtime_pin_beats_a_checkout_override_without_installing(self):
         # Use the already-installed default twice under distinct identifiers.
