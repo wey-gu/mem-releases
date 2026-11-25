@@ -1120,6 +1120,7 @@ def meta_context(outputs, extra=None):
         "inputs.windows_runner_probe": False,
         "inputs.windows_cache_benchmark": False,
         "inputs.windows_only": False,
+        "github.ref": "refs/heads/main",
     })
     context.update(extra or {})
     return context
@@ -1380,9 +1381,18 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
         for event, tag, expected in (("workflow_dispatch", "nightly", True),
                                      ("workflow_dispatch", "0.10.102", False), ("push", None, False),
                                      ("repository_dispatch", None, False)):
-            self.assertEqual(github_expr(report_if, {"github.event_name": event, "inputs.tag": tag, "inputs.windows_only": False}),
+            self.assertEqual(github_expr(report_if, {"github.event_name": event, "inputs.tag": tag, "inputs.windows_only": False,
+                                                    "github.ref": "refs/heads/main"}),
                              expected, (event, tag))
         self.assertEqual(self.jobs["nightly-report"]["permissions"], {"issues": "write"})
+
+    def test_candidate_workflow_build_cannot_modify_the_shared_nightly_tracker(self):
+        condition = self.jobs["nightly-report"]["if"]
+        context = {"inputs.tag": "nightly", "inputs.windows_only": False}
+        self.assertTrue(github_expr(condition, dict(context, **{"github.ref": "refs/heads/main"})))
+        for ref in ("refs/heads/compiler-candidate", "refs/tags/compiler-candidate"):
+            with self.subTest(ref=ref):
+                self.assertFalse(github_expr(condition, dict(context, **{"github.ref": ref})))
 
     def test_nightly_report_tracks_one_issue(self):
         script = self.jobs["nightly-report"]["steps"][0]["run"]

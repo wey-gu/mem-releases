@@ -2841,7 +2841,7 @@ jobs:
   # Nightly report: one tracking issue in THIS repository. A failed nightly
   # opens it (or comments on the open one); the next green nightly comments
   # and closes it. Its token can only touch issues. Release runs never reach
-  # this job: the condition is the nightly concurrency selector.
+  # this job. Candidate workflow branches cannot alter main's shared tracker.
   # -----------------------------------------------------------------------
   nightly-report:
     needs:
@@ -2850,7 +2850,7 @@ jobs:
       - build-macos-x86_64
       - build-windows
       - build-linux-deb-appimage
-    if: ${{ always() && inputs.tag == 'nightly' && inputs.windows_only != true }}
+    if: ${{ always() && inputs.tag == 'nightly' && inputs.windows_only != true && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     permissions:
