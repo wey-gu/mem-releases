@@ -137,7 +137,7 @@ jobs:
           node-version: '22'
           cache: pnpm
           cache-dependency-path: nowledge-graph/pnpm-lock.yaml
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: nightly-2026-11-25
           targets: x86_64-pc-windows-msvc
