@@ -46,7 +46,6 @@ permissions:
   id-token: write
 
 env:
-  RUSTUP_TOOLCHAIN: "nightly-2026-11-25"
   NMEM_BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-nowledge
   GCP_BAZEL_CACHE_PROJECT_ID: ci-cd-503413
   GCP_BAZEL_CACHE_SERVICE_ACCOUNT: github-bazel-cache@ci-cd-503413.iam.gserviceaccount.com
@@ -101,6 +100,10 @@ jobs:
           submodules: false
           persist-credentials: false
 
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
+        with:
+          targets: ${{ matrix.target }}
+
       - name: Toolchain report
         shell: bash
         run: |
@@ -111,7 +114,7 @@ jobs:
             printf '%-8s ' "$t"; command -v "$t" || { echo "::error::$t not on PATH (see ~/actions-runner/.path)"; exit 1; }
           done
           python3 --version
-          rustup default nightly-2026-11-25
+          rustup default "$RUSTUP_TOOLCHAIN"
           rustup target add "$TARGET"
           rustc --version
           df -h "$GITHUB_WORKSPACE" | tail -1

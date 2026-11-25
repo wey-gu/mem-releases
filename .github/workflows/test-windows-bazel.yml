@@ -16,7 +16,6 @@ concurrency:
   group: test-windows-bazel-${{ inputs.source_ref }}
   cancel-in-progress: false
 env:
-  RUSTUP_TOOLCHAIN: "nightly-2026-11-25"
   NMEM_BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-nowledge
   GCP_BAZEL_CACHE_PROJECT_ID: ci-cd-503413
   GCP_BAZEL_CACHE_SERVICE_ACCOUNT: github-bazel-cache@ci-cd-503413.iam.gserviceaccount.com
@@ -137,9 +136,8 @@ jobs:
           node-version: '22'
           cache: pnpm
           cache-dependency-path: nowledge-graph/pnpm-lock.yaml
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
         with:
-          toolchain: nightly-2026-11-25
           targets: x86_64-pc-windows-msvc
       - name: Initialize Rust path dependencies before cache restore
         shell: bash

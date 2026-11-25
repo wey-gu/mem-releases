@@ -1291,9 +1291,9 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
         configure = self.step("build-windows", name="Configure isolated self-hosted Windows build")
         self.assertIn("sys.version_info[:2] == (3, 12)", configure["run"])
         rust = next(step for step in self.jobs["build-windows"]["steps"]
-                    if str(step.get("uses", "")).startswith("dtolnay/rust-toolchain"))
-        self.assertEqual(rust["if"], "runner.environment != 'self-hosted'")
-        self.assertIn(f"$env:RUSTUP_TOOLCHAIN = '{self.workflow['env']['RUSTUP_TOOLCHAIN']}'", configure["run"])
+                    if str(step.get("uses", "")).startswith("wey-gu/mem-releases/.github/actions/setup-source-rust@"))
+        self.assertNotIn("if", rust, "Self-hosted builds also need the checked-out source compiler")
+        self.assertNotIn("$env:RUSTUP_TOOLCHAIN =", configure["run"])
 
     def test_self_hosted_pnpm_store_survives_action_setup_and_checkout(self):
         steps = self.jobs["build-windows"]["steps"]
@@ -1678,13 +1678,6 @@ class RustupInstalledToolchainContract(unittest.TestCase):
             for step in job.get("steps", []):
                 self.assertEqual(step.get("env", {}).get("RUSTUP_TOOLCHAIN", selected), selected)
 
-    def test_source_checkout_builders_execute_the_installed_pinned_channel(self):
-        workflows = ["build-rust-bundle.yml", "release-desktop.yml", "release-mobile.yml",
-                     "macos-self-hosted-bench.yml", "rpm-test.yml", "test-windows-bazel.yml"]
-        for name in workflows:
-            with self.subTest(workflow=name):
-                self.assert_installed_channel(workflow_text(name))
-
     def test_dated_nightly_requires_an_exact_matching_installer(self):
         fixture = """env:
   RUSTUP_TOOLCHAIN: nightly-2026-11-25
@@ -1824,3 +1817,41 @@ class SourcePinnedRustSelectionTest(unittest.TestCase):
                 compiler.chmod(0o700)
                 result = self.run_script(root, "verify")
                 self.assertEqual(result.returncode, expected_exit, result.stdout + result.stderr)
+
+    def test_source_checkout_builders_use_verified_source_channel_before_consumers(self):
+        import yaml
+        workflows = ["build-rust-bundle.yml", "release-desktop.yml", "release-mobile.yml",
+                     "macos-self-hosted-bench.yml", "rpm-test.yml", "test-windows-bazel.yml"]
+        refs = set()
+        consumers = 0
+        for name in workflows:
+            workflow = yaml.safe_load(workflow_text(name))
+            self.assertNotIn("RUSTUP_TOOLCHAIN", workflow.get("env", {}), name)
+            for job_name, job in workflow["jobs"].items():
+                steps = job.get("steps", [])
+                checkouts = [i for i, step in enumerate(steps)
+                             if step.get("with", {}).get("repository") == "nowledge-co/mem"]
+                if not checkouts:
+                    continue
+                consumers += 1
+                setups = [(i, step) for i, step in enumerate(steps)
+                          if str(step.get("uses", "")).startswith("wey-gu/mem-releases/.github/actions/setup-source-rust@")]
+                self.assertEqual(len(setups), 1, (name, job_name))
+                index, setup = setups[0]
+                self.assertLess(checkouts[0], index, (name, job_name))
+                self.assertNotIn("if", setup, "Every runner must select the source compiler")
+                self.assertRegex(setup["uses"], r"@[0-9a-f]{40}$")
+                refs.add(setup["uses"])
+                for step in steps[index + 1:]:
+                    self.assertNotIn("toolchain: nightly-", str(step))
+                    self.assertNotIn("rustup default nightly-", step.get("run", ""))
+                for i, step in enumerate(steps):
+                    if "rust-cache@" in str(step.get("uses", "")) or "rustup default " in step.get("run", ""):
+                        self.assertLess(index, i, (name, job_name))
+        self.assertEqual(consumers, 12)
+        self.assertEqual(len(refs), 1, "All source workflows must share the reviewed installer")
+        action = yaml.safe_load((ROOT / ".github/actions/setup-source-rust/action.yml").read_text())
+        steps = action["runs"]["steps"]
+        self.assertIn("source-toolchain.sh\" select", steps[0]["run"])
+        self.assertEqual(steps[1]["with"]["toolchain"], "${{ steps.source.outputs.channel }}")
+        self.assertIn("source-toolchain.sh\" verify", steps[2]["run"])

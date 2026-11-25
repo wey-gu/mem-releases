@@ -61,9 +61,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  RUSTUP_TOOLCHAIN: "nightly-2026-11-25"
-
 jobs:
   ios-testflight:
     name: iOS -> TestFlight
@@ -176,9 +173,8 @@ jobs:
                exit 1 ;;
           esac
 
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
         with:
-          toolchain: nightly-2026-11-25
           targets: aarch64-apple-ios
 
       - name: Install JavaScript dependencies
@@ -436,9 +432,8 @@ jobs:
           sdkmanager --install "ndk;27.2.12479018" "platforms;android-36" "build-tools;36.0.0"
           echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
         with:
-          toolchain: nightly-2026-11-25
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 
       - name: Install JavaScript dependencies

@@ -61,9 +61,6 @@ on:
 permissions:
   contents: read
 
-env:
-  RUSTUP_TOOLCHAIN: "nightly-2026-11-25"
-
 jobs:
   build-rust-macos:
     name: build-rust-${{ matrix.label }}
@@ -90,20 +87,19 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
         with:
-          toolchain: nightly-2026-11-25
           targets: ${{ matrix.target }}
 
       # Defensive: on an arm64 macOS runner the rustup proxy can route
       # `cargo` to `rustup-init` when the toolchain target matches the host
-      # arch. `rustup default nightly-2026-11-25` + `rustup show` forces the proxy symlinks
+      # arch. `rustup default "$RUSTUP_TOOLCHAIN"` + `rustup show` forces the proxy symlinks
       # into a known state and makes the resolved toolchain visible in the log.
       # (Mirrors the same workaround in release-desktop.yml.)
       - name: Pin default toolchain (workaround for arm64 rustup proxy)
         run: |
           set -euo pipefail
-          rustup default nightly-2026-11-25
+          rustup default "$RUSTUP_TOOLCHAIN"
           rustup show
 
       - name: Initialize Rust path dependencies before cache restore

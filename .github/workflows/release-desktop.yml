@@ -136,7 +136,6 @@ permissions:
   actions: write
 
 env:
-  RUSTUP_TOOLCHAIN: "nightly-2026-11-25"
   NMEM_BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-nowledge
   GCP_BAZEL_CACHE_PROJECT_ID: ci-cd-503413
   GCP_BAZEL_CACHE_SERVICE_ACCOUNT: github-bazel-cache@ci-cd-503413.iam.gserviceaccount.com
@@ -633,9 +632,8 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
         with:
-          toolchain: nightly-2026-11-25
           targets: aarch64-apple-darwin
 
       # Defensive: on an arm64 macOS runner the rustup proxy ends up
@@ -646,7 +644,7 @@ jobs:
       - name: Pin default toolchain (workaround for arm64 rustup proxy)
         run: |
           set -euo pipefail
-          rustup default nightly-2026-11-25
+          rustup default "$RUSTUP_TOOLCHAIN"
           rustup show
 
       - name: Initialize Rust path dependencies before cache restore
@@ -762,7 +760,7 @@ jobs:
       - name: Pin default toolchain + sanity check cargo
         run: |
           set -euo pipefail
-          rustup default nightly-2026-11-25
+          rustup default "$RUSTUP_TOOLCHAIN"
           rustup show
           echo "::group::cargo resolution"
           which cargo
@@ -994,9 +992,8 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
         with:
-          toolchain: nightly-2026-11-25
           targets: x86_64-apple-darwin
 
       - name: Initialize Rust path dependencies before cache restore
@@ -1234,8 +1231,7 @@ jobs:
       # proc-macro links that RUSTFLAGS skips under --target.
       LINK: /Brepro
     steps:
-      - &configure_windows_self_hosted
-        name: Configure isolated self-hosted Windows build
+      - name: Configure isolated self-hosted Windows build
         if: runner.environment == 'self-hosted'
         shell: powershell
         run: |
@@ -1243,15 +1239,12 @@ jobs:
           . (Join-Path $env:USERPROFILE 'ci-tools\Enter-BuildEnvironment.ps1')
           & python3 -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
           if ($LASTEXITCODE -ne 0) { throw 'Preinstalled Python 3.12 is required on this runner' }
-          & rustup toolchain install nightly-2026-11-25 --profile minimal --component rustfmt --component clippy
-          if ($LASTEXITCODE -ne 0) { throw 'Rust nightly-2026-11-25 installation failed' }
-          $env:RUSTUP_TOOLCHAIN = 'nightly-2026-11-25'
           if ((Get-PSDrive C).Free -lt 40GB) { throw 'At least 40 GiB free is required before a Desktop build' }
           $env:CARGO_TARGET_DIR = Join-Path $env:USERPROFILE 'ci-cache\runner-target'
           $env:XDG_CACHE_HOME = Join-Path $env:USERPROFILE 'ci-cache\pdfium'
           # action-setup recreates PNPM_HOME; keep package downloads outside it.
           $env:NMEM_PNPM_STORE_DIR = Join-Path $env:USERPROFILE 'ci-cache\pnpm-store'
-          foreach ($name in @('RUSTUP_TOOLCHAIN','RUSTC_WRAPPER','SCCACHE_DIR','SCCACHE_CACHE_SIZE','SCCACHE_IDLE_TIMEOUT',
+          foreach ($name in @('RUSTC_WRAPPER','SCCACHE_DIR','SCCACHE_CACHE_SIZE','SCCACHE_IDLE_TIMEOUT',
             'SCCACHE_IGNORE_SERVER_IO_ERROR','CMAKE_C_COMPILER_LAUNCHER','CMAKE_CXX_COMPILER_LAUNCHER',
             'CARGO_TARGET_DIR','XDG_CACHE_HOME','NMEM_PNPM_STORE_DIR')) {
             "$name=$([Environment]::GetEnvironmentVariable($name))" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
@@ -1291,10 +1284,8 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-        if: runner.environment != 'self-hosted'
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
         with:
-          toolchain: nightly-2026-11-25
           targets: x86_64-pc-windows-msvc
 
       - &initialize_windows_path_dependencies
@@ -1701,9 +1692,7 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-        with:
-          toolchain: nightly-2026-11-25
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
 
       - name: Initialize Rust path dependencies before cache restore
         shell: bash
@@ -1951,9 +1940,8 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
         with:
-          toolchain: nightly-2026-11-25
           targets: x86_64-pc-windows-msvc
 
       - *initialize_windows_path_dependencies
@@ -2218,9 +2206,7 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-        with:
-          toolchain: nightly-2026-11-25
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
 
       - name: Initialize Rust path dependencies before cache restore
         shell: bash
