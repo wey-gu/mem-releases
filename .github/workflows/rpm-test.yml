@@ -30,9 +30,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  RUSTUP_TOOLCHAIN: "1.99.1"
-
 jobs:
   build-linux-rpm:
     runs-on: ubuntu-latest
@@ -58,10 +55,7 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           submodules: false
 
-      - name: Install Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.99.1
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
 
       - uses: Swatinem/rust-cache@v2
         with:

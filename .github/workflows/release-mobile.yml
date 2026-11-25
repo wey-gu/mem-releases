@@ -61,9 +61,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  RUSTUP_TOOLCHAIN: "1.99.1"
-
 jobs:
   ios-testflight:
     name: iOS -> TestFlight
@@ -176,7 +173,7 @@ jobs:
                exit 1 ;;
           esac
 
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
         with:
           targets: aarch64-apple-ios
 
@@ -435,7 +432,7 @@ jobs:
           sdkmanager --install "ndk;27.2.12479018" "platforms;android-36" "build-tools;36.0.0"
           echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 

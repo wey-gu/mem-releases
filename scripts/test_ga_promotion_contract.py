@@ -1120,6 +1120,7 @@ def meta_context(outputs, extra=None):
         "inputs.windows_runner_probe": False,
         "inputs.windows_cache_benchmark": False,
         "inputs.windows_only": False,
+        "github.ref": "refs/heads/main",
     })
     context.update(extra or {})
     return context
@@ -1290,9 +1291,9 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
         configure = self.step("build-windows", name="Configure isolated self-hosted Windows build")
         self.assertIn("sys.version_info[:2] == (3, 12)", configure["run"])
         rust = next(step for step in self.jobs["build-windows"]["steps"]
-                    if str(step.get("uses", "")).startswith("dtolnay/rust-toolchain"))
-        self.assertEqual(rust["if"], "runner.environment != 'self-hosted'")
-        self.assertIn("$env:RUSTUP_TOOLCHAIN = '1.99.1'", configure["run"])
+                    if str(step.get("uses", "")).startswith("wey-gu/mem-releases/.github/actions/setup-source-rust@"))
+        self.assertNotIn("if", rust, "Self-hosted builds also need the checked-out source compiler")
+        self.assertNotIn("$env:RUSTUP_TOOLCHAIN =", configure["run"])
 
     def test_self_hosted_pnpm_store_survives_action_setup_and_checkout(self):
         steps = self.jobs["build-windows"]["steps"]
@@ -1380,9 +1381,48 @@ class ReleaseDesktopNightlyContractTest(unittest.TestCase):
         for event, tag, expected in (("workflow_dispatch", "nightly", True),
                                      ("workflow_dispatch", "0.10.102", False), ("push", None, False),
                                      ("repository_dispatch", None, False)):
-            self.assertEqual(github_expr(report_if, {"github.event_name": event, "inputs.tag": tag, "inputs.windows_only": False}),
+            self.assertEqual(github_expr(report_if, {"github.event_name": event, "inputs.tag": tag, "inputs.windows_only": False,
+                                                    "inputs.windows_runner_probe": False, "inputs.windows_cache_benchmark": False,
+                                                    "github.ref": "refs/heads/main"}),
                              expected, (event, tag))
         self.assertEqual(self.jobs["nightly-report"]["permissions"], {"issues": "write"})
+
+    def test_candidate_workflow_build_cannot_modify_the_shared_nightly_tracker(self):
+        condition = self.jobs["nightly-report"]["if"]
+        context = {"inputs.tag": "nightly", "inputs.windows_only": False,
+                   "inputs.windows_runner_probe": False, "inputs.windows_cache_benchmark": False}
+        self.assertTrue(github_expr(condition, dict(context, **{"github.ref": "refs/heads/main"})))
+        for ref in ("refs/heads/compiler-candidate", "refs/tags/compiler-candidate"):
+            with self.subTest(ref=ref):
+                self.assertFalse(github_expr(condition, dict(context, **{"github.ref": ref})))
+
+    def test_isolated_runner_probe_cannot_certify_the_shared_nightly_tracker(self):
+        condition = self.jobs["nightly-report"]["if"]
+        context = {"inputs.tag": "nightly", "inputs.windows_only": False,
+                   "inputs.windows_runner_probe": False, "inputs.windows_cache_benchmark": False,
+                   "github.ref": "refs/heads/main"}
+        self.assertTrue(github_expr(condition, context))
+        for flag in ("inputs.windows_runner_probe", "inputs.windows_cache_benchmark", "inputs.windows_only"):
+            with self.subTest(flag=flag):
+                self.assertFalse(github_expr(condition, dict(context, **{flag: True})))
+
+    def test_incomplete_nightly_results_cannot_close_the_tracker(self):
+        script = self.jobs["nightly-report"]["steps"][0]["run"]
+        green = {f"RESULT_{key}": "success" for key in (
+            "META", "MACOS_ARM64", "MACOS_X86_64", "WINDOWS", "LINUX")}
+        base = dict(green, REPO="wey-gu/mem-releases", RUN_URL="https://example.invalid/run/1",
+                    VERSION="0.10.102-nightly.20261014", SOURCE_REF=NIGHTLY_SHA,
+                    FAKE_GH_ISSUES=json.dumps([{"number": 7, "title": "Nightly release-shape build is failing"}]))
+        for changed, expected in (
+            ({}, [["issue", "comment"], ["issue", "close"]]),
+            ({"RESULT_WINDOWS": "skipped"}, [["issue", "comment"]]),
+            ({"RESULT_META": ""}, [["issue", "comment"]]),
+        ):
+            with self.subTest(results=changed):
+                result, _, calls, _ = self.run_script(script, dict(base, **changed))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                writes = [call["args"][:2] for call in calls if call["args"][:2] != ["issue", "list"]]
+                self.assertEqual(writes, expected)
 
     def test_nightly_report_tracks_one_issue(self):
         script = self.jobs["nightly-report"]["steps"][0]["run"]
@@ -1590,7 +1630,9 @@ class HostedCargoResolutionContract(unittest.TestCase):
             rustup = binary / "rustup"
             rustup.write_text('#!/bin/sh\nif [ "$1" = which ]; then printf "%s\\n" "' + str(cargo) + '"; fi\n')
             rustup.chmod(0o755)
-            env = dict(os.environ, HOME=str(home), PATH=str(binary) + ":/usr/bin:/bin")
+            # The preceding source setup action exports this for the workaround.
+            env = dict(os.environ, HOME=str(home), PATH=str(binary) + ":/usr/bin:/bin",
+                       RUSTUP_TOOLCHAIN="1.99.1")
             self.assertFalse((home / ".cargo/bin").exists())
             good = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
             self.assertEqual(good.returncode, 0, good.stdout + good.stderr)
@@ -1615,25 +1657,48 @@ class NightlyWindowsRunnerDefaultTest(unittest.TestCase):
 
 
 class RustupInstalledToolchainContract(unittest.TestCase):
-    def test_source_checkout_builders_execute_the_installed_pinned_channel(self):
+    def assert_installed_channel(self, text):
         import yaml
-        workflows = ["build-rust-bundle.yml", "release-desktop.yml", "release-mobile.yml",
-                     "macos-self-hosted-bench.yml", "rpm-test.yml", "test-windows-bazel.yml"]
-        for name in workflows:
-            with self.subTest(workflow=name):
-                text = workflow_text(name)
-                workflow = yaml.safe_load(text)
-                selected = workflow.get("env", {}).get("RUSTUP_TOOLCHAIN")
-                self.assertIsInstance(selected, str, "A source rust-toolchain.toml overrides rustup default")
-                self.assertRegex(selected, r"^\d+\.\d+\.\d+$")
-                installed = re.findall(r"dtolnay/rust-toolchain@(\d+\.\d+\.\d+)", text)
-                installed += re.findall(r"(?:rustup default|--default-toolchain)\s+(\d+\.\d+\.\d+)", text)
-                self.assertTrue(installed, "The runtime pin must have an installer")
-                self.assertEqual(set(installed), {selected})
-                for job in workflow["jobs"].values():
-                    self.assertEqual(job.get("env", {}).get("RUSTUP_TOOLCHAIN", selected), selected)
-                    for step in job.get("steps", []):
-                        self.assertEqual(step.get("env", {}).get("RUSTUP_TOOLCHAIN", selected), selected)
+        workflow = yaml.safe_load(text)
+        selected = workflow.get("env", {}).get("RUSTUP_TOOLCHAIN")
+        self.assertIsInstance(selected, str, "A source rust-toolchain.toml overrides rustup default")
+        self.assertRegex(selected, r"^(?:\d+\.\d+\.\d+|nightly-\d{4}-\d{2}-\d{2})$")
+        installed = []
+        for job in workflow["jobs"].values():
+            for step in job.get("steps", []):
+                action = str(step.get("uses", ""))
+                if action.startswith("dtolnay/rust-toolchain@"):
+                    installed.append(step.get("with", {}).get("toolchain", action.split("@", 1)[1]))
+                installed += re.findall(
+                    r"(?:rustup (?:default|toolchain install)|--default-toolchain)\s+(\S+)",
+                    step.get("run", ""),
+                )
+        self.assertTrue(installed, "The runtime pin must have an installer")
+        self.assertEqual(set(installed), {selected})
+        for job in workflow["jobs"].values():
+            self.assertEqual(job.get("env", {}).get("RUSTUP_TOOLCHAIN", selected), selected)
+            for step in job.get("steps", []):
+                self.assertEqual(step.get("env", {}).get("RUSTUP_TOOLCHAIN", selected), selected)
+
+    def test_dated_nightly_requires_an_exact_matching_installer(self):
+        fixture = """env:
+  RUSTUP_TOOLCHAIN: nightly-2026-11-25
+jobs:
+  build:
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-11-25
+"""
+        self.assert_installed_channel(fixture)
+        for wrong in (
+            fixture.replace("nightly-2026-11-25", "nightly"),
+            fixture.replace("toolchain: nightly-2026-11-25", "toolchain: nightly-2026-11-24"),
+            fixture.replace("        with:\n          toolchain: nightly-2026-11-25\n", ""),
+            fixture.replace("      - uses: dtolnay/rust-toolchain@stable\n        with:\n          toolchain: nightly-2026-11-25\n", "      - run: rustc --version\n"),
+        ):
+            with self.subTest(workflow=wrong), self.assertRaises(AssertionError):
+                self.assert_installed_channel(wrong)
 
     def test_real_rustup_runtime_pin_beats_a_checkout_override_without_installing(self):
         # Use the already-installed default twice under distinct identifiers.
@@ -1671,3 +1736,134 @@ class SccacheVersionPinTest(unittest.TestCase):
                 self.assertIsNotNone(found, f"{path.name}: sccache-action without a pinned version")
                 versions.add(found.group(1))
         self.assertEqual(len(versions), 1, versions)
+
+
+class SourcePinnedRustSelectionTest(unittest.TestCase):
+    script = ROOT / ".github/actions/setup-source-rust/source-toolchain.sh"
+
+    def fixture(self, root, channel, helper_exit=None):
+        root.joinpath("rust-toolchain.toml").write_text(
+            '[toolchain]\nchannel = ' + json.dumps(channel) + '\n')
+        if helper_exit is not None:
+            root.joinpath("rust-toolchain-version.txt").write_text("source identity\n")
+            helper = root / "bazel/release/install-rust-toolchain.sh"
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.write_text(
+                '#!/bin/bash\nset -eu\ntest "$(cd "$1" && pwd -P)" = "$(pwd -P)"\n'
+                'printf "%s" "$RUSTUP_TOOLCHAIN" > verified-channel.txt\n'
+                'exit ' + str(helper_exit) + '\n')
+
+    def run_script(self, root, operation):
+        env = dict(os.environ, RUSTUP_TOOLCHAIN="nightly-2026-11-25",
+                   GITHUB_ENV=str(root / "env"), GITHUB_OUTPUT=str(root / "output"))
+        env["PATH"] = str(root / "bin") + os.pathsep + env["PATH"]
+        return subprocess.run(["bash", str(self.script), operation, str(root)],
+                              cwd=root, env=env, capture_output=True, text=True, timeout=10)
+
+    def test_source_channel_overrides_workflow_bootstrap_and_preserves_legacy_refs(self):
+        for channel in ("1.99.1", "1.98.1", "nightly-2026-11-25", None):
+            with self.subTest(channel=channel), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                if channel:
+                    self.fixture(root, channel, 0 if channel.startswith("nightly-") else None)
+                result = self.run_script(root, "select")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                selected = channel or "1.99.1"
+                self.assertEqual(root.joinpath("env").read_text(),
+                                 "RUSTUP_TOOLCHAIN=" + selected + "\n")
+                self.assertEqual(root.joinpath("output").read_text(),
+                                 "channel=" + selected + "\n")
+                if channel and channel.startswith("nightly-"):
+                    verified = self.run_script(root, "verify")
+                    self.assertEqual(verified.returncode, 0, verified.stderr)
+                    self.assertEqual(root.joinpath("verified-channel.txt").read_text(), channel)
+
+    def test_partial_or_invalid_source_pins_refuse_before_installation(self):
+        for state in ("identity-only", "helper-only", "nightly-without-identity", "rolling", "duplicate", "other-section"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.fixture(root, "nightly-2026-11-25", 0)
+                if state == "identity-only":
+                    root.joinpath("bazel/release/install-rust-toolchain.sh").unlink()
+                elif state == "helper-only":
+                    root.joinpath("rust-toolchain-version.txt").unlink()
+                elif state == "nightly-without-identity":
+                    root.joinpath("bazel/release/install-rust-toolchain.sh").unlink()
+                    root.joinpath("rust-toolchain-version.txt").unlink()
+                elif state == "rolling":
+                    root.joinpath("rust-toolchain.toml").write_text('[toolchain]\nchannel = "nightly"\n')
+                elif state == "duplicate":
+                    with root.joinpath("rust-toolchain.toml").open("a") as file:
+                        file.write('channel = "1.99.1"\n')
+                else:
+                    root.joinpath("rust-toolchain.toml").write_text('[other]\nchannel = "1.99.1"\n')
+                result = self.run_script(root, "select")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertFalse(root.joinpath("env").exists(), "invalid source was admitted")
+                self.assertFalse(root.joinpath("verified-channel.txt").exists())
+
+    def test_source_verification_failure_and_wrong_legacy_compiler_are_terminal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, "nightly-2026-11-25", 7)
+            result = self.run_script(root, "verify")
+            self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+            self.assertEqual(root.joinpath("verified-channel.txt").read_text(), "nightly-2026-11-25")
+        for installed, expected_exit in (("1.99.1", 0), ("1.102.0-nightly", 1)):
+            with self.subTest(installed=installed), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.fixture(root, "1.99.1")
+                compiler = root / "bin/rustc"
+                compiler.parent.mkdir()
+                compiler.write_text('#!/bin/sh\nprintf "release: ' + installed + '\\n"\n')
+                compiler.chmod(0o700)
+                result = self.run_script(root, "verify")
+                self.assertEqual(result.returncode, expected_exit, result.stdout + result.stderr)
+
+    def test_source_checkout_builders_use_verified_source_channel_before_consumers(self):
+        import yaml
+        workflows = ["build-rust-bundle.yml", "release-desktop.yml", "release-mobile.yml",
+                     "macos-self-hosted-bench.yml", "rpm-test.yml", "test-windows-bazel.yml"]
+        refs = set()
+        consumers = 0
+        for name in workflows:
+            workflow = yaml.safe_load(workflow_text(name))
+            self.assertNotIn("RUSTUP_TOOLCHAIN", workflow.get("env", {}), name)
+            for job_name, job in workflow["jobs"].items():
+                steps = job.get("steps", [])
+                checkouts = [i for i, step in enumerate(steps)
+                             if step.get("with", {}).get("repository") == "nowledge-co/mem"]
+                if not checkouts:
+                    continue
+                consumers += 1
+                setups = [(i, step) for i, step in enumerate(steps)
+                          if str(step.get("uses", "")).startswith("wey-gu/mem-releases/.github/actions/setup-source-rust@")]
+                self.assertEqual(len(setups), 1, (name, job_name))
+                index, setup = setups[0]
+                self.assertLess(checkouts[0], index, (name, job_name))
+                self.assertNotIn("if", setup, "Every runner must select the source compiler")
+                self.assertRegex(setup["uses"], r"@[0-9a-f]{40}$")
+                refs.add(setup["uses"])
+                for step in steps[index + 1:]:
+                    self.assertNotIn("toolchain: nightly-", str(step))
+                    self.assertNotIn("rustup default nightly-", step.get("run", ""))
+                for i, step in enumerate(steps):
+                    if "rust-cache@" in str(step.get("uses", "")) or "rustup default " in step.get("run", ""):
+                        self.assertLess(index, i, (name, job_name))
+        self.assertEqual(consumers, 12)
+        self.assertEqual(len(refs), 1, "All source workflows must share the reviewed installer")
+        action = yaml.safe_load((ROOT / ".github/actions/setup-source-rust/action.yml").read_text())
+        steps = action["runs"]["steps"]
+        self.assertIn("source-toolchain.sh\" select", steps[0]["run"])
+        self.assertEqual(steps[1]["with"]["toolchain"], "${{ steps.source.outputs.channel }}")
+        self.assertIn("source-toolchain.sh\" verify", steps[2]["run"])
+
+
+class PdfiumCacheAuthorityTest(unittest.TestCase):
+    def test_cache_scan_cannot_override_the_compiled_pdfium_receipt(self):
+        workflow = load_release_desktop()
+        repair = next(step for step in workflow["jobs"]["build-windows"]["steps"]
+                      if step.get("name") == "Resolve or repair the PDFium runtime cache")
+        self.assertIn("cargo clean -p liteparse-pdfium-sys", repair["run"])
+        self.assertNotIn("PDFIUM_LIB_PATH=", repair["run"],
+                         "A cache scan cannot certify the library used by this source build")

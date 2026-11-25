@@ -24,7 +24,7 @@
 #   from one pinned nowledge-co/mem commit with the exact release build
 #   steps, including macOS signing + notarization, so the same breakage turns
 #   a nightly red instead of a release and the compile caches are warm. It has
-#   NO side effects: `meta` resolves it to is_dry_run=false AND
+#   no release/distribution publication: `meta` resolves it to is_dry_run=false AND
 #   run_publish=false, so the prerelease, -vulkan attach, and publish jobs
 #   (the only jobs that write a GH Release, R2, APT, or the updater feed) are
 #   all skipped; Vulkan is forced off; build artifacts are not uploaded (an
@@ -136,7 +136,6 @@ permissions:
   actions: write
 
 env:
-  RUSTUP_TOOLCHAIN: "1.99.1"
   NMEM_BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-nowledge
   GCP_BAZEL_CACHE_PROJECT_ID: ci-cd-503413
   GCP_BAZEL_CACHE_SERVICE_ACCOUNT: github-bazel-cache@ci-cd-503413.iam.gserviceaccount.com
@@ -257,6 +256,8 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          & rustup toolchain install nightly-2026-11-25 --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Rust nightly-2026-11-25 installation failed' }
           $root = Join-Path $env:RUNNER_TEMP 'native-runner-proof'
           New-Item -ItemType Directory -Force -Path (Join-Path $root 'src') | Out-Null
           @'
@@ -271,7 +272,7 @@ jobs:
           'fn main() { println!("windows-runner-native-proof:ok"); }' |
             Set-Content (Join-Path $root 'src\main.rs') -Encoding ascii
           $timer = [Diagnostics.Stopwatch]::StartNew()
-          & cargo +1.99.1 build --release --offline --manifest-path (Join-Path $root 'Cargo.toml') --target-dir (Join-Path $root 'target')
+          & cargo +nightly-2026-11-25 build --release --offline --manifest-path (Join-Path $root 'Cargo.toml') --target-dir (Join-Path $root 'target')
           if ($LASTEXITCODE -ne 0) { throw 'Native Rust/MSVC build failed' }
           $result = & (Join-Path $root 'target\release\windows-runner-native-proof.exe')
           if ($LASTEXITCODE -ne 0 -or $result -ne 'windows-runner-native-proof:ok') {
@@ -631,7 +632,7 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
         with:
           targets: aarch64-apple-darwin
 
@@ -643,7 +644,7 @@ jobs:
       - name: Pin default toolchain (workaround for arm64 rustup proxy)
         run: |
           set -euo pipefail
-          rustup default 1.99.1
+          rustup default "$RUSTUP_TOOLCHAIN"
           rustup show
 
       - name: Initialize Rust path dependencies before cache restore
@@ -759,7 +760,7 @@ jobs:
       - name: Pin default toolchain + sanity check cargo
         run: |
           set -euo pipefail
-          rustup default 1.99.1
+          rustup default "$RUSTUP_TOOLCHAIN"
           rustup show
           echo "::group::cargo resolution"
           which cargo
@@ -991,7 +992,7 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
         with:
           targets: x86_64-apple-darwin
 
@@ -1230,8 +1231,7 @@ jobs:
       # proc-macro links that RUSTFLAGS skips under --target.
       LINK: /Brepro
     steps:
-      - &configure_windows_self_hosted
-        name: Configure isolated self-hosted Windows build
+      - name: Configure isolated self-hosted Windows build
         if: runner.environment == 'self-hosted'
         shell: powershell
         run: |
@@ -1239,15 +1239,12 @@ jobs:
           . (Join-Path $env:USERPROFILE 'ci-tools\Enter-BuildEnvironment.ps1')
           & python3 -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
           if ($LASTEXITCODE -ne 0) { throw 'Preinstalled Python 3.12 is required on this runner' }
-          & rustup which --toolchain 1.99.1 rustc | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Preinstalled Rust 1.99.1 is required on this runner' }
-          $env:RUSTUP_TOOLCHAIN = '1.99.1'
           if ((Get-PSDrive C).Free -lt 40GB) { throw 'At least 40 GiB free is required before a Desktop build' }
           $env:CARGO_TARGET_DIR = Join-Path $env:USERPROFILE 'ci-cache\runner-target'
           $env:XDG_CACHE_HOME = Join-Path $env:USERPROFILE 'ci-cache\pdfium'
           # action-setup recreates PNPM_HOME; keep package downloads outside it.
           $env:NMEM_PNPM_STORE_DIR = Join-Path $env:USERPROFILE 'ci-cache\pnpm-store'
-          foreach ($name in @('RUSTUP_TOOLCHAIN','RUSTC_WRAPPER','SCCACHE_DIR','SCCACHE_CACHE_SIZE','SCCACHE_IDLE_TIMEOUT',
+          foreach ($name in @('RUSTC_WRAPPER','SCCACHE_DIR','SCCACHE_CACHE_SIZE','SCCACHE_IDLE_TIMEOUT',
             'SCCACHE_IGNORE_SERVER_IO_ERROR','CMAKE_C_COMPILER_LAUNCHER','CMAKE_CXX_COMPILER_LAUNCHER',
             'CARGO_TARGET_DIR','XDG_CACHE_HOME','NMEM_PNPM_STORE_DIR')) {
             "$name=$([Environment]::GetEnvironmentVariable($name))" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
@@ -1287,8 +1284,7 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.99.1
-        if: runner.environment != 'self-hosted'
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
         with:
           targets: x86_64-pc-windows-msvc
 
@@ -1326,8 +1322,9 @@ jobs:
       # the compile cache that carries across tags.
 
       # A Cargo target cache can restore liteparse-pdfium-sys build output from
-      # another runner. Point bundle staging at this runner's restored DLL when
-      # it exists; otherwise invalidate only that package so the normal release
+      # another runner. Cache presence is not runtime provenance; let the source
+      # build receipt select the exact library. When empty, invalidate only that
+      # package so the normal release
       # build repopulates the exact locked PDFium runtime. This job no longer
       # restores a target cache, so it takes the invalidate branch on an empty
       # target dir (a few seconds); it stays as a guard if a cache returns.
@@ -1339,8 +1336,7 @@ jobs:
           $pdfiumDll = Get-ChildItem -Path $pdfiumCache -Filter "pdfium.dll" `
               -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($pdfiumDll) {
-            Write-Host "PDFium runtime cache is complete: $($pdfiumDll.FullName)"
-            "PDFIUM_LIB_PATH=$($pdfiumDll.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "PDFium cache contains runtime libraries; the source build receipt selects the exact library."
             exit 0
           }
 
@@ -1696,7 +1692,7 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
 
       - name: Initialize Rust path dependencies before cache restore
         shell: bash
@@ -1944,7 +1940,7 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
         with:
           targets: x86_64-pc-windows-msvc
 
@@ -2210,7 +2206,7 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: wey-gu/mem-releases/.github/actions/setup-source-rust@3cac7e1b7a3f8f7fd2fd092667108c8ea32984e6
 
       - name: Initialize Rust path dependencies before cache restore
         shell: bash
@@ -2831,7 +2827,7 @@ jobs:
   # Nightly report: one tracking issue in THIS repository. A failed nightly
   # opens it (or comments on the open one); the next green nightly comments
   # and closes it. Its token can only touch issues. Release runs never reach
-  # this job: the condition is the nightly concurrency selector.
+  # this job. Candidate workflow branches cannot alter main's shared tracker.
   # -----------------------------------------------------------------------
   nightly-report:
     needs:
@@ -2840,7 +2836,7 @@ jobs:
       - build-macos-x86_64
       - build-windows
       - build-linux-deb-appimage
-    if: ${{ always() && inputs.tag == 'nightly' && inputs.windows_only != true }}
+    if: ${{ always() && inputs.tag == 'nightly' && inputs.windows_only != true && inputs.windows_runner_probe != true && inputs.windows_cache_benchmark != true && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     permissions:
@@ -2870,7 +2866,7 @@ jobs:
                       "build-linux-deb-appimage (+ RPM):$RESULT_LINUX"; do
             job="${pair%%:*}"; result="${pair#*:}"
             table+=$'\n'"| ${job} | ${result} |"
-            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then failed="true"; fi
+            if [[ "$result" != "success" ]]; then failed="true"; fi
           done
           {
             echo "### Nightly release-shape result"
