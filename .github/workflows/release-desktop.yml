@@ -1322,8 +1322,9 @@ jobs:
       # the compile cache that carries across tags.
 
       # A Cargo target cache can restore liteparse-pdfium-sys build output from
-      # another runner. Point bundle staging at this runner's restored DLL when
-      # it exists; otherwise invalidate only that package so the normal release
+      # another runner. Cache presence is not runtime provenance; let the source
+      # build receipt select the exact library. When empty, invalidate only that
+      # package so the normal release
       # build repopulates the exact locked PDFium runtime. This job no longer
       # restores a target cache, so it takes the invalidate branch on an empty
       # target dir (a few seconds); it stays as a guard if a cache returns.
@@ -1335,8 +1336,7 @@ jobs:
           $pdfiumDll = Get-ChildItem -Path $pdfiumCache -Filter "pdfium.dll" `
               -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($pdfiumDll) {
-            Write-Host "PDFium runtime cache is complete: $($pdfiumDll.FullName)"
-            "PDFIUM_LIB_PATH=$($pdfiumDll.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "PDFium cache contains runtime libraries; the source build receipt selects the exact library."
             exit 0
           }
 

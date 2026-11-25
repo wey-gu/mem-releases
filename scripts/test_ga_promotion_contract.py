@@ -1857,3 +1857,13 @@ class SourcePinnedRustSelectionTest(unittest.TestCase):
         self.assertIn("source-toolchain.sh\" select", steps[0]["run"])
         self.assertEqual(steps[1]["with"]["toolchain"], "${{ steps.source.outputs.channel }}")
         self.assertIn("source-toolchain.sh\" verify", steps[2]["run"])
+
+
+class PdfiumCacheAuthorityTest(unittest.TestCase):
+    def test_cache_scan_cannot_override_the_compiled_pdfium_receipt(self):
+        workflow = load_release_desktop()
+        repair = next(step for step in workflow["jobs"]["build-windows"]["steps"]
+                      if step.get("name") == "Resolve or repair the PDFium runtime cache")
+        self.assertIn("cargo clean -p liteparse-pdfium-sys", repair["run"])
+        self.assertNotIn("PDFIUM_LIB_PATH=", repair["run"],
+                         "A cache scan cannot certify the library used by this source build")
