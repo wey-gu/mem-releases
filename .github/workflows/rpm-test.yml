@@ -31,7 +31,7 @@ permissions:
   contents: read
 
 env:
-  RUSTUP_TOOLCHAIN: "1.99.1"
+  RUSTUP_TOOLCHAIN: "nightly-2026-11-25"
 
 jobs:
   build-linux-rpm:
@@ -60,7 +60,7 @@ jobs:
 
       - name: Install Rust
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.99.1
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly-2026-11-25
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - uses: Swatinem/rust-cache@v2

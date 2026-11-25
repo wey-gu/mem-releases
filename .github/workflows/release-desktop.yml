@@ -136,7 +136,7 @@ permissions:
   actions: write
 
 env:
-  RUSTUP_TOOLCHAIN: "1.99.1"
+  RUSTUP_TOOLCHAIN: "nightly-2026-11-25"
   NMEM_BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-nowledge
   GCP_BAZEL_CACHE_PROJECT_ID: ci-cd-503413
   GCP_BAZEL_CACHE_SERVICE_ACCOUNT: github-bazel-cache@ci-cd-503413.iam.gserviceaccount.com
@@ -257,6 +257,8 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          & rustup toolchain install nightly-2026-11-25 --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Rust nightly-2026-11-25 installation failed' }
           $root = Join-Path $env:RUNNER_TEMP 'native-runner-proof'
           New-Item -ItemType Directory -Force -Path (Join-Path $root 'src') | Out-Null
           @'
@@ -271,7 +273,7 @@ jobs:
           'fn main() { println!("windows-runner-native-proof:ok"); }' |
             Set-Content (Join-Path $root 'src\main.rs') -Encoding ascii
           $timer = [Diagnostics.Stopwatch]::StartNew()
-          & cargo +1.99.1 build --release --offline --manifest-path (Join-Path $root 'Cargo.toml') --target-dir (Join-Path $root 'target')
+          & cargo +nightly-2026-11-25 build --release --offline --manifest-path (Join-Path $root 'Cargo.toml') --target-dir (Join-Path $root 'target')
           if ($LASTEXITCODE -ne 0) { throw 'Native Rust/MSVC build failed' }
           $result = & (Join-Path $root 'target\release\windows-runner-native-proof.exe')
           if ($LASTEXITCODE -ne 0 -or $result -ne 'windows-runner-native-proof:ok') {
@@ -631,8 +633,9 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: nightly-2026-11-25
           targets: aarch64-apple-darwin
 
       # Defensive: on an arm64 macOS runner the rustup proxy ends up
@@ -643,7 +646,7 @@ jobs:
       - name: Pin default toolchain (workaround for arm64 rustup proxy)
         run: |
           set -euo pipefail
-          rustup default 1.99.1
+          rustup default nightly-2026-11-25
           rustup show
 
       - name: Initialize Rust path dependencies before cache restore
@@ -759,7 +762,7 @@ jobs:
       - name: Pin default toolchain + sanity check cargo
         run: |
           set -euo pipefail
-          rustup default 1.99.1
+          rustup default nightly-2026-11-25
           rustup show
           echo "::group::cargo resolution"
           which cargo
@@ -991,8 +994,9 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: nightly-2026-11-25
           targets: x86_64-apple-darwin
 
       - name: Initialize Rust path dependencies before cache restore
@@ -1239,9 +1243,9 @@ jobs:
           . (Join-Path $env:USERPROFILE 'ci-tools\Enter-BuildEnvironment.ps1')
           & python3 -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
           if ($LASTEXITCODE -ne 0) { throw 'Preinstalled Python 3.12 is required on this runner' }
-          & rustup which --toolchain 1.99.1 rustc | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Preinstalled Rust 1.99.1 is required on this runner' }
-          $env:RUSTUP_TOOLCHAIN = '1.99.1'
+          & rustup toolchain install nightly-2026-11-25 --profile minimal --component rustfmt --component clippy
+          if ($LASTEXITCODE -ne 0) { throw 'Rust nightly-2026-11-25 installation failed' }
+          $env:RUSTUP_TOOLCHAIN = 'nightly-2026-11-25'
           if ((Get-PSDrive C).Free -lt 40GB) { throw 'At least 40 GiB free is required before a Desktop build' }
           $env:CARGO_TARGET_DIR = Join-Path $env:USERPROFILE 'ci-cache\runner-target'
           $env:XDG_CACHE_HOME = Join-Path $env:USERPROFILE 'ci-cache\pdfium'
@@ -1287,9 +1291,10 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@stable
         if: runner.environment != 'self-hosted'
         with:
+          toolchain: nightly-2026-11-25
           targets: x86_64-pc-windows-msvc
 
       - &initialize_windows_path_dependencies
@@ -1696,7 +1701,9 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-11-25
 
       - name: Initialize Rust path dependencies before cache restore
         shell: bash
@@ -1944,8 +1951,9 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: nightly-2026-11-25
           targets: x86_64-pc-windows-msvc
 
       - *initialize_windows_path_dependencies
@@ -2210,7 +2218,9 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-11-25
 
       - name: Initialize Rust path dependencies before cache restore
         shell: bash

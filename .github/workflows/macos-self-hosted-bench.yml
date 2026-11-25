@@ -46,7 +46,7 @@ permissions:
   id-token: write
 
 env:
-  RUSTUP_TOOLCHAIN: "1.99.1"
+  RUSTUP_TOOLCHAIN: "nightly-2026-11-25"
   NMEM_BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-nowledge
   GCP_BAZEL_CACHE_PROJECT_ID: ci-cd-503413
   GCP_BAZEL_CACHE_SERVICE_ACCOUNT: github-bazel-cache@ci-cd-503413.iam.gserviceaccount.com
@@ -111,7 +111,7 @@ jobs:
             printf '%-8s ' "$t"; command -v "$t" || { echo "::error::$t not on PATH (see ~/actions-runner/.path)"; exit 1; }
           done
           python3 --version
-          rustup default 1.99.1
+          rustup default nightly-2026-11-25
           rustup target add "$TARGET"
           rustc --version
           df -h "$GITHUB_WORKSPACE" | tail -1
