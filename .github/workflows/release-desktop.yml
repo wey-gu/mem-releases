@@ -1415,11 +1415,24 @@ jobs:
       - name: Backport Windows PDFium runtime staging compatibility
         shell: pwsh
         run: |
+          # TEST-EXTRACT-PDFIUM-COMPAT-START
           $scriptPath = "nowledge-graph/scripts/build-rust-bundle.ps1"
           $scriptContent = Get-Content -Path $scriptPath -Raw
           $fixedMarker = '$resolvedCandidates = @((Join-Path $resolvedDir $PdfiumLib))'
           if ($scriptContent.Contains($fixedMarker)) {
             Write-Host "Windows PDFium runtime staging is already fixed in the source ref."
+            exit 0
+          }
+
+          $producerMarker = '$PdfiumSearch += $EmbeddedOutputDir'
+          if ($scriptContent.Contains($producerMarker)) {
+            $builder = Get-Content -LiteralPath "integrations/hawdb/build-embedded-server.py" -Raw
+            foreach ($required in @('def stage_pdfium_from_cargo(', '"--message-format=json-render-diagnostics"', 'stage_pdfium_from_cargo(messages, output_dir, target)')) {
+              if (-not $builder.Contains($required)) {
+                throw "Producer-owned PDFium staging requires the current Cargo message contract."
+              }
+            }
+            Write-Host "The source producer stages its selected PDFium runtime; no legacy backport is needed."
             exit 0
           }
 
@@ -1446,6 +1459,7 @@ jobs:
           $scriptContent = $scriptContent.Replace($oldBlock, $newBlock)
           Set-Content -Path $scriptPath -Value $scriptContent -NoNewline -Encoding utf8
           Write-Host "Applied Windows PDFium runtime staging compatibility backport."
+          # TEST-EXTRACT-PDFIUM-COMPAT-END
 
       # Diagnostics for the Windows sccache miss floor (nowledge-co/mem#7108,
       # W8). On 0.10.100-rc2, whose sources differ from rc1 in two crates,
