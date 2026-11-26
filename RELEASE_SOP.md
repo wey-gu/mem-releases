@@ -252,6 +252,23 @@ gh workflow run promote-rc-to-ga.yml -R wey-gu/mem-releases \
   -f push_latest=true
 ```
 
+### Recover authority preparation after the GA is already public
+
+Normally prepare the Desktop authority candidate while the six-artifact GA
+Release is still a draft, then publish the GA and the prepared authority
+candidate. If the GA was published first, keep its public downloads available
+and use the reviewed immutable tooling ref with `action=prepare` and
+`allow_published_ga=true`. This explicit recovery input applies only to
+preparation; it does not publish or accept the candidate.
+
+The normal draft-only default remains unchanged. Recovery requires the exact
+public non-prerelease GA version, exactly six package assets, matching R2 object sizes
+and retained Release SHA-256 identities, and the exact APT version. Named operator credentials,
+observed mode/revision/stable guards, operation UUIDs, six-platform native
+protocol readback and the final `complete` operation retain their existing
+requirements. Record the failed earlier preparation and reconcile its outcome
+before starting a new operation.
+
 ### Withdraw a Desktop version without blocking website downloads
 
 First withdraw the affected GitHub GA release to a draft, retain its artifacts,

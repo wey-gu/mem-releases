@@ -8,6 +8,11 @@ on:
         required: true
         type: choice
         options: [status, stop, recover, complete, prepare, publish]
+      allow_published_ga:
+        description: "Prepare an already public GA after interrupted authority setup; preserve the normal draft-only default"
+        required: false
+        type: boolean
+        default: false
       operator_name:
         description: "Named operator key in the production Secrets Store document"
         required: true
@@ -64,6 +69,7 @@ jobs:
     environment: release-publish
     env:
       ACTION: ${{ inputs.action }}
+      ALLOW_PUBLISHED_GA: ${{ inputs.allow_published_ga }}
       OPERATOR_NAME: ${{ inputs.operator_name }}
       EXPECTED_MODE: ${{ inputs.expected_mode }}
       EXPECTED_REVISION: ${{ inputs.expected_revision }}
@@ -99,6 +105,10 @@ jobs:
             echo "::error::operator_name is invalid."
             exit 1
           }
+          if [[ "$ALLOW_PUBLISHED_GA" == "true" && "$ACTION" != "prepare" ]]; then
+            echo "::error::allow_published_ga applies only to prepare."
+            exit 1
+          fi
           if [[ "$ACTION" == "status" ]]; then
             exit 0
           fi
@@ -178,9 +188,12 @@ jobs:
         run: |
           set -euo pipefail
           gh release view "v${GA}" --repo "$REPO" \
-            --json isDraft,isPrerelease,assets > /tmp/ga-release.json
-          jq -e '.isDraft == true and .isPrerelease == false and (.assets | length) == 6' \
-            /tmp/ga-release.json >/dev/null
+            --json tagName,isDraft,isPrerelease,assets > /tmp/ga-release.json
+          jq -e --arg ga "v${GA}" --argjson recovery "$ALLOW_PUBLISHED_GA" '
+            .tagName == $ga and .isPrerelease == false and
+            (.assets | type) == "array" and (.assets | length) == 6 and
+            (.isDraft == true or ($recovery == true and .isDraft == false))
+          ' /tmp/ga-release.json >/dev/null
           node scripts/build-desktop-update-manifest.mjs \
             --version "$GA" \
             --source-sha "$SOURCE_SHA" \
