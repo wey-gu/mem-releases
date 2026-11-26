@@ -444,6 +444,57 @@ class GAPromotionContractTest(unittest.TestCase):
             workflow,
         )
 
+    def test_prepare_release_visibility_requires_explicit_public_recovery(self):
+        section = job_section(workflow_text('desktop-update-control.yml'), 'operate')
+        shell = step_script(section, 'Build exact candidate manifest')
+        cases = [
+            ('draft-default', True, False, False, 6, 'v0.10.124', True),
+            ('public-default', False, False, False, 6, 'v0.10.124', False),
+            ('public-recovery', False, False, True, 6, 'v0.10.124', True),
+            ('draft-recovery', True, False, True, 6, 'v0.10.124', True),
+            ('prerelease', False, True, True, 6, 'v0.10.124', False),
+            ('missing-package', False, False, True, 5, 'v0.10.124', False),
+            ('extra-package', False, False, True, 7, 'v0.10.124', False),
+            ('wrong-version', False, False, True, 6, 'v0.10.123', False),
+            ('missing-visibility', None, False, True, 6, 'v0.10.124', False),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            gh = root / 'gh'
+            gh.write_text('#!/bin/sh\ncat "$FAKE_RELEASE"\n')
+            gh.chmod(0o755)
+            node = root / 'node'
+            node.write_text('#!/bin/sh\nprintf touched >> "$NODE_MARKER"\n')
+            node.chmod(0o755)
+            for name, draft, prerelease, recovery, count, tag, admitted in cases:
+                with self.subTest(name=name):
+                    release = root / 'release.json'
+                    release.write_text(json.dumps({'isDraft': draft, 'isPrerelease': prerelease,
+                                                   'tagName': tag, 'assets': [{}] * count}))
+                    marker = root / 'node-marker'
+                    marker.unlink(missing_ok=True)
+                    env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'],
+                               GA='0.10.124', REPO='wey-gu/mem-releases',
+                               ALLOW_PUBLISHED_GA=str(recovery).lower(), FAKE_RELEASE=str(release),
+                               NODE_MARKER=str(marker), SOURCE_SHA='a' * 40,
+                               RELEASE_NOTES='https://mem.nowledge.co/changelog',
+                               PUB_DATE='2026-11-26T00:00:00Z')
+                    result = subprocess.run(['bash', '-c', shell.replace('/tmp/ga-release.json',
+                                                                        str(root / 'selected.json'))],
+                                            env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, admitted, result.stderr)
+                    self.assertEqual(marker.exists(), admitted)
+
+    def test_public_ga_recovery_is_rejected_outside_prepare(self):
+        section = job_section(workflow_text('desktop-update-control.yml'), 'operate')
+        shell = step_script(section, 'Validate the explicit operation boundary')
+        env = dict(os.environ, ACTION='status', OPERATOR_NAME='hawkingrei', ALLOW_PUBLISHED_GA='true')
+        result = subprocess.run(['bash', '-c', shell], env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('allow_published_ga applies only to prepare', result.stdout)
+        env['ALLOW_PUBLISHED_GA'] = 'false'
+        self.assertEqual(subprocess.run(['bash', '-c', shell], env=env, capture_output=True).returncode, 0)
+
     def test_recover_accepts_stopped_authority_with_retained_candidate(self):
         workflow = (ROOT / '.github/workflows/desktop-update-control.yml').read_text()
         section = workflow.split('      - name: Read and validate exact pre-state\n', 1)[1]
