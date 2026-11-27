@@ -11,6 +11,8 @@ on:
       - scripts/test_prepare_docker_builder.py
       - scripts/prepare_docker_recipes.py
       - scripts/test_prepare_docker_recipes.py
+      - scripts/inspect_docker_builder.py
+      - scripts/test_inspect_docker_builder.py
   push:
     branches: [main]
     paths:
@@ -22,6 +24,8 @@ on:
       - scripts/test_prepare_docker_builder.py
       - scripts/prepare_docker_recipes.py
       - scripts/test_prepare_docker_recipes.py
+      - scripts/inspect_docker_builder.py
+      - scripts/test_inspect_docker_builder.py
   workflow_dispatch:
     inputs:
       source_sha:
@@ -48,13 +52,34 @@ jobs:
       - run: python3 -m pip install PyYAML==6.0.2
       - run: python3 -m unittest discover -s scripts -p test_prepare_docker_builder.py -v
       - run: python3 -m unittest scripts.test_prepare_docker_recipes -v
+      - run: python3 -m unittest scripts.test_inspect_docker_builder -v
       - name: Exercise hosted swap preparation
         run: python3 scripts/prepare_docker_builder.py --receipt "$RUNNER_TEMP/docker-builder-prepared.json"
+      - uses: docker/setup-buildx-action@v3
+        id: cpu_builder
+        with:
+          driver-opts: |
+            memory=12g
+            memory-swap=24g
+            cpu-period=100000
+            cpu-quota=200000
+      - name: Verify the actual hosted BuildKit limits
+        env:
+          BUILDER_NAME: ${{ steps.cpu_builder.outputs.name }}
+        run: python3 scripts/inspect_docker_builder.py --builder "$BUILDER_NAME" --receipt "$RUNNER_TEMP/cpu-buildkit-admitted.json"
+      - name: Exercise a build on the bounded builder
+        run: |
+          docker buildx build --progress plain --output type=cacheonly - <<'DOCKERFILE'
+          FROM busybox:1.37.0
+          RUN echo bounded-builder-smoke
+          DOCKERFILE
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: docker-builder-${{ matrix.runner }}
-          path: ${{ runner.temp }}/docker-builder-prepared.json
+          path: |
+            ${{ runner.temp }}/docker-builder-prepared.json
+            ${{ runner.temp }}/cpu-buildkit-admitted.json
           if-no-files-found: error
 
   source:
@@ -89,6 +114,11 @@ jobs:
             platform: linux/amd64
             recipe: Dockerfile.rust
             cache: amd64
+            driver_opts: |
+              memory=12g
+              memory-swap=24g
+              cpu-period=100000
+              cpu-quota=200000
           - runner: ubuntu-24.04-arm
             platform: linux/arm64
             recipe: Dockerfile.rust
@@ -126,6 +156,21 @@ jobs:
           python3 ../release-tools/scripts/prepare_docker_recipes.py --source-sha "$SOURCE_SHA" --serial-cpu-build --output "$RUNNER_TEMP/nmem-dockerfiles"
           sha256sum "$RUNNER_TEMP"/nmem-dockerfiles/* > "$RUNNER_TEMP/docker-recipe-digests.txt"
       - uses: docker/setup-buildx-action@v3
+        id: cpu_builder
+        with:
+          driver-opts: ${{ matrix.driver_opts || '' }}
+      - name: Verify bounded CPU BuildKit resources
+        if: matrix.cache == 'amd64'
+        env:
+          BUILDER_NAME: ${{ steps.cpu_builder.outputs.name }}
+        run: python3 release-tools/scripts/inspect_docker_builder.py --builder "$BUILDER_NAME" --receipt "$RUNNER_TEMP/cpu-buildkit-admitted.json"
+      - name: Retain CPU BuildKit admission before compilation
+        if: always() && matrix.cache == 'amd64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-buildkit-admitted-diagnostic-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cpu-buildkit-admitted.json
+          if-no-files-found: error
       - name: Compile the exact optimized recipe without image publication
         uses: docker/build-push-action@v6
         with:
