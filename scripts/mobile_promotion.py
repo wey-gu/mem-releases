@@ -72,6 +72,14 @@ def plain_log(value):
     return re.sub(r"\x1b\[[0-9;]*m", "", value)
 
 
+def verify_producer_ref(head_branch, rc_tag, tools_sha):
+    require(head_branch in {f"release-tools/{rc_tag}-r1", f"v{rc_tag}"},
+            "Expected an immutable same-RC mobile tooling ref")
+    if head_branch == f"v{rc_tag}":
+        require(api(f"repos/{REPOSITORY}/commits/{head_branch}")["sha"] == tools_sha,
+                "Original RC tooling tag differs from the producer SHA")
+
+
 def verify_build_only(run, jobs, logs, version, rc_tag, source_sha, tools_sha):
     validate_identity(version, rc_tag, source_sha, tools_sha)
     require(run.get("path") == ".github/workflows/release-mobile.yml"
@@ -79,9 +87,9 @@ def verify_build_only(run, jobs, logs, version, rc_tag, source_sha, tools_sha):
             and run.get("status") == "completed"
             and run.get("conclusion") == "success"
             and run.get("run_attempt") == 1
-            and run.get("head_sha") == tools_sha
-            and run.get("head_branch") == f"release-tools/{rc_tag}-r1",
+            and run.get("head_sha") == tools_sha,
             "Expected the original successful same-RC mobile producer")
+    verify_producer_ref(run.get("head_branch"), rc_tag, tools_sha)
     expected = {"ios": "iOS -> TestFlight", "android": "Android -> APK + AAB"}
     selected = {}
     for platform, name in expected.items():

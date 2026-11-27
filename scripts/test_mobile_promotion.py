@@ -7,7 +7,7 @@ import plistlib
 import stat
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import zipfile
 
 import mobile_promotion as mobile
@@ -50,6 +50,26 @@ class OriginalProducerTest(unittest.TestCase):
 
     def test_same_original_both_platforms_are_required(self):
         self.assertEqual(self.admit(), dict(ios=1, android=2))
+
+    def test_accepts_same_rc_tag_at_the_original_tooling_sha(self):
+        with patch.object(mobile, "api", return_value={"sha": TOOLS}) as api:
+            self.assertEqual(self.admit(run=self.run | dict(head_branch=f"v{RC}")),
+                             dict(ios=1, android=2))
+        api.assert_called_once_with(f"repos/{mobile.REPOSITORY}/commits/v{RC}")
+
+    def test_rc_tooling_tag_must_still_resolve_to_the_original_sha(self):
+        with patch.object(mobile, "api", return_value={"sha": "c" * 40}), \
+                self.assertRaisesRegex(RuntimeError, "RC tooling tag differs"):
+            self.admit(run=self.run | dict(head_branch=f"v{RC}"))
+        with patch.object(mobile, "api", side_effect=RuntimeError("tag lookup failed")), \
+                self.assertRaisesRegex(RuntimeError, "tag lookup failed"):
+            self.admit(run=self.run | dict(head_branch=f"v{RC}"))
+
+    def test_rejects_another_rc_or_mutable_tooling_branch(self):
+        for ref in [f"v{VERSION}-rc2", "main", f"release/{VERSION}",
+                    f"release-tools/{RC}-r2", f"refs/heads/v{RC}", None]:
+            with self.subTest(ref=ref), self.assertRaises(RuntimeError):
+                self.admit(run=self.run | dict(head_branch=ref))
 
     def test_rejects_another_or_retried_producer(self):
         for change in [dict(head_sha="c" * 40), dict(head_branch="main"),
